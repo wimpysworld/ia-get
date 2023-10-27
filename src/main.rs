@@ -41,10 +41,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|f| f.name)
         .collect();
 
+    // Get the base URL from the XML URL
+    let base_url = reqwest::Url::parse(xml_url)?;
+
     // 4. Download each file
     for url in file_urls {
+        let mut absolute_url = base_url.clone();
+
+        // If the URL is relative, join it with the base_url to make it absolute
+        match absolute_url.join(&url) {
+            Ok(joined_url) => absolute_url = joined_url,
+            Err(_) => {} // If it's an error, it might already be an absolute URL. Ignore.
+        }
+
         let filename = url.split('/').last().unwrap_or("unknown_file");
-        let content = reqwest::get(&url).await?.bytes().await?;
+        let content = reqwest::get(absolute_url.as_str()).await?.bytes().await?;
         std::fs::write(filename, content)?;
         println!("Downloaded: {}", filename);
     }
