@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let matches = App::new("Archive Downloader")
         .version("1.0")
-        .author("Your Name")
+        .author("Martin Wimpress")
         .about("Downloads XML and its referenced files from archive.org")
         .arg(Arg::with_name("URL")
              .help("URL of the XML file on archive.org")
