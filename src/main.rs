@@ -2,6 +2,8 @@ use reqwest;
 use serde::Deserialize;
 use serde_xml_rs::from_str;
 use clap::{App, Arg};
+use tokio::sync::Semaphore;
+use std::sync::Arc;
 
 #[derive(Deserialize, Debug)]
 struct XmlRoot {
@@ -44,20 +46,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get the base URL from the XML URL
     let base_url = reqwest::Url::parse(xml_url)?;
 
-    // 4. Download each file
-    for url in file_urls {
-        let mut absolute_url = base_url.clone();
+    let semaphore = Arc::new(Semaphore::new(4)); // Allow 4 permits at a time
 
-        // If the URL is relative, join it with the base_url to make it absolute
-        match absolute_url.join(&url) {
-            Ok(joined_url) => absolute_url = joined_url,
-            Err(_) => {} // If it's an error, it might already be an absolute URL. Ignore.
+    let downloads: Vec<_> = file_urls.iter().map(|url| {
+        let semaphore = Arc::clone(&semaphore);
+        let base_url = base_url.clone();
+        let url = url.clone();
+
+        tokio::spawn(async move {
+            use anyhow::Context;
+            let _permit = semaphore.acquire().await;
+
+            let mut absolute_url = base_url.clone();
+            match absolute_url.join(&url) {
+                Ok(joined_url) => absolute_url = joined_url,
+                Err(_) => {}
+            }
+
+            let filename = url.split('/').last().unwrap_or("unknown_file");
+            let content = reqwest::get(absolute_url.as_str()).await.context("Failed to download the URL")?.bytes().await.context("Failed to read bytes from the response")?;
+
+            std::fs::write(filename, content).context("Failed to write the file")?;
+            println!("Downloaded: {}", filename);
+
+            Result::<(), anyhow::Error>::Ok(())
+        })
+    }).collect();
+
+    // Wait for all downloads to complete
+    let results: Vec<_> = futures::future::join_all(downloads).await;
+
+    // Handle any errors that occurred during downloads
+    for result in results {
+        if let Err(e) = result {
+            eprintln!("Error encountered during download: {:?}", e);
         }
-
-        let filename = url.split('/').last().unwrap_or("unknown_file");
-        let content = reqwest::get(absolute_url.as_str()).await?.bytes().await?;
-        std::fs::write(filename, content)?;
-        println!("Downloaded: {}", filename);
     }
 
     Ok(())
