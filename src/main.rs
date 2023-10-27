@@ -10,8 +10,7 @@ struct XmlRoot {
 
 #[derive(Deserialize, Debug)]
 struct File {
-    #[serde(rename = "location")]
-    location: String,
+    name: String,
 }
 
 #[tokio::main]
@@ -39,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_urls: Vec<String> = parsed_xml
         .file
         .into_iter()
-        .map(|f| f.location)
+        .map(|f| f.name)
         .collect();
 
     // 4. Download each file
