@@ -1,7 +1,9 @@
-use reqwest;
+use futures::StreamExt;
+use reqwest::Client;
 use serde::Deserialize;
 use serde_xml_rs::from_str;
 use clap::{App, Arg};
+use std::io::Write;
 
 #[derive(Deserialize, Debug)]
 struct XmlRoot {
@@ -15,6 +17,7 @@ struct File {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::new();
     // Parse command line arguments
     let matches = App::new("Archive Downloader")
         .version("1.0")
@@ -55,8 +58,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let filename = url.split('/').last().unwrap_or("unknown_file");
-        let content = reqwest::get(absolute_url.as_str()).await?.bytes().await?;
-        std::fs::write(filename, content)?;
+        let mut response = client.get(absolute_url).send().await?;
+        let mut file = std::fs::File::create(filename)?;
+
+        while let Some(chunk) = response.chunk().await? {
+            file.write_all(&chunk)?;
+        }
+
         println!("Downloaded: {}", filename);
     }
 
