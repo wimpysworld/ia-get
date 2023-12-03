@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
     // Parse command line arguments
     let matches = App::new("Archive Downloader")
-        .version("1.0")
+        .version("0.1.0")
         .author("Martin Wimpress")
         .about("Downloads XML and its referenced files from archive.org")
         .arg(Arg::with_name("URL")
