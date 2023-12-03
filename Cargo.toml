@@ -10,6 +10,6 @@ futures = "0.3"
 reqwest = "0.11"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
-serde-xml-rs = "0.5"
+serde-xml-rs = "0.6.0"
 clap = "2.33"
 
