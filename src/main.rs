@@ -7,12 +7,38 @@ use std::io::Write;
 
 #[derive(Deserialize, Debug)]
 struct XmlRoot {
-    file: Vec<File>,
+    #[serde(rename = "file")]
+    files: Vec<File>,
 }
 
 #[derive(Deserialize, Debug)]
 struct File {
+    #[serde(rename = "name")]
     name: String,
+    #[serde(rename = "source")]
+    source: String,
+    #[serde(rename = "mtime")]
+    mtime: Option<u64>,
+    #[serde(rename = "size")]
+    size: Option<u64>,
+    #[serde(rename = "format")]
+    format: Option<String>,
+    #[serde(rename = "rotation")]
+    rotation: Option<u32>,
+    #[serde(rename = "md5")]
+    md5: Option<String>,
+    #[serde(rename = "crc32")]
+    crc32: Option<String>,
+    #[serde(rename = "sha1")]
+    sha1: Option<String>,
+    #[serde(rename = "btih")]
+    btih: Option<String>,
+    #[serde(rename = "summation")]
+    summation: Option<String>,
+    #[serde(rename = "original")]
+    original: Option<String>,
+    #[serde(rename = "old_version")]
+    old_version: Option<String>,
 }
 
 #[tokio::main]
@@ -39,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Extract file URLs
     let file_urls: Vec<String> = parsed_xml
-        .file
+        .files
         .into_iter()
         .map(|f| f.name)
         .collect();
