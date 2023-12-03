@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_xml_rs::from_str;
 use clap::{App, Arg};
 use std::io::Write;
+use std::path::Path;
 
 #[derive(Deserialize, Debug)]
 struct XmlRoot {
@@ -84,6 +85,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let filename = url.split('/').last().unwrap_or("unknown_file");
+
+        // Check if the file already exists
+        if Path::new(filename).exists() {
+            println!("File already exists: {}", filename);
+            continue;
+        }
+
         let mut response = client.get(absolute_url).send().await?;
         let mut file = std::fs::File::create(filename)?;
 
