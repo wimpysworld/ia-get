@@ -44,7 +44,7 @@
             rust-analyzer
             nixpkgs-fmt
             openssl
-            pkgconfig
+            pkg-config
           ];
         };
       });
