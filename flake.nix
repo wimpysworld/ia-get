@@ -45,7 +45,7 @@
             nixpkgs-fmt
             openssl
             pkg-config
-            top
+            unixtools.top
           ];
         };
       });
