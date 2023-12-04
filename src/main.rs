@@ -7,13 +7,13 @@ use std::io::Write;
 use std::path::Path;
 
 #[derive(Deserialize, Debug)]
-struct Files {
+struct XmlFiles {
     #[serde(rename = "file")]
-    files: Vec<File>,
+    files: Vec<XmlFile>,
 }
 
 #[derive(Deserialize, Debug)]
-struct File {
+struct XmlFile {
     #[serde(rename = "name")]
     name: String,
     #[serde(rename = "source")]
@@ -58,16 +58,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let xml_url = matches.value_of("URL").unwrap();
 
-    // 1. Download XML file
+    // Download XML file
     let response = reqwest::get(xml_url).await?.text().await?;
-
-    // 2. Parse XML
-    let files: Files = from_str(&response)?;
-
+    let files: XmlFiles = from_str(&response)?;
     // Get the base URL from the XML URL
     let base_url = reqwest::Url::parse(xml_url)?;
 
-    // Iterate over the files and print every field
+    // Iterate over the XML files struct and print every field
     for file in files.files {
         // Get the filename and strip the path
         let filename = file.name.split('/').last().unwrap_or("unknown_file");
