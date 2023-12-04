@@ -1,12 +1,14 @@
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use md5;
+use regex::Regex;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_xml_rs::from_str;
 use clap::{App, Arg};
 use std::fs;
 use std::io::{Seek, Write};
+use std::process;
 use std::path::Path;
 
 #[derive(Deserialize, Debug)]
@@ -66,6 +68,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_matches();
 
     let url = matches.value_of("URL").unwrap();
+
+    // Define the regular expression pattern for the expected format
+    let pattern = r"^https:\/\/archive\.org\/details\/[a-zA-Z0-9_-]+\/$";
+
+    // Create a regex object with the pattern
+    let regex = Regex::new(pattern).unwrap();
+
+    // Check if the url matches the expected format
+    if regex.is_match(url) {
+        println!("The URL is valid.");
+    } else {
+        println!("The URL is not valid, expected format: https://archive.org/details/identifier/");
+        process::exit(1); // Exit the program with a non-zero status code
+    }
+
     // Get the base URL from the XML URL
     let base_url = reqwest::Url::parse(url)?;
 
