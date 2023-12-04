@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_xml_rs::from_str;
 use clap::{App, Arg};
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 
@@ -116,6 +117,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if Path::new(&file.name).exists() {
             println!("File already exists: {}", file.name);
             continue;
+        }
+
+        // Check if the file name includes a path
+        if let Some(path) = std::path::Path::new(&file.name).parent() {
+            // Create the local directory if it doesn't exist
+            fs::create_dir_all(path)?;
+            println!("Created directory: {:?}", path);
         }
 
         // Download the file
