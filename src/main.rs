@@ -57,12 +57,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_matches();
 
     let xml_url = matches.value_of("URL").unwrap();
+    // Get the base URL from the XML URL
+    let base_url = reqwest::Url::parse(xml_url)?;
 
     // Download XML file
     let response = reqwest::get(xml_url).await?.text().await?;
     let files: XmlFiles = from_str(&response)?;
-    // Get the base URL from the XML URL
-    let base_url = reqwest::Url::parse(xml_url)?;
 
     // Iterate over the XML files struct and print every field
     for file in files.files {
