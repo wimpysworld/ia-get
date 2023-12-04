@@ -47,6 +47,15 @@ struct XmlFile {
     old_version: Option<bool>,
 }
 
+fn get_xml_url(original_url: &str) -> String {
+    let base_new_url = original_url.replacen("details", "download", 1);
+    if let Some(last_segment) = original_url.split('/').last() {
+        format!("{}/{}_files.xml", base_new_url, last_segment)
+    } else {
+        base_new_url
+    }
+}
+
 fn calculate_md5(file_path: &str) -> Result<String, std::io::Error> {
     let file_contents = fs::read(file_path)?;
     let hash = md5::compute(&file_contents);
@@ -83,11 +92,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         process::exit(1); // Exit the program with a non-zero status code
     }
 
+    let xml_url = get_xml_url(details_url);
+    println!("XML URL: {}", xml_url);
+
     // Get the base URL from the XML URL
-    let base_url = reqwest::Url::parse(url)?;
+    let base_url = reqwest::Url::parse(&xml_url)?;
 
     // Download XML file
-    let response = reqwest::get(url).await?.text().await?;
+    let response = reqwest::get(xml_url).await?.text().await?;
     let files: XmlFiles = from_str(&response)?;
 
     // Iterate over the XML files struct and print every field
