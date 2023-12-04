@@ -69,8 +69,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Iterate over the files and print every field
     for file in files.files {
+        // Get the filename and strip the path
+        let filename = file.name.split('/').last().unwrap_or("unknown_file");
+
         println!("------------------");
-        println!("Name: {}", file.name);
+        println!("Name: {}", filename);
         println!("Source: {}", file.source);
         if let Some(mtime) = file.mtime {
             println!("MTime: {}", mtime);
@@ -110,12 +113,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut absolute_url = base_url.clone();
 
         // If the URL is relative, join it with the base_url to make it absolute
-        match absolute_url.join(&file.name) {
+        match absolute_url.join(filename) {
             Ok(joined_url) => absolute_url = joined_url,
             Err(_) => {} // If it's an error, it might already be an absolute URL. Ignore.
         }
-
-        let filename = file.name.split('/').last().unwrap_or("unknown_file");
 
         // Check if the file already exists
         if Path::new(filename).exists() {
