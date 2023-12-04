@@ -66,11 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Iterate over the XML files struct and print every field
     for file in files.files {
-        // Get the filename and strip the path
-        let filename = file.name.split('/').last().unwrap_or("unknown_file");
-
         println!("------------------");
-        println!("Name: {}", filename);
+        println!("Name: {}", file.name);
         println!("Source: {}", file.source);
         if let Some(mtime) = file.mtime {
             println!("MTime: {}", mtime);
@@ -110,26 +107,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut absolute_url = base_url.clone();
 
         // If the URL is relative, join it with the base_url to make it absolute
-        match absolute_url.join(filename) {
+        match absolute_url.join(&file.name) {
             Ok(joined_url) => absolute_url = joined_url,
             Err(_) => {} // If it's an error, it might already be an absolute URL. Ignore.
         }
 
         // Check if the file already exists
-        if Path::new(filename).exists() {
-            println!("File already exists: {}", filename);
+        if Path::new(&file.name).exists() {
+            println!("File already exists: {}", file.name);
             continue;
         }
 
         // Download the file
         let mut response = client.get(absolute_url).send().await?;
-        let mut download = std::fs::File::create(filename)?;
+        let mut download = std::fs::File::create(&file.name)?;
 
         while let Some(chunk) = response.chunk().await? {
             download.write_all(&chunk)?;
         }
 
-        println!("Downloaded: {}", filename);
+        println!("Downloaded: {}", file.name);
     }
 
     Ok(())
