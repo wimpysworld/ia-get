@@ -2,6 +2,7 @@ use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use md5;
 use regex::Regex;
+use reqwest::header::{HeaderValue, HeaderMap};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_xml_rs::from_str;
@@ -195,12 +196,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Download the file
-        let mut response = client.get(absolute_url).send().await?;
         let mut download = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .open(&file.name)?;
+
+        // Check if file already exists and its size
+        let file_size = download.metadata()?.len();
+        if file_size > 0 {
+            // Set the starting position for resuming the download
+            download.seek(std::io::SeekFrom::Start(file_size))?;
+        }
+
+        // Download the file
+        let mut initial_request = client.get(absolute_url);
+        // Set the Range header to specify the starting offset
+        let range_header = format!("bytes={}-", file_size);
+        let mut headers = HeaderMap::new();
+        headers.insert(reqwest::header::RANGE, HeaderValue::from_str(&range_header)?);
+        initial_request = initial_request.headers(headers);
+
+        let mut response = initial_request.send().await?;
 
         // Get the content length from the response headers
         let content_length = response.content_length().unwrap_or(0);
@@ -210,14 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .template("[{elapsed_precise}] {bar:40.green/green} {bytes}/{total_bytes} ({eta})").expect("REASON")
                 .progress_chars("▓▒░"),
         );
-
-        // Check if file already exists and its size
-        let file_size = download.metadata()?.len();
-        if file_size > 0 {
-            // Set the starting position for resuming the download
-            download.seek(std::io::SeekFrom::Start(file_size))?;
-            pb.set_position(file_size);
-        }
+        pb.set_position(file_size);
 
         // Download the remaining chunks and update the progress bar
         let mut total_bytes: u64 = file_size;
