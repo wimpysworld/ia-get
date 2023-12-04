@@ -208,9 +208,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             download.seek(std::io::SeekFrom::Start(file_size))?;
         }
 
-        // Download the file
-        let mut initial_request = client.get(absolute_url);
         // Set the Range header to specify the starting offset
+        let mut initial_request = client.get(absolute_url);
         let range_header = format!("bytes={}-", file_size);
         let mut headers = HeaderMap::new();
         headers.insert(reqwest::header::RANGE, HeaderValue::from_str(&range_header)?);
