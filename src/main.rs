@@ -189,9 +189,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Check if the file name includes a path
         if let Some(path) = std::path::Path::new(&file.name).parent() {
-            // Create the local directory if it doesn't exist
-            fs::create_dir_all(path)?;
-            println!("Created directory: {:?}", path);
+            // Create the local directory if it doesn't exist and path has a file name
+            if path.file_name().is_some() && !path.exists() {
+                fs::create_dir_all(path)?;
+            }
         }
 
         // Download the file
