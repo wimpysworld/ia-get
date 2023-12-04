@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_xml_rs::from_str;
 use clap::{App, Arg};
 use std::fs;
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::Path;
 
 #[derive(Deserialize, Debug)]
@@ -144,7 +144,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Download the file
         let mut response = client.get(absolute_url).send().await?;
-        let mut download = std::fs::File::create(&file.name)?;
+        let mut download = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&file.name)?;
 
         // Get the content length from the response headers
         let content_length = response.content_length().unwrap_or(0);
@@ -155,8 +158,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .progress_chars("##-"),
         );
 
-        // Download the file in chunks and update the progress bar
-        let mut total_bytes: u64 = 0;
+        // Check if file already exists and its size
+        let file_size = download.metadata()?.len();
+        if file_size > 0 {
+            // Set the starting position for resuming the download
+            download.seek(std::io::SeekFrom::Start(file_size))?;
+            pb.set_position(file_size);
+        }
+
+        // Download the remaining chunks and update the progress bar
+        let mut total_bytes: u64 = file_size;
         while let Some(chunk) = response.chunk().await? {
             download.write_all(&chunk)?;
             total_bytes += chunk.len() as u64;
