@@ -39,7 +39,7 @@ struct File {
     #[serde(rename = "original")]
     original: Option<String>,
     #[serde(rename = "old_version")]
-    old_version: Option<String>,
+    old_version: Option<bool>,
 }
 
 #[tokio::main]
