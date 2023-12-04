@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = matches.value_of("URL").unwrap();
 
     // Define the regular expression pattern for the expected format
-    let pattern = r"^https:\/\/archive\.org\/details\/[a-zA-Z0-9_-]+\/$";
+    let pattern = r"^https:\/\/archive\.org\/details\/[a-zA-Z0-9_-]+$";
 
     // Create a regex object with the pattern
     let regex = Regex::new(pattern).unwrap();
