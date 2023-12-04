@@ -6,6 +6,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_xml_rs::from_str;
 use clap::{App, Arg};
+use std::error::Error;
 use std::fs;
 use std::io::{Seek, Write};
 use std::process;
@@ -47,6 +48,22 @@ struct XmlFile {
     old_version: Option<bool>,
 }
 
+async fn is_url_accessible(url: &str) -> Result<bool, Box<dyn Error>> {
+    let client = reqwest::Client::new();
+    let res = client.get(url).send().await;
+
+    match res {
+        Ok(response) => {
+            if response.status().is_success() {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        },
+        Err(_) => Ok(false),
+    }
+}
+
 fn get_xml_url(original_url: &str) -> String {
     let base_new_url = original_url.replacen("details", "download", 1);
     if let Some(last_segment) = original_url.split('/').last() {
@@ -86,14 +103,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check if the url matches the expected format
     if regex.is_match(details_url) {
-        println!("The URL is valid.");
+        match is_url_accessible(details_url).await {
+            Ok(accessible) => println!("URL is accessible: {}", details_url),
+            Err(e) => println!("Error occurred: {}", e),
+        }
     } else {
         println!("The URL is not valid, expected format: https://archive.org/details/identifier/");
         process::exit(1); // Exit the program with a non-zero status code
     }
 
     let xml_url = get_xml_url(details_url);
-    println!("XML URL: {}", xml_url);
+    match is_url_accessible(&xml_url).await {
+        Ok(accessible) => println!("URL is accessible: {}", xml_url),
+        Err(e) => println!("Error occurred: {}", e),
+    }
 
     // Get the base URL from the XML URL
     let base_url = reqwest::Url::parse(&xml_url)?;
