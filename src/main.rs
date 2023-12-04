@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              .index(1))
         .get_matches();
 
-    let url = matches.value_of("URL").unwrap();
+    let details_url = matches.value_of("URL").unwrap();
 
     // Define the regular expression pattern for the expected format
     let pattern = r"^https:\/\/archive\.org\/details\/[a-zA-Z0-9_-]+$";
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let regex = Regex::new(pattern).unwrap();
 
     // Check if the url matches the expected format
-    if regex.is_match(url) {
+    if regex.is_match(details_url) {
         println!("The URL is valid.");
     } else {
         println!("The URL is not valid, expected format: https://archive.org/details/identifier/");
