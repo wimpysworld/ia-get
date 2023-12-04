@@ -206,8 +206,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pb = ProgressBar::new(content_length);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})").expect("REASON")
-                .progress_chars("##-"),
+                .template("[{elapsed_precise}] {bar:40.green/green} {bytes}/{total_bytes} ({eta})").expect("REASON")
+                .progress_chars("▓▒░"),
         );
 
         // Check if file already exists and its size
