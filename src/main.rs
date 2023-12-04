@@ -220,7 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Get the content length from the response headers
         let content_length = response.content_length().unwrap_or(0);
-        let pb = ProgressBar::new(content_length);
+        let pb = ProgressBar::new(content_length + file_size);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("[{elapsed_precise}] {bar:40.green/green} {bytes}/{total_bytes} ({eta})").expect("REASON")
