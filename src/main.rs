@@ -109,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Old Version: {}", old_version);
         }
 
-        // 4. Download each file
+        // Create a clone of the base URL
         let mut absolute_url = base_url.clone();
 
         // If the URL is relative, join it with the base_url to make it absolute
@@ -124,6 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
+        // Download the file
         let mut response = client.get(absolute_url).send().await?;
         let mut download = std::fs::File::create(filename)?;
 
