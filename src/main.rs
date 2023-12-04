@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_xml_rs::from_str;
@@ -130,9 +131,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut response = client.get(absolute_url).send().await?;
         let mut download = std::fs::File::create(&file.name)?;
 
+        // Get the content length from the response headers
+        let content_length = response.content_length().unwrap_or(0);
+        let pb = ProgressBar::new(content_length);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})").expect("REASON")
+                .progress_chars("##-"),
+        );
+
+        // Download the file in chunks and update the progress bar
+        let mut total_bytes: u64 = 0;
         while let Some(chunk) = response.chunk().await? {
             download.write_all(&chunk)?;
+            total_bytes += chunk.len() as u64;
+            pb.set_position(total_bytes);
         }
+        pb.finish();
 
         println!("Downloaded: {}", file.name);
     }

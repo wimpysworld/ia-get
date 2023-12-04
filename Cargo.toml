@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 futures = "0.3"
+indicatif = "0.17"
 reqwest = "0.11"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
