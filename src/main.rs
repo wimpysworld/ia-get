@@ -1,5 +1,6 @@
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
+use md5;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_xml_rs::from_str;
@@ -42,6 +43,12 @@ struct XmlFile {
     original: Option<String>,
     #[serde(rename = "old_version")]
     old_version: Option<bool>,
+}
+
+fn calculate_md5(file_path: &str) -> Result<String, std::io::Error> {
+    let file_contents = fs::read(file_path)?;
+    let hash = md5::compute(&file_contents);
+    Ok(format!("{:x}", hash))
 }
 
 #[tokio::main]
@@ -116,8 +123,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Check if the file already exists
         if Path::new(&file.name).exists() {
-            println!("File already exists: {}", file.name);
-            continue;
+            // Calculate the MD5 hash of the local file
+            let local_md5 = calculate_md5(&file.name).expect("Failed to calculate MD5 hash");
+            if let Some(expected_md5) = file.md5 {
+                if local_md5 != expected_md5 {
+                    println!("File does not match expected hash");
+                } else {
+                    println!("File already exists");
+                    continue;
+                }
+            }
         }
 
         // Check if the file name includes a path
