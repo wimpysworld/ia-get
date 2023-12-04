@@ -218,12 +218,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pb.set_position(file_size);
         }
 
+        // Define the chunk size; 128KB
+        const CHUNK_SIZE: usize = 128 * 1024;
+
         // Download the remaining chunks and update the progress bar
         let mut total_bytes: u64 = file_size;
+        let mut buffer = vec![0; CHUNK_SIZE];
         while let Some(chunk) = response.chunk().await? {
-            download.write_all(&chunk)?;
-            total_bytes += chunk.len() as u64;
-            pb.set_position(total_bytes);
+            let mut offset = 0;
+            while offset < chunk.len() {
+                let remaining = chunk.len() - offset;
+                let bytes_to_copy = std::cmp::min(remaining, CHUNK_SIZE);
+                buffer[..bytes_to_copy].copy_from_slice(&chunk[offset..offset + bytes_to_copy]);
+                download.write_all(&buffer[..bytes_to_copy])?;
+                offset += bytes_to_copy;
+                total_bytes += bytes_to_copy as u64;
+                pb.set_position(total_bytes);
+            }
         }
         pb.finish();
 
