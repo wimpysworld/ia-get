@@ -86,5 +86,6 @@ jobs:
         with:
           files: |
             ia-get-*-${{ matrix.job.target }}.*
+            ia-get*.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
