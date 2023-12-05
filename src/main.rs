@@ -80,6 +80,9 @@ fn calculate_md5(file_path: &str) -> Result<String, std::io::Error> {
     Ok(format!("{:x}", hash))
 }
 
+// Define the regular expression pattern for the expected format as a static constant
+static PATTERN: &str = r"^https:\/\/archive\.org\/details\/[a-zA-Z0-9_-]+$";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
@@ -94,13 +97,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              .index(1))
         .get_matches();
 
-    let details_url = matches.value_of("URL").unwrap();
+    let details_url = matches.value_of("URL").ok_or("Missing URL argument")?;
 
-    // Define the regular expression pattern for the expected format
-    let pattern = r"^https:\/\/archive\.org\/details\/[a-zA-Z0-9_-]+$";
-
-    // Create a regex object with the pattern
-    let regex = Regex::new(pattern).unwrap();
+    // Create a regex object with the static pattern
+    let regex = Regex::new(PATTERN)?;
 
     println!("Archive.org URL: {}", details_url);
     if !regex.is_match(details_url) {
