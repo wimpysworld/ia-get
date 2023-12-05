@@ -19,6 +19,7 @@ struct XmlFiles {
     files: Vec<XmlFile>,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 struct XmlFile {
     #[serde(rename = "name")]
