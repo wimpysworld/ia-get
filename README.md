@@ -1,10 +1,19 @@
-# ia-get
+<h1 align="center">
+  <img src="assets/ia-get.png" width="256" height="256" alt="ia-get">
+  <br />
+  ia-get
+</h1>
 
-Download files from the Internet Archive.
+<p align="center"><b>File downloader for archive.org</b></p>
+<p align="center">
+<img alt="GitHub all releases" src="https://img.shields.io/github/downloads/wimpysworld/ia-get/total?logo=github&label=Downloads">
+</p>
+
+<p align="center">Made with 💝 by 🤖</p>
 
 ## Usage
 
-Simply pass the URL of an Archive.org details page you wish to download and `ia-get` will automatically get the XML metadata and download all the files to the current working directory.
+Simply pass the URL of an [archive.org](https://archive.org) details page you want to download and `ia-get` will automatically get the XML metadata and download all files to the current working directory.
 
 ```shell
 ia-get https://archive.org/details/<identifier>
@@ -31,12 +40,12 @@ I then used [Unfold.ai](https://unfoldai.io/) to refine and improve the code, al
 cargo build
 ```
 
-## Test
+### Tests
 
-Start a download:
+I used these commands to test `ia-get` during development.
 
 ```shell
-target/debug/ia-get https://archive.org/details/2020_01_06_fbn
-target/debug/ia-get https://archive.org/details/Neo-GeoPocketColorRomCollectionByGhostware
-target/debug/ia-get https://archive.org/details/deftributetozzap64
+ia-get https://archive.org/details/2020_01_06_fbn
+ia-get https://archive.org/details/Neo-GeoPocketColorRomCollectionByGhostware
+ia-get https://archive.org/details/deftributetozzap64
 ```
