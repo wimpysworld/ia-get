@@ -102,21 +102,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a regex object with the pattern
     let regex = Regex::new(pattern).unwrap();
 
-    // Check if the url matches the expected format
-    if regex.is_match(details_url) {
-        match is_url_accessible(details_url).await {
-            Ok(accessible) => println!("URL is accessible: {}", details_url),
-            Err(e) => println!("Error occurred: {}", e),
-        }
-    } else {
-        println!("The URL is not valid, expected format: https://archive.org/details/identifier/");
-        process::exit(1); // Exit the program with a non-zero status code
+    println!("Archive.org URL: {}", details_url);
+    if !regex.is_match(details_url) {
+        println!(" - Archive.org URL is not in the expected format");
+        println!("   Expected format: https://archive.org/details/<identifier>/");
+        process::exit(1);
     }
 
     let xml_url = get_xml_url(details_url);
+    println!("Archive.org XML: {}", xml_url);
+
+    match is_url_accessible(details_url).await {
+        Ok(_) => println!(" - Archive.org URL online: 🟢"),
+        Err(e) => {
+            println!(" - Archive.org URL online: 🔴");
+            panic!  ("   Exiting due to error: {}", e);
+        }
+    }
+
     match is_url_accessible(&xml_url).await {
-        Ok(accessible) => println!("URL is accessible: {}", xml_url),
-        Err(e) => println!("Error occurred: {}", e),
+        Ok(_) => println!(" - Archive.org XML online: 🟢"),
+        Err(e) => {
+            println!(" - Archive.org XML online: 🔴");
+            panic!  ("   Exiting due to error: {}", e);
+        }
     }
 
     // Get the base URL from the XML URL
@@ -126,45 +135,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let response = reqwest::get(xml_url).await?.text().await?;
     let files: XmlFiles = from_str(&response)?;
 
+    println!("\n");
     // Iterate over the XML files struct and print every field
     for file in files.files {
-        println!("------------------");
-        println!("Name: {}", file.name);
-        println!("Source: {}", file.source);
-        if let Some(mtime) = file.mtime {
-            println!("MTime: {}", mtime);
-        }
-        if let Some(size) = file.size {
-            println!("Size: {}", size);
-        }
-        if let Some(format) = file.format {
-            println!("Format: {}", format);
-        }
-        if let Some(rotation) = file.rotation {
-            println!("Rotation: {}", rotation);
-        }
-        if let Some(md5) = file.md5 {
-            println!("MD5: {}", md5);
-        }
-        if let Some(crc32) = file.crc32 {
-            println!("CRC32: {}", crc32);
-        }
-        if let Some(sha1) = file.sha1 {
-            println!("SHA1: {}", sha1);
-        }
-        if let Some(btih) = file.btih {
-            println!("BTIH: {}", btih);
-        }
-        if let Some(summation) = file.summation {
-            println!("Summation: {}", summation);
-        }
-        if let Some(original) = file.original {
-            println!("Original: {}", original);
-        }
-        if let Some(old_version) = file.old_version {
-            println!("Old Version: {}", old_version);
-        }
-
         // Create a clone of the base URL
         let mut absolute_url = base_url.clone();
 
@@ -177,15 +150,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Check if the file already exists
         if Path::new(&file.name).exists() {
             // Calculate the MD5 hash of the local file
-            let local_md5 = calculate_md5(&file.name).expect("Failed to calculate MD5 hash");
+            let local_md5 = calculate_md5(&file.name).expect(" - Failed to calculate MD5 hash");
             if let Some(expected_md5) = file.md5 {
                 if local_md5 != expected_md5 {
-                    println!("File does not match expected hash");
+                    println!("🔁 Resuming   : {}", file.name);
                 } else {
-                    println!("File already exists");
+                    println!("✅ Completed  : {}", file.name);
                     continue;
                 }
             }
+        } else {
+            println!("🔽 Downloading: {}", file.name);
         }
 
         // Check if the file name includes a path
@@ -222,7 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pb = ProgressBar::new(content_length + file_size);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.green/green} {bytes}/{total_bytes} ({eta})").expect("REASON")
+                .template("╰╼ {elapsed_precise}     {bar:40.green/green} {bytes}/{total_bytes} (ETA: {eta})").expect(" - Failed to set progress bar style")
                 .progress_chars("▓▒░"),
         );
         pb.set_position(file_size);
@@ -235,8 +210,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pb.set_position(total_bytes);
         }
         pb.finish();
-
-        println!("Downloaded: {}", file.name);
     }
 
     Ok(())
