@@ -29,12 +29,14 @@ So I co-authored `ia-get` to automate the download process.
 
 ### Features ✨
 
-🔽 Reliably download files from the Internet Archive
-🌳 Preserves the original directory structure
-🔄 Automatically resumes partial or failed downloads
-🔏 Hash checks to confirm file integrity
-🌱 Can be run multiple times to update existing downloads
-📦️ Available for **Linux** 🐧 **macOS** 🍏 and **Windows** 🪟
+<ul style="list-style-type:none; padding-left:0;">
+<li>🔽 Reliably download files from the Internet Archive</li>
+<li>🌳 Preserves the original directory structure</li>
+<li>🔄 Automatically resumes partial or failed downloads</li>
+<li>🔏 Hash checks to confirm file integrity</li>
+<li>🌱 Can be run multiple times to update existing downloads</li>
+<li>📦️ Available for <b>Linux</b> 🐧 <b>macOS</b> 🍏 and <b>Windows</b> 🪟</li>
+</ul>
 
 # A.I. Driven Development 🤖
 
@@ -43,6 +45,7 @@ When I started this project I had no experience 👶 with [Rust](https://www.rus
 The [initial version of the program](https://github.com/wimpysworld/ia-get/tree/5f2b356e7d841f2756780e2a101cf8be4041a7f6) was created using ChatGPT-4.
 I [discussed that process in Episode 16 of Linux Matters](https://linuxmatters.sh/16/).
 Since that initial MVP, I've used [Unfold.ai](https://unfoldai.io/) to add features and improve the code 🧑‍💻
+All commits since Oct 27, 2023 that were co-authored by AI have full details of the AI contribution in the commit message.
 I've picked up some Rust along way, and some refactoring came directly from my own brain 🧠
 
 ## Build 🏗️
