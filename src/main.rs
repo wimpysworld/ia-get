@@ -104,38 +104,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Archive.org URL: {}", details_url);
     if !regex.is_match(details_url) {
-        println!(" - Archive.org URL is not in the expected format");
-        println!("   Expected format: https://archive.org/details/<identifier>/");
+        println!("├╼ Archive.org URL is not in the expected format");
+        println!("╰╼ Expected format: https://archive.org/details/<identifier>/");
         process::exit(1);
+    }
+
+    match is_url_accessible(details_url).await {
+        Ok(_) => println!("╰╼ Archive.org URL online: 🟢"),
+        Err(e) => {
+            println!("├╼ Archive.org URL online: 🔴");
+            panic!  ("╰╼ Exiting due to error: {}", e);
+        }
     }
 
     let xml_url = get_xml_url(details_url);
     println!("Archive.org XML: {}", xml_url);
 
-    match is_url_accessible(details_url).await {
-        Ok(_) => println!(" - Archive.org URL online: 🟢"),
-        Err(e) => {
-            println!(" - Archive.org URL online: 🔴");
-            panic!  ("   Exiting due to error: {}", e);
-        }
-    }
-
     match is_url_accessible(&xml_url).await {
-        Ok(_) => println!(" - Archive.org XML online: 🟢"),
+        Ok(_) => println!("├╼ Archive.org XML online: 🟢"),
         Err(e) => {
-            println!(" - Archive.org XML online: 🔴");
-            panic!  ("   Exiting due to error: {}", e);
+            println!("├╼ Archive.org XML online: 🔴");
+            panic!  ("╰╼ Exiting due to error: {}", e);
         }
     }
 
+    println!("├╼ Parsing XML file        👀");
     // Get the base URL from the XML URL
     let base_url = reqwest::Url::parse(&xml_url)?;
 
     // Download XML file
     let response = reqwest::get(xml_url).await?.text().await?;
     let files: XmlFiles = from_str(&response)?;
+    println!("╰╼ Done                    👍️");
 
-    println!("\n");
     // Iterate over the XML files struct and print every field
     for file in files.files {
         // Create a clone of the base URL
@@ -146,21 +147,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(joined_url) => absolute_url = joined_url,
             Err(_) => {} // If it's an error, it might already be an absolute URL. Ignore.
         }
+        println!(" ");
+        println!("📦️ Filename     {}", file.name);
+        let mut download_action = "╰╼ Downloading  ";
+        let mut download_complete = "├╼ Downloading  ";
 
         // Check if the file already exists
         if Path::new(&file.name).exists() {
+            println!("├╼ Hash Check   🧮");
             // Calculate the MD5 hash of the local file
-            let local_md5 = calculate_md5(&file.name).expect(" - Failed to calculate MD5 hash");
-            if let Some(expected_md5) = file.md5 {
-                if local_md5 != expected_md5 {
-                    println!("🔁 Resuming   : {}", file.name);
-                } else {
-                    println!("✅ Completed  : {}", file.name);
-                    continue;
-                }
+            let mut local_md5 = calculate_md5(&file.name).expect("╰╼ Failed to calculate MD5 hash");
+            let expected_md5 = file.md5.as_ref().unwrap();
+            if &local_md5 != expected_md5 {
+                download_action = "╰╼ Resuming     ";
+                download_complete = "├╼ Resuming     ";
+            } else {
+                println!("╰╼ Completed:   ✅");
+                continue;
             }
-        } else {
-            println!("🔽 Downloading: {}", file.name);
         }
 
         // Check if the file name includes a path
@@ -197,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pb = ProgressBar::new(content_length + file_size);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("╰╼ {elapsed_precise}     {bar:40.green/green} {bytes}/{total_bytes} (ETA: {eta})").expect(" - Failed to set progress bar style")
+                .template(format!("{}{{elapsed_precise}}     {{bar:40.green/green}} {{bytes}}/{{total_bytes}} (ETA: {{eta}})", download_action).as_str()).expect("REASON")
                 .progress_chars("▓▒░"),
         );
         pb.set_position(file_size);
@@ -209,7 +213,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             total_bytes += chunk.len() as u64;
             pb.set_position(total_bytes);
         }
+
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(format!("{}{{elapsed_precise}}     {{bar:40.green/green}} {{total_bytes}}", download_complete).as_str()).expect("REASON")
+        );
         pb.finish();
+
+        println!("├╼ Hash Check   🧮");
+        // Calculate the MD5 hash of the local file
+        let mut local_md5 = calculate_md5(&file.name).expect("╰╼ Failed to calculate MD5 hash");
+        let expected_md5 = file.md5.as_ref().unwrap();
+        if &local_md5 != expected_md5 {
+            println!("╰╼ Failure:     ❌");
+        } else {
+            println!("╰╼ Success:     ✅");
+        }
     }
 
     Ok(())
