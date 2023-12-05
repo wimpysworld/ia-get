@@ -173,7 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Check if the file name includes a path
+        // Check if file.name includes a path
         if let Some(path) = std::path::Path::new(&file.name).parent() {
             // Create the local directory if it doesn't exist and path has a file name
             if path.file_name().is_some() && !path.exists() {
@@ -181,12 +181,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // Create a new file for writing
         let mut download = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .open(&file.name)?;
 
-        // Check if file already exists and its size
+        // Get the size of the local file if it already exists
         let file_size = download.metadata()?.len();
         if file_size > 0 {
             // Set the starting position for resuming the download
