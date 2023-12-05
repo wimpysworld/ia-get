@@ -163,7 +163,7 @@ Description: File downloader for archive.org
  working directory.
 EOF
 
-    fakeroot dpkg-deb -Zgz --build "$tempdir" "${dpkgname}_${version}_${architecture}.deb"
+    fakeroot dpkg-deb -Zgzip --build "$tempdir" "${dpkgname}_${version}_${architecture}.deb"
 }
 
 
