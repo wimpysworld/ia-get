@@ -210,7 +210,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .template(format!("{}{{elapsed_precise}}     {{bar:40.green/green}} {{bytes}}/{{total_bytes}} (ETA: {{eta}})", download_action).as_str()).expect("REASON")
                 .progress_chars("▓▒░"),
         );
-        pb.set_position(file_size);
 
         // Download the remaining chunks and update the progress bar
         let mut total_bytes: u64 = file_size;
