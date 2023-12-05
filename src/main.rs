@@ -86,13 +86,19 @@ static PATTERN: &str = r"^https:\/\/archive\.org\/details\/[a-zA-Z0-9_-]+$";
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
+
+    let name = env!("CARGO_PKG_NAME");
+    let version = env!("CARGO_PKG_VERSION");
+    let authors = env!("CARGO_PKG_AUTHORS");
+    let description = env!("CARGO_PKG_DESCRIPTION");
+
     // Parse command line arguments
-    let matches = App::new("Archive Downloader")
-        .version("0.1.0")
-        .author("Martin Wimpress")
-        .about("Downloads XML and its referenced files from archive.org")
+    let matches = App::new(name)
+        .version(version)
+        .author(authors)
+        .about(description)
         .arg(Arg::with_name("URL")
-             .help("URL of the XML file on archive.org")
+             .help("URL to an archive.org details page")
              .required(true)
              .index(1))
         .get_matches();

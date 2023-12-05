@@ -1,5 +1,7 @@
 [package]
 name = "ia-get"
+description = "File downloader for archive.org"
+authors = ["Martin Wimpress <code@wimpress.io>"]
 version = "0.1.0"
 edition = "2021"
 
