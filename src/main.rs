@@ -1,4 +1,3 @@
-use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use md5;
 use regex::Regex;
@@ -163,7 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if Path::new(&file.name).exists() {
             println!("├╼ Hash Check   🧮");
             // Calculate the MD5 hash of the local file
-            let mut local_md5 = calculate_md5(&file.name).expect("╰╼ Failed to calculate MD5 hash");
+            let local_md5 = calculate_md5(&file.name).expect("╰╼ Failed to calculate MD5 hash");
             let expected_md5 = file.md5.as_ref().unwrap();
             if &local_md5 != expected_md5 {
                 download_action = "╰╼ Resuming     ";
@@ -229,7 +228,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("├╼ Hash Check   🧮");
         // Calculate the MD5 hash of the local file
-        let mut local_md5 = calculate_md5(&file.name).expect("╰╼ Failed to calculate MD5 hash");
+        let local_md5 = calculate_md5(&file.name).expect("╰╼ Failed to calculate MD5 hash");
         let expected_md5 = file.md5.as_ref().unwrap();
         if &local_md5 != expected_md5 {
             println!("╰╼ Failure:     ❌");
