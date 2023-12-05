@@ -29,32 +29,47 @@ So I co-authored `ia-get` to automate the download process.
 
 ### Features ✨
 
-<ul style="list-style-type:none; padding-left:0;">
-<li>🔽 Reliably download files from the Internet Archive</li>
-<li>🌳 Preserves the original directory structure</li>
-<li>🔄 Automatically resumes partial or failed downloads</li>
-<li>🔏 Hash checks to confirm file integrity</li>
-<li>🌱 Can be run multiple times to update existing downloads</li>
-<li>📦️ Available for <b>Linux</b> 🐧 <b>macOS</b> 🍏 and <b>Windows</b> 🪟</li>
-</ul>
+- 🔽 Reliably download files from the Internet Archive
+- 🌳 Preserves the original directory structure
+- 🔄 Automatically resumes partial or failed downloads
+- 🔏 Hash checks to confirm file integrity
+- 🌱 Can be run multiple times to update existing downloads
+- 📦️ Available for **Linux** 🐧 **macOS** 🍏 and **Windows** 🪟
 
 # A.I. Driven Development 🤖
 
-This program is an experiment 🧪 and has been (*mostly*) written using AI.
+This program is an experiment 🧪 and has been (*mostly*) written using [Chatty Jeeps](https://fosstodon.org/deck/@popey@ubuntu.social/111527183064913954).
 When I started this project I had no experience 👶 with [Rust](https://www.rust-lang.org/) and was curious to see if I could use AI tools to assist in developing a program in a language I do not know.
+
 The [initial version of the program](https://github.com/wimpysworld/ia-get/tree/5f2b356e7d841f2756780e2a101cf8be4041a7f6) was created using ChatGPT-4.
-I [discussed that process in Episode 16 of Linux Matters](https://linuxmatters.sh/16/).
+I [discussed that process, and the successes and drawbacks, in Linux Matters EP16](https://linuxmatters.sh/16/).
+
+**As featured on [Linux Matters](https://linuxmatters.sh) podcast!** 🎙️ I am a presenter on Linux Matters and we discussed the initial version of the project in [Episode 16 - Blogging to the Fediverse](https://linuxmatters.sh/16/) including how ChatGPT-4 was used and the successes/challenges I encountered. We will be discussing the latest version of the project in a future episode.
+
+<div align="center">
+  <a href="https://linuxmatters.sh" target="_blank"><img src="https://raw.githubusercontent.com/wimpysworld/nix-config/main/.github/screenshots/linuxmatters.png" alt="Linux Matters Podcast"/></a>
+  <br />
+  <em>Linux Matters Podcast</em>
+</div>
+
 Since that initial MVP, I've used [Unfold.ai](https://unfoldai.io/) to add features and improve the code 🧑‍💻
 All commits since Oct 27, 2023 that were co-authored by AI have full details of the AI contribution in the commit message.
-I've picked up some Rust along way, and some refactoring came directly from my own brain 🧠
+I've picked up some Rust along the way and some refactoring came directly from my own brain 🧠
 
-## Build 🏗️
+# Demo 🧑‍💻
+
+<div align="center"><a href="https://asciinema.org/a/BO3vMD8rJawKhM1iZ3SZqVx0F?autoplay=1" target="_blank"><img src="https://asciinema.org/a/BO3vMD8rJawKhM1iZ3SZqVx0F.svg" /></a></div>
+
+
+# Development 🏗️
+
+Such as it is.
 
 ```shell
 cargo build
 ```
 
-### Tests 🤞
+## Tests 🤞
 
 I used these commands to test `ia-get` during development.
 
