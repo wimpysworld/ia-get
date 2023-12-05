@@ -43,9 +43,6 @@
             rustToolchain
             rust-analyzer
             nixpkgs-fmt
-            openssl
-            pkg-config
-            unixtools.top
           ];
         };
       });
