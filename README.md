@@ -38,7 +38,7 @@ So I co-authored `ia-get` to automate the download process.
 
 # A.I. Driven Development 🤖
 
-This program is an experiment 🧪 and has been (*mostly*) written using [Chatty Jeeps](https://fosstodon.org/deck/@popey@ubuntu.social/111527183064913954).
+This program is an experiment 🧪 and has been (*mostly*) written using [Chatty Jeeps](https://ubuntu.social/@popey/111527182881051626).
 When I started this project I had no experience 👶 with [Rust](https://www.rust-lang.org/) and was curious to see if I could use AI tools to assist in developing a program in a language I do not know.
 
 The [initial version of the program](https://github.com/wimpysworld/ia-get/tree/5f2b356e7d841f2756780e2a101cf8be4041a7f6) was created using ChatGPT-4.
