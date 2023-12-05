@@ -10,6 +10,13 @@ Simply pass the URL of an Archive.org details page you wish to download and `ia-
 ia-get https://archive.org/details/<identifier>
 ```
 
+### Features
+
+* Download files from the Internet Archive.
+* Preserves the original directory structure.
+* Resumes partial downloads.
+* Use hashes to prevent downloading the same file twice.
+
 # A.I. driven development
 
 This program is an experiment and has been (*mostly*) written using A.I 🤖🧠
@@ -21,7 +28,7 @@ I then used [Unfold.ai](https://unfoldai.io/) to refine and improve the code, al
 ## Build
 
 ```shell
-cargo Build
+cargo build
 ```
 
 ## Test
