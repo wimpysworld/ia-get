@@ -11,7 +11,7 @@
 
 <p align="center">Made with 💝 by 🤖</p>
 
-## Usage
+# Usage 📖
 
 Simply pass the URL of an [archive.org](https://archive.org) details page you want to download and `ia-get` will automatically get the XML metadata and download all files to the current working directory.
 
@@ -19,33 +19,43 @@ Simply pass the URL of an [archive.org](https://archive.org) details page you wa
 ia-get https://archive.org/details/<identifier>
 ```
 
-### Features
+## Why? 🤔💭
 
-* Download files from the Internet Archive.
-* Preserves the original directory structure.
-* Resumes partial downloads.
-* Use hashes to prevent downloading the same file twice.
+I wanted to download high-quality scans of [ZZap!64 magazine](https://en.wikipedia.org/wiki/Zzap!64) and some read-only memory from archive.org.
+Archives of this type often include many large files, torrents are not always provided and when they are available they do not index all the available files in the archive.
 
-# A.I. driven development
+Archive.org publishes XML documents for every page that indexes every file available.
+So I co-authored `ia-get` to automate the download process.
 
-This program is an experiment and has been (*mostly*) written using A.I 🤖🧠
-When I started this project I had no experience with Rust and was curious to see if I could use A.I tools to help write a program in a language I do not know.
+### Features ✨
+
+🔽 Reliably download files from the Internet Archive
+🌳 Preserves the original directory structure
+🔄 Automatically resumes partial or failed downloads
+🔏 Hash checks to confirm file integrity
+🌱 Can be run multiple times to update existing downloads
+📦️ Available for **Linux** 🐧 **macOS** 🍏 and **Windows** 🪟
+
+# A.I. Driven Development 🤖
+
+This program is an experiment 🧪 and has been (*mostly*) written using AI.
+When I started this project I had no experience 👶 with [Rust](https://www.rust-lang.org/) and was curious to see if I could use AI tools to assist in developing a program in a language I do not know.
 The [initial version of the program](https://github.com/wimpysworld/ia-get/tree/5f2b356e7d841f2756780e2a101cf8be4041a7f6) was created using ChatGPT-4.
 I [discussed that process in Episode 16 of Linux Matters](https://linuxmatters.sh/16/).
-I then used [Unfold.ai](https://unfoldai.io/) to refine and improve the code, along with some refactoring from my own brain based on the Rust I picked up along the way.
+Since that initial MVP, I've used [Unfold.ai](https://unfoldai.io/) to add features and improve the code 🧑‍💻
+I've picked up some Rust along way, and some refactoring came directly from my own brain 🧠
 
-## Build
+## Build 🏗️
 
 ```shell
 cargo build
 ```
 
-### Tests
+### Tests 🤞
 
 I used these commands to test `ia-get` during development.
 
 ```shell
-ia-get https://archive.org/details/2020_01_06_fbn
-ia-get https://archive.org/details/Neo-GeoPocketColorRomCollectionByGhostware
 ia-get https://archive.org/details/deftributetozzap64
+ia-get https://archive.org/details/zzapp_64_issue_001_600dpi
 ```
