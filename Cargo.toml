@@ -19,3 +19,7 @@ serde-xml-rs = "0.6.0"
 url = "2.5"
 clap = "3.2"
 
+[profile.release]
+strip = true  # Automatically strip symbols from the binary.
+opt-level = "z"  # Optimize for size.
+lto = true
