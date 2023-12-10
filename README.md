@@ -34,17 +34,22 @@ So I co-authored `ia-get` to automate the download process.
 - 🔄 Automatically resumes partial or failed downloads
 - 🔏 Hash checks to confirm file integrity
 - 🌱 Can be run multiple times to update existing downloads
+- 📊 Gets all the metadata for the archive
 - 📦️ Available for **Linux** 🐧 **macOS** 🍏 and **Windows** 🪟
+
+### Sharing is caring 🤝
+
+You can use `ia-get` to download files from archive.org, including all the metadata and the `.torrent` file, if there is one.
+You can the start seeding the torrent using a pristine copy of the archive, and a complete file set.
 
 # A.I. Driven Development 🤖
 
 This program is an experiment 🧪 and has been (*mostly*) written using [Chatty Jeeps](https://ubuntu.social/@popey/111527182881051626).
 When I started this project I had no experience 👶 with [Rust](https://www.rust-lang.org/) and was curious to see if I could use AI tools to assist in developing a program in a language I do not know.
 
-The [initial version of the program](https://github.com/wimpysworld/ia-get/tree/5f2b356e7d841f2756780e2a101cf8be4041a7f6) was created using ChatGPT-4.
-I [discussed that process, and the successes and drawbacks, in Linux Matters EP16](https://linuxmatters.sh/16/).
+**As featured on [Linux Matters](https://linuxmatters.sh) podcast!** 🎙️ I am a presenter on Linux Matters and we discussed how the [initial version of the program](https://github.com/wimpysworld/ia-get/tree/5f2b356e7d841f2756780e2a101cf8be4041a7f6) was created using Chatty Jeeps (ChatGPT-4) in [Episode 16 - Blogging to the Fediverse](https://linuxmatters.sh/16/).
 
-**As featured on [Linux Matters](https://linuxmatters.sh) podcast!** 🎙️ I am a presenter on Linux Matters and we discussed the initial version of the project in [Episode 16 - Blogging to the Fediverse](https://linuxmatters.sh/16/) including how ChatGPT-4 was used and the successes/challenges I encountered. We will be discussing the latest version of the project in a future episode.
+I discussed that process, and the successes and drawbacks. We will be discussing the latest version of the project in a future episode.
 
 <div align="center">
   <a href="https://linuxmatters.sh" target="_blank"><img src="https://raw.githubusercontent.com/wimpysworld/nix-config/main/.github/screenshots/linuxmatters.png" alt="Linux Matters Podcast"/></a>
