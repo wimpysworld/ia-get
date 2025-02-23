@@ -81,7 +81,7 @@ fn calculate_md5(file_path: &str) -> Result<String, std::io::Error> {
 }
 
 // Define the regular expression pattern for the expected format as a static constant
-static PATTERN: &str = r"^https:\/\/archive\.org\/details\/[a-zA-Z0-9_-]+$";
+static PATTERN: &str = r"^https://archive\.org/details/[a-zA-Z0-9_\-.@]+$";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
