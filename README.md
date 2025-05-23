@@ -74,7 +74,17 @@ Such as it is.
 cargo build
 ```
 
-## Tests 🤞
+## Unit Tests 🧪
+
+You can run the built-in unit tests with:
+
+```shell
+cargo test
+```
+
+This will run tests that verify URL pattern validation and other core functionality.
+
+## Manual Tests 🤞
 
 I used these commands to test `ia-get` during development.
 
