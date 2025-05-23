@@ -46,7 +46,21 @@
             rustToolchain
             rust-analyzer
             nixpkgs-fmt
+            git
+            gh
+            nodejs
+            cargo-watch
+            cargo-edit
+            clippy 
+            rustfmt
           ];
+
+          # Environment variables that help with development
+          shellHook = ''
+            echo "🦀 Rust development environment loaded"
+            echo "📝 rust-analyzer tools available"
+            export RUST_BACKTRACE=1
+          '';
         };
       });
 
