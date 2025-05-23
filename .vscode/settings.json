@@ -1,0 +1,10 @@
+{
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.cargo.features": "all",
+  "github.copilot.enable": {
+    "*": true,
+    "rust": true,
+    "toml": true,
+    "markdown": true
+  }
+}
