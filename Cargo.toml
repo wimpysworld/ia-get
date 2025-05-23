@@ -21,7 +21,7 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde-xml-rs = "0.6.0"
 url = "2.5"
-clap = "3.2"
+clap = { version = "4.0", features = ["derive"] }
 
 [profile.release]
 strip = true  # Automatically strip symbols from the binary.
