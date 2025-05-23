@@ -101,7 +101,7 @@ fn get_xml_url(original_url: &str) -> String {
 fn calculate_md5(file_path: &str) -> Result<String, std::io::Error> {
     let file = File::open(file_path)?;
     let file_size = file.metadata()?.len();
-    let is_large_file = file_size > 100 * 1024 * 1024; // 100 MB threshold
+    let is_large_file = file_size > 16 * 1024 * 1024; // 16 MB threshold
     
     let mut reader = BufReader::with_capacity(8192, file);
     let mut context = md5::Context::new();
