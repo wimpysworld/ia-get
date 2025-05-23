@@ -6,7 +6,6 @@
 //! with support for resumable downloads and MD5 hash verification.
 
 use indicatif::{ProgressBar, ProgressStyle};
-use md5;
 use regex::Regex;
 use reqwest::header::{HeaderValue, HeaderMap};
 use reqwest::Client;
@@ -14,10 +13,11 @@ use serde::Deserialize;
 use serde_xml_rs::from_str;
 use clap::Parser;
 use std::error::Error;
-use std::fs;
-use std::io::{Seek, Write};
+use std::fs::{self, File};
+use std::io::{BufReader, Read, Seek, Write};
 use std::process;
 use std::path::Path;
+use md5;
 
 /// Root structure for parsing the XML files list from archive.org
 /// The actual XML structure has a `files` root element containing multiple `file` elements
@@ -88,8 +88,9 @@ fn get_xml_url(original_url: &str) -> String {
 
 /// Calculates the MD5 hash of a file
 /// 
-/// Reads the entire file into memory and computes its MD5 hash for verification
-/// against the expected hash from the Internet Archive metadata.
+/// Uses a streaming approach to compute the MD5 hash by reading the file in chunks,
+/// which is memory-efficient for large files. This approach avoids loading the entire
+/// file into memory at once.
 /// 
 /// # Arguments
 /// * `file_path` - Path to the file to hash
@@ -98,8 +99,52 @@ fn get_xml_url(original_url: &str) -> String {
 /// * `Ok(String)` - The MD5 hash as a lowercase hexadecimal string
 /// * `Err(std::io::Error)` - If the file cannot be read
 fn calculate_md5(file_path: &str) -> Result<String, std::io::Error> {
-    let file_contents = fs::read(file_path)?;
-    let hash = md5::compute(&file_contents);
+    let file = File::open(file_path)?;
+    let file_size = file.metadata()?.len();
+    let is_large_file = file_size > 100 * 1024 * 1024; // 100 MB threshold
+    
+    let mut reader = BufReader::with_capacity(8192, file);
+    let mut context = md5::Context::new();
+    let mut buffer = [0; 8192]; // 8KB buffer size
+    
+    // Only show progress bar for large files to avoid UI clutter
+    let pb = if is_large_file {
+        let progress_bar = ProgressBar::new(file_size);
+        progress_bar.set_style(
+            ProgressStyle::default_bar()
+                .template("╰╼ Hashing      {elapsed_precise}     {bar:40.cyan/blue} {bytes}/{total_bytes}")
+                .expect("Failed to set progress bar style")
+                .progress_chars("▓▒░"),
+        );
+        Some(progress_bar)
+    } else {
+        None
+    };
+    
+    let mut bytes_processed: u64 = 0;
+    
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            // End of file reached
+            break;
+        }
+        
+        context.consume(&buffer[..bytes_read]);
+        
+        // Update progress if we're showing it
+        if let Some(ref progress_bar) = pb {
+            bytes_processed += bytes_read as u64;
+            progress_bar.set_position(bytes_processed);
+        }
+    }
+    
+    // Finalize progress bar if it exists
+    if let Some(progress_bar) = pb {
+        progress_bar.finish_and_clear();
+    }
+    
+    let hash = context.compute();
     Ok(format!("{:x}", hash))
 }
 
