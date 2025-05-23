@@ -23,6 +23,7 @@ serde-xml-rs = "0.8.0"
 thiserror = "1.0"
 url = "2.4.1"
 clap = { version = "4.0", features = ["derive"] }
+ctrlc = "3.4"
 
 [profile.release]
 strip = true  # Automatically strip symbols from the binary.
