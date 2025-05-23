@@ -20,42 +20,41 @@ use std::process;
 use std::path::Path;
 
 /// Root structure for parsing the XML files list from archive.org
+/// The actual XML structure has a `files` root element containing multiple `file` elements
 #[derive(Deserialize, Debug)]
 struct XmlFiles {
-    #[serde(rename = "file")]
+    #[serde(rename = "file", default)]
     files: Vec<XmlFile>,
 }
 
 /// Represents a single file entry from the archive.org XML metadata
+/// 
+/// Archive.org XML structure has both attributes and nested elements:
+/// ```xml
+/// <file name="..." source="...">
+///   <mtime>...</mtime>
+///   <size>...</size>
+///   <md5>...</md5>
+///   ...
+/// </file>
+/// ```
 #[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 struct XmlFile {
-    #[serde(rename = "name")]
+    #[serde(rename = "@name")]
     name: String,
-    #[serde(rename = "source")]
+    #[serde(rename = "@source")]
     source: String,
-    #[serde(rename = "mtime")]
     mtime: Option<u64>,
-    #[serde(rename = "size")]
     size: Option<u64>,
-    #[serde(rename = "format")]
     format: Option<String>,
-    #[serde(rename = "rotation")]
     rotation: Option<u32>,
-    #[serde(rename = "md5")]
     md5: Option<String>,
-    #[serde(rename = "crc32")]
     crc32: Option<String>,
-    #[serde(rename = "sha1")]
     sha1: Option<String>,
-    #[serde(rename = "btih")]
     btih: Option<String>,
-    #[serde(rename = "summation")]
     summation: Option<String>,
-    #[serde(rename = "original")]
     original: Option<String>,
-    #[serde(rename = "old_version")]
-    old_version: Option<bool>,
 }
 
 /// Checks if a URL is accessible by sending a HEAD request
@@ -80,7 +79,7 @@ async fn is_url_accessible(url: &str) -> Result<(), Box<dyn Error>> {
 /// The corresponding XML files list URL
 fn get_xml_url(original_url: &str) -> String {
     let base_new_url = original_url.replacen("details", "download", 1);
-    if let Some(last_segment) = original_url.split('/').last() {
+    if let Some(last_segment) = original_url.split('/').next_back() {
         format!("{}/{}_files.xml", base_new_url, last_segment)
     } else {
         base_new_url
@@ -168,7 +167,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Download XML file
     let response = client.get(xml_url).send().await?.text().await?;
-    let files: XmlFiles = from_str(&response)?;
+    
+    let files: XmlFiles = from_str(&response).map_err(|e| {
+        eprintln!("XML parsing error: {}", e);
+        eprintln!("XML content: {}", &response[..response.len().min(1000)]);
+        e
+    })?;
     println!("╰╼ Done                    👍️");
 
     // Iterate over the XML files struct and print every field
@@ -177,10 +181,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut absolute_url = base_url.clone();
 
         // If the URL is relative, join it with the base_url to make it absolute
-        match absolute_url.join(&file.name) {
-            Ok(joined_url) => absolute_url = joined_url,
-            Err(_) => {} // If it's an error, it might already be an absolute URL. Ignore.
+        if let Ok(joined_url) = absolute_url.join(&file.name) {
+            absolute_url = joined_url;
         }
+        // If it's an error, it might already be an absolute URL. Ignore.
+        
         println!(" ");
         println!("📦️ Filename     {}", file.name);
         let mut download_action = "╰╼ Downloading  ";
@@ -213,6 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut download = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&file.name)?;
 
         // Get the size of the local file if it already exists
@@ -257,11 +263,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("├╼ Hash Check   🧮");
         // Calculate the MD5 hash of the local file
         let local_md5 = calculate_md5(&file.name).expect("╰╼ Failed to calculate MD5 hash");
-        let expected_md5 = file.md5.as_ref().unwrap();
-        if &local_md5 != expected_md5 {
-            println!("╰╼ Failure:     ❌");
-        } else {
-            println!("╰╼ Success:     ✅");
+        
+        match &file.md5 {
+            Some(expected_md5) => {
+                if local_md5 != *expected_md5 {
+                    println!("╰╼ Failure:     ❌");
+                } else {
+                    println!("╰╼ Success:     ✅");
+                }
+            },
+            None => println!("╰╼ No MD5:      ⚠️"),
         }
     }
 
