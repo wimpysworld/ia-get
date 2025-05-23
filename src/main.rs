@@ -17,6 +17,8 @@ use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, Write};
 use std::process;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use md5;
 
 /// Root structure for parsing the XML files list from archive.org
@@ -109,11 +111,12 @@ fn get_xml_url(original_url: &str) -> String {
 /// 
 /// # Arguments
 /// * `file_path` - Path to the file to hash
+/// * `running` - Signal handler to check for interruption
 /// 
 /// # Returns
 /// * `Ok(String)` - The MD5 hash as a lowercase hexadecimal string
 /// * `Err(IaGetError)` - If the file cannot be read
-fn calculate_md5(file_path: &str) -> Result<String> {
+fn calculate_md5(file_path: &str, running: &Arc<AtomicBool>) -> Result<String> {
     let file = File::open(file_path)?;
     let file_size = file.metadata()?.len();
     let is_large_file = file_size > 16 * 1024 * 1024; // 16 MB threshold
@@ -143,6 +146,17 @@ fn calculate_md5(file_path: &str) -> Result<String> {
         if bytes_read == 0 {
             // End of file reached
             break;
+        }
+        
+        // Check for signal interruption during hash calculation
+        if !running.load(Ordering::SeqCst) {
+            if let Some(ref progress_bar) = pb {
+                progress_bar.finish_and_clear();
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Hash calculation interrupted by signal",
+            ).into());
         }
         
         context.consume(&buffer[..bytes_read]);
@@ -177,6 +191,22 @@ struct Cli {
     url: String,
 }
 
+/// Sets up signal handling for graceful shutdown on Ctrl+C
+/// 
+/// Returns an Arc<AtomicBool> that can be checked to see if the process
+/// should stop. When Ctrl+C is pressed, this will be set to false.
+fn setup_signal_handler() -> Arc<AtomicBool> {
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+        println!("\nReceived Ctrl+C, finishing current operation...");
+    }).expect("Error setting Ctrl+C handler");
+    
+    running
+}
+
 /// Main application entry point
 /// 
 /// Parses command line arguments, validates the archive.org URL, checks URL accessibility,
@@ -185,6 +215,9 @@ struct Cli {
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    
+    // Set up signal handling for graceful shutdown
+    let running = setup_signal_handler();
     
     let client = Client::builder()
         .user_agent("ia-get")
@@ -237,6 +270,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Iterate over the XML files struct and print every field
     for file in files.files {
+        // Check if we should stop due to signal
+        if !running.load(Ordering::SeqCst) {
+            println!("\nDownload interrupted. Run the command again to resume remaining files.");
+            break;
+        }
+
         // Create a clone of the base URL
         let mut absolute_url = base_url.clone();
 
@@ -255,7 +294,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         if Path::new(&file.name).exists() {
             println!("├╼ Hash Check   🧮");
             // Calculate the MD5 hash of the local file
-            let local_md5 = calculate_md5(&file.name).expect("╰╼ Failed to calculate MD5 hash");
+            let local_md5 = match calculate_md5(&file.name, &running) {
+                Ok(hash) => hash,
+                Err(e) => {
+                    // Check if this is an interruption by looking at the error message
+                    if e.to_string().contains("interrupted by signal") {
+                        println!("\nDownload interrupted. Run the command again to resume remaining files.");
+                        return Ok(());
+                    }
+                    return Err(e.into());
+                }
+            };
             let expected_md5 = file.md5.as_ref().unwrap();
             if &local_md5 != expected_md5 {
                 download_action = "╰╼ Resuming     ";
@@ -309,6 +358,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // Download the remaining chunks and update the progress bar
         let mut total_bytes: u64 = file_size;
         while let Some(chunk) = response.chunk().await? {
+            // Check for signal interruption during download
+            if !running.load(Ordering::SeqCst) {
+                pb.finish_and_clear();
+                println!("\nDownload interrupted during file transfer. Progress saved, resume with the same command.");
+                return Ok(());
+            }
+            
             download.write_all(&chunk)?;
             total_bytes += chunk.len() as u64;
             pb.set_position(total_bytes);
@@ -322,7 +378,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         println!("├╼ Hash Check   🧮");
         // Calculate the MD5 hash of the local file
-        let local_md5 = calculate_md5(&file.name).expect("╰╼ Failed to calculate MD5 hash");
+        let local_md5 = match calculate_md5(&file.name, &running) {
+            Ok(hash) => hash,
+            Err(e) => {
+                println!("╰╼ Failed to calculate MD5 hash: {}", e);
+                continue;
+            }
+        };
         
         match &file.md5 {
             Some(expected_md5) => {
