@@ -56,7 +56,7 @@ make_deb() {
     local maintainer
 
     homepage="https://github.com/wimpysworld/ia-get"
-    maintainer="Martin Wimoress <code@wimpress.io>"
+    maintainer="Martin Wimpress <code@wimpress.io>"
     copyright_years="2023 - "$(date "+%Y")
 
     case $TARGET in
