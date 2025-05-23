@@ -475,6 +475,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde-xml-rs",
+ "thiserror 1.0.50",
  "tokio",
  "url",
 ]

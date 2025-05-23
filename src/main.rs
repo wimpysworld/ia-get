@@ -5,6 +5,7 @@
 //! This tool takes an archive.org details URL and downloads all associated files,
 //! with support for resumable downloads and MD5 hash verification.
 
+use ia_get::{IaGetError, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use reqwest::header::{HeaderValue, HeaderMap};
@@ -12,7 +13,6 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_xml_rs::from_str;
 use clap::Parser;
-use std::error::Error;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, Write};
 use std::process;
@@ -58,12 +58,27 @@ struct XmlFile {
 }
 
 /// Checks if a URL is accessible by sending a HEAD request
-async fn is_url_accessible(url: &str) -> Result<(), Box<dyn Error>> {
+async fn is_url_accessible(url: &str) -> Result<()> {
     let client = reqwest::Client::builder()
         .user_agent("ia-get")
-        .build()?;
-    let response = client.head(url).send().await?;
-    response.error_for_status()?;
+        .build()
+        .map_err(|e| IaGetError::NetworkError(e))?;
+    
+    let response = client.head(url).send().await
+        .map_err(|e| {
+            if e.is_connect() {
+                IaGetError::UrlError(format!("Failed to connect to {}: {}", url, e))
+            } else {
+                IaGetError::NetworkError(e)
+            }
+        })?;
+    
+    response.error_for_status()
+        .map_err(|e| {
+            let status = e.status().unwrap_or_default();
+            IaGetError::UrlError(format!("URL returned error status {}: {}", status, url))
+        })?;
+    
     Ok(())
 }
 
@@ -97,8 +112,8 @@ fn get_xml_url(original_url: &str) -> String {
 /// 
 /// # Returns
 /// * `Ok(String)` - The MD5 hash as a lowercase hexadecimal string
-/// * `Err(std::io::Error)` - If the file cannot be read
-fn calculate_md5(file_path: &str) -> Result<String, std::io::Error> {
+/// * `Err(IaGetError)` - If the file cannot be read
+fn calculate_md5(file_path: &str) -> Result<String> {
     let file = File::open(file_path)?;
     let file_size = file.metadata()?.len();
     let is_large_file = file_size > 16 * 1024 * 1024; // 16 MB threshold
@@ -168,7 +183,7 @@ struct Cli {
 /// downloads XML metadata, and iterates through files to download them with resume capability
 /// and hash verification.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     
     let client = Client::builder()
@@ -182,7 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !regex.is_match(&cli.url) {
         println!("├╼ Archive.org URL is not in the expected format");
         println!("╰╼ Expected format: https://archive.org/details/<identifier>/");
-        process::exit(1);
+        return Err(IaGetError::UrlFormatError(format!("URL '{}' does not match expected format", cli.url)).into());
     }
 
     match is_url_accessible(&cli.url).await {
@@ -313,6 +328,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(expected_md5) => {
                 if local_md5 != *expected_md5 {
                     println!("╰╼ Failure:     ❌");
+                    // We don't return the error here since we want to continue with other files
+                    // But we could with: 
+                    // return Err(IaGetError::HashMismatchError(PathBuf::from(&file.name)).into());
                 } else {
                     println!("╰╼ Success:     ✅");
                 }
