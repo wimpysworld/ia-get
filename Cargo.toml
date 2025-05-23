@@ -1,7 +1,11 @@
 [package]
 name = "ia-get"
+categories = ["command-line-utilities"]
 description = "File downloader for archive.org"
+keywords = ["cli", "archive", "internet-archive", "download"]
 authors = ["Martin Wimpress <code@wimpress.io>"]
+repository = "https://github.com/wimpysworld/ia-get"
+readme = "README.md"
 version = "0.1.0"
 edition = "2021"
 
