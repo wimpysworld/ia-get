@@ -103,6 +103,36 @@ fn get_xml_url(original_url: &str) -> String {
     }
 }
 
+/// Create a progress bar with consistent styling
+/// 
+/// # Arguments
+/// * `total` - Total value for the progress bar
+/// * `action` - Action text to show at the beginning (e.g., "╰╼ Downloading  ")
+/// * `color` - Optional color style (defaults to "green/green")
+/// * `with_eta` - Whether to include ETA in the template
+/// 
+/// # Returns
+/// A configured progress bar
+fn create_progress_bar(total: u64, action: &str, color: Option<&str>, with_eta: bool) -> ProgressBar {
+    let pb = ProgressBar::new(total);
+    let color_str = color.unwrap_or("green/green");
+    
+    let template = if with_eta {
+        format!("{action}{{elapsed_precise}}     {{bar:40.{color_str}}} {{bytes}}/{{total_bytes}} (ETA: {{eta}})")
+    } else {
+        format!("{action}{{elapsed_precise}}     {{bar:40.{color_str}}} {{bytes}}/{{total_bytes}}")
+    };
+    
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(&template)
+            .expect("Failed to set progress bar style")
+            .progress_chars("▓▒░"),
+    );
+    
+    pb
+}
+
 /// Calculates the MD5 hash of a file
 /// 
 /// Uses a streaming approach to compute the MD5 hash by reading the file in chunks,
@@ -127,13 +157,7 @@ fn calculate_md5(file_path: &str, running: &Arc<AtomicBool>) -> Result<String> {
     
     // Only show progress bar for large files to avoid UI clutter
     let pb = if is_large_file {
-        let progress_bar = ProgressBar::new(file_size);
-        progress_bar.set_style(
-            ProgressStyle::default_bar()
-                .template("╰╼ Hashing      {elapsed_precise}     {bar:40.cyan/blue} {bytes}/{total_bytes}")
-                .expect("Failed to set progress bar style")
-                .progress_chars("▓▒░"),
-        );
+        let progress_bar = create_progress_bar(file_size, "╰╼ Hashing      ", Some("cyan/blue"), false);
         Some(progress_bar)
     } else {
         None
@@ -348,11 +372,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         // Get the content length from the response headers
         let content_length = response.content_length().unwrap_or(0);
-        let pb = ProgressBar::new(content_length + file_size);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template(format!("{}{{elapsed_precise}}     {{bar:40.green/green}} {{bytes}}/{{total_bytes}} (ETA: {{eta}})", download_action).as_str()).expect("REASON")
-                .progress_chars("▓▒░"),
+        let pb = create_progress_bar(
+            content_length + file_size,
+            download_action,
+            None, // Default to green/green
+            true  // Include ETA
         );
 
         // Download the remaining chunks and update the progress bar
@@ -370,9 +394,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             pb.set_position(total_bytes);
         }
 
+        // Update progress bar style for completion
         pb.set_style(
             ProgressStyle::default_bar()
-                .template(format!("{}{{elapsed_precise}}     {{bar:40.green/green}} {{total_bytes}}", download_complete).as_str()).expect("REASON")
+                .template(&format!("{}{{elapsed_precise}}     {{bar:40.green/green}} {{total_bytes}}", download_complete))
+                .expect("Failed to set progress bar style")
         );
         pb.finish();
 
