@@ -218,7 +218,6 @@ fn check_existing_file(file_path: &str, expected_md5: Option<&str>, running: &Ar
         return Ok(Some(true)); // No MD5 to check against, assume file is valid
     }
 
-    println!("├╼ Hash Check   🧮");
     // Calculate the MD5 hash of the local file
     let local_md5 = match calculate_md5(file_path, running) {
         Ok(hash) => hash,
@@ -294,8 +293,7 @@ async fn download_file_content(
     is_resuming: bool
 ) -> Result<u64> {
     let download_action = if is_resuming { "╰╼ Resuming     " } else { "╰╼ Downloading  " };
-    let download_complete = if is_resuming { "├╼ Resuming     " } else { "├╼ Downloading  " };
-
+    
     // Set the Range header to specify the starting offset
     let mut initial_request = client.get(url);
     let range_header = format!("bytes={}-", file_size);
@@ -318,8 +316,13 @@ async fn download_file_content(
         true  // Include ETA
     );
 
+    // Record start time to calculate transfer rate later
+    let start_time = std::time::Instant::now();
+
     // Download the remaining chunks and update the progress bar
     let mut total_bytes: u64 = file_size;
+    let mut downloaded_bytes: u64 = 0;
+    
     while let Some(chunk) = response.chunk().await? {
         // Check for signal interruption during download
         if !running.load(Ordering::SeqCst) {
@@ -331,19 +334,96 @@ async fn download_file_content(
         }
         
         file.write_all(&chunk)?;
+        downloaded_bytes += chunk.len() as u64;
         total_bytes += chunk.len() as u64;
         pb.set_position(total_bytes);
     }
 
-    // Update progress bar style for completion
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(&format!("{}{{elapsed_precise}}     {{bar:40.green/green}} {{total_bytes}}", download_complete))
-            .expect("Failed to set progress bar style")
-    );
-    pb.finish();
-
+    // Calculate elapsed time and transfer rate
+    let elapsed = start_time.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+    
+    // Calculate transfer rate (bytes per second)
+    let transfer_rate = if elapsed_secs > 0.0 {
+        downloaded_bytes as f64 / elapsed_secs
+    } else {
+        0.0 // Avoid division by zero
+    };
+    
+    // Format the transfer rate
+    let (rate, unit) = format_transfer_rate(transfer_rate);
+    
+    // Clear the progress bar and show completion details
+    pb.finish_and_clear();
+    
+    // Show completion message with size, time and speed
+    if is_resuming {
+        println!("├╼ Downloaded   ⤵️ {} in {} ({:.2} {}/s)", 
+            format_size(downloaded_bytes),
+            format_duration(elapsed),
+            rate,
+            unit);
+    } else {
+        println!("├╼ Downloaded   ⤵️ {} in {} ({:.2} {}/s)", 
+            format_size(downloaded_bytes),
+            format_duration(elapsed),
+            rate,
+            unit);
+    }
+    
     Ok(total_bytes)
+}
+
+/// Format a duration into a human-readable string
+fn format_duration(duration: std::time::Duration) -> String {
+    let total_secs = duration.as_secs();
+    if total_secs < 60 {
+        return format!("{}.{:02}s", total_secs, duration.subsec_millis() / 10);
+    }
+    
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    
+    if hours > 0 {
+        format!("{}h {}m {}s", hours, mins, secs)
+    } else {
+        format!("{}m {}s", mins, secs)
+    }
+}
+
+/// Format a size in bytes to a human-readable string
+fn format_size(size: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    
+    if size < KB {
+        format!("{}B", size)
+    } else if size < MB {
+        format!("{:.2}KB", size as f64 / KB as f64)
+    } else if size < GB {
+        format!("{:.2}MB", size as f64 / MB as f64)
+    } else {
+        format!("{:.2}GB", size as f64 / GB as f64)
+    }
+}
+
+/// Format transfer rate to appropriate units
+fn format_transfer_rate(bytes_per_sec: f64) -> (f64, &'static str) {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    
+    if bytes_per_sec < KB {
+        (bytes_per_sec, "B")
+    } else if bytes_per_sec < MB {
+        (bytes_per_sec / KB, "KB")
+    } else if bytes_per_sec < GB {
+        (bytes_per_sec / MB, "MB")
+    } else {
+        (bytes_per_sec / GB, "GB")
+    }
 }
 
 /// Verify a downloaded file's hash against an expected value
@@ -356,9 +436,7 @@ async fn download_file_content(
 /// # Returns
 /// * `Ok(bool)` - Whether the hash matches
 /// * `Err(IaGetError)` - If verification failed
-fn verify_downloaded_file(file_path: &str, expected_md5: Option<&str>, running: &Arc<AtomicBool>) -> Result<bool> {
-    println!("├╼ Hash Check   🧮");
-    
+fn verify_downloaded_file(file_path: &str, expected_md5: Option<&str>, running: &Arc<AtomicBool>) -> Result<bool> {   
     // Calculate the MD5 hash of the local file
     let local_md5 = match calculate_md5(file_path, running) {
         Ok(hash) => hash,
@@ -372,9 +450,9 @@ fn verify_downloaded_file(file_path: &str, expected_md5: Option<&str>, running: 
         Some(expected) => {
             let matches = local_md5 == expected;
             if !matches {
-                println!("╰╼ Failure:     ❌");
+                println!("╰╼ Hash         ❌");
             } else {
-                println!("╰╼ Success:     ✅");
+                println!("╰╼ Hash         ✅");
             }
             Ok(matches)
         },
