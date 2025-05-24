@@ -117,22 +117,7 @@ impl ArchiveUrl {
 }
 ```
 
-## 4. Use Constants for Configuration Values (Confidence: 6/10)
-
-Define constants for buffer sizes, thresholds, etc., for better maintainability:
-
-```rust
-/// Buffer size for file operations (8KB)
-const BUFFER_SIZE: usize = 8192;
-
-/// File size threshold for showing hash progress bar (16MB)
-const LARGE_FILE_THRESHOLD: u64 = 16 * 1024 * 1024;
-
-/// User agent string for HTTP requests
-const USER_AGENT: &str = "ia-get";
-```
-
-## 5. Implement a File Download Manager (Confidence: 8/10)
+## 4. Implement a File Download Manager (Confidence: 8/10)
 
 Create a struct to manage the download state and operations:
 
@@ -168,7 +153,7 @@ impl FileDownloader {
 }
 ```
 
-## 6. Improve Error Type with Structured Context (Confidence: 7/10)
+## 5. Improve Error Type with Structured Context (Confidence: 7/10)
 
 Enhance the error type to include structured context:
 
