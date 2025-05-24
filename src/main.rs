@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_xml_rs::from_str;
 use clap::Parser;
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Seek, Write};
+use std::io::{BufReader, Read, Write}; // Removed unused Seek import
 use std::process;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,15 +60,12 @@ struct XmlFile {
 }
 
 /// Checks if a URL is accessible by sending a HEAD request
-async fn is_url_accessible(url: &str) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .user_agent("ia-get")
-        .build()
-        .map_err(|e| IaGetError::NetworkError(e))?;
-    
-    let response = client.head(url).send().await
+async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
+    let response = client.head(url)
+        .timeout(std::time::Duration::from_secs(30)) // Add a reasonable timeout
+        .send().await
         .map_err(|e| {
-            if e.is_connect() {
+            if e.is_connect() || e.is_timeout() {
                 IaGetError::UrlError(format!("Failed to connect to {}: {}", url, e))
             } else {
                 IaGetError::NetworkError(e)
@@ -201,6 +198,242 @@ fn calculate_md5(file_path: &str, running: &Arc<AtomicBool>) -> Result<String> {
     Ok(format!("{:x}", hash))
 }
 
+/// Check if an existing file has the correct hash
+///
+/// # Arguments
+/// * `file_path` - Path to the file to check
+/// * `expected_md5` - Expected MD5 hash, if available
+/// * `running` - Signal handler to check for interruption
+///
+/// # Returns
+/// * `Ok(Some(bool))` - Whether the file exists and its hash matches or not
+/// * `Ok(None)` - If the file doesn't exist
+/// * `Err(IaGetError)` - If there was an error checking the file
+fn check_existing_file(file_path: &str, expected_md5: Option<&str>, running: &Arc<AtomicBool>) -> Result<Option<bool>> {
+    if !Path::new(file_path).exists() {
+        return Ok(None);
+    }
+
+    if expected_md5.is_none() {
+        return Ok(Some(true)); // No MD5 to check against, assume file is valid
+    }
+
+    println!("├╼ Hash Check   🧮");
+    // Calculate the MD5 hash of the local file
+    let local_md5 = match calculate_md5(file_path, running) {
+        Ok(hash) => hash,
+        Err(e) => {
+            // Check if this is an interruption by looking at the error message
+            if e.to_string().contains("interrupted by signal") {
+                return Err(e);
+            }
+            println!("╰╼ Failed to calculate MD5 hash: {}", e);
+            return Ok(Some(false));
+        }
+    };
+
+    Ok(Some(local_md5 == expected_md5.unwrap()))
+}
+
+/// Ensure parent directories exist for a file
+///
+/// # Arguments
+/// * `file_path` - Path to the file
+///
+/// # Returns
+/// * `Ok(())` - If directories were created or already exist
+/// * `Err(IaGetError)` - If directories couldn't be created
+fn ensure_parent_directories(file_path: &str) -> Result<()> {
+    // Check if file_name includes a path
+    if let Some(path) = Path::new(file_path).parent() {
+        // Create the local directory if it doesn't exist and path has a file name
+        if path.file_name().is_some() && !path.exists() {
+            fs::create_dir_all(path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Prepare a file for download, potentially resuming an existing download
+///
+/// # Arguments
+/// * `file_path` - Path to the file
+///
+/// # Returns
+/// * `Ok(File)` - Open file handle ready for writing
+/// * `Err(IaGetError)` - If the file couldn't be opened
+fn prepare_file_for_download(file_path: &str) -> Result<File> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(file_path)?;
+    
+    Ok(file)
+}
+
+/// Download file content with progress reporting
+///
+/// # Arguments
+/// * `client` - HTTP client
+/// * `url` - URL to download from
+/// * `file_size` - Current size of local file (for resuming)
+/// * `file` - Open file handle to write to
+/// * `running` - Signal handler to check for interruption
+/// * `is_resuming` - Whether this is a resumed download or fresh download
+///
+/// # Returns
+/// * `Ok(u64)` - Total bytes downloaded
+/// * `Err(IaGetError)` - If download failed
+async fn download_file_content(
+    client: &Client, 
+    url: &str, 
+    file_size: u64, 
+    file: &mut File,
+    running: &Arc<AtomicBool>,
+    is_resuming: bool
+) -> Result<u64> {
+    let download_action = if is_resuming { "╰╼ Resuming     " } else { "╰╼ Downloading  " };
+    let download_complete = if is_resuming { "├╼ Resuming     " } else { "├╼ Downloading  " };
+
+    // Set the Range header to specify the starting offset
+    let mut initial_request = client.get(url);
+    let range_header = format!("bytes={}-", file_size);
+    let mut headers = HeaderMap::new();
+    // Fixed: Handle the HeaderValue::from_str error explicitly
+    headers.insert(
+        reqwest::header::RANGE, 
+        HeaderValue::from_str(&range_header).map_err(|e| IaGetError::UrlError(format!("Invalid header value: {}", e)))?
+    );
+    initial_request = initial_request.headers(headers);
+
+    let mut response = initial_request.send().await?;
+
+    // Get the content length from the response headers
+    let content_length = response.content_length().unwrap_or(0);
+    let pb = create_progress_bar(
+        content_length + file_size,
+        download_action,
+        None, // Default to green/green
+        true  // Include ETA
+    );
+
+    // Download the remaining chunks and update the progress bar
+    let mut total_bytes: u64 = file_size;
+    while let Some(chunk) = response.chunk().await? {
+        // Check for signal interruption during download
+        if !running.load(Ordering::SeqCst) {
+            pb.finish_and_clear();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Download interrupted during file transfer",
+            ).into());
+        }
+        
+        file.write_all(&chunk)?;
+        total_bytes += chunk.len() as u64;
+        pb.set_position(total_bytes);
+    }
+
+    // Update progress bar style for completion
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(&format!("{}{{elapsed_precise}}     {{bar:40.green/green}} {{total_bytes}}", download_complete))
+            .expect("Failed to set progress bar style")
+    );
+    pb.finish();
+
+    Ok(total_bytes)
+}
+
+/// Verify a downloaded file's hash against an expected value
+///
+/// # Arguments
+/// * `file_path` - Path to the file
+/// * `expected_md5` - Expected MD5 hash, if available
+/// * `running` - Signal handler to check for interruption
+///
+/// # Returns
+/// * `Ok(bool)` - Whether the hash matches
+/// * `Err(IaGetError)` - If verification failed
+fn verify_downloaded_file(file_path: &str, expected_md5: Option<&str>, running: &Arc<AtomicBool>) -> Result<bool> {
+    println!("├╼ Hash Check   🧮");
+    
+    // Calculate the MD5 hash of the local file
+    let local_md5 = match calculate_md5(file_path, running) {
+        Ok(hash) => hash,
+        Err(e) => {
+            println!("╰╼ Failed to calculate MD5 hash: {}", e);
+            return Ok(false);
+        }
+    };
+    
+    match expected_md5 {
+        Some(expected) => {
+            let matches = local_md5 == expected;
+            if !matches {
+                println!("╰╼ Failure:     ❌");
+            } else {
+                println!("╰╼ Success:     ✅");
+            }
+            Ok(matches)
+        },
+        None => {
+            println!("╰╼ No MD5:      ⚠️");
+            Ok(true) // Consider it valid if no expected hash
+        },
+    }
+}
+
+/// Download a file from archive.org with resume capability
+///
+/// # Arguments
+/// * `client` - HTTP client
+/// * `url` - URL to download from
+/// * `file_path` - Path to save the file
+/// * `expected_md5` - Expected MD5 hash, if available
+/// * `running` - Signal handler to check for interruption
+///
+/// # Returns
+/// * `Ok(())` - If download was successful or file already exists with correct hash
+/// * `Err(IaGetError)` - If download failed
+async fn download_file(
+    client: &Client,
+    url: &str,
+    file_path: &str,
+    expected_md5: Option<&str>,
+    running: &Arc<AtomicBool>
+) -> Result<()> {
+    println!(" ");
+    println!("📦️ Filename     {}", file_path);
+    
+    // Check if the file exists and has correct hash
+    if let Some(is_valid) = check_existing_file(file_path, expected_md5, running)? {
+        if is_valid {
+            println!("╰╼ Completed:   ✅");
+            return Ok(());
+        }
+    }
+    
+    // Create directories if needed
+    ensure_parent_directories(file_path)?;
+    
+    // Open the file for writing/appending
+    let mut file = prepare_file_for_download(file_path)?;
+    
+    // Get the size of the local file if it already exists
+    let file_size = file.metadata()?.len();
+    let is_resuming = file_size > 0;
+    
+    // Download the file content
+    download_file_content(client, url, file_size, &mut file, running, is_resuming).await?;
+    
+    // Verify the downloaded file
+    verify_downloaded_file(file_path, expected_md5, running)?;
+    
+    Ok(())
+}
+
 /// Define the regular expression pattern for the expected format as a static constant
 static PATTERN: &str = r"^https://archive\.org/details/[a-zA-Z0-9_\-.@]+$";
 
@@ -243,8 +476,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Set up signal handling for graceful shutdown
     let running = setup_signal_handler();
     
+    // Create a single client instance for all requests
     let client = Client::builder()
         .user_agent("ia-get")
+        .timeout(std::time::Duration::from_secs(60)) // Default timeout for all requests
         .build()?;
 
     // Create a regex object with the static pattern
@@ -257,7 +492,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Err(IaGetError::UrlFormatError(format!("URL '{}' does not match expected format", cli.url)).into());
     }
 
-    match is_url_accessible(&cli.url).await {
+    // Update calls to is_url_accessible to use the existing client
+    match is_url_accessible(&cli.url, &client).await {
         Ok(()) => println!("╰╼ Archive.org URL online: 🟢"),
         Err(e) => {
             println!("├╼ Archive.org URL online: 🔴");
@@ -269,7 +505,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let xml_url = get_xml_url(&cli.url);
     println!("Archive.org XML: {}", xml_url);
 
-    match is_url_accessible(&xml_url).await {
+    // Update this call as well
+    match is_url_accessible(&xml_url, &client).await {
         Ok(()) => println!("├╼ Archive.org XML online: 🟢"),
         Err(e) => {
             println!("├╼ Archive.org XML online: 🔴");
@@ -307,124 +544,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         if let Ok(joined_url) = absolute_url.join(&file.name) {
             absolute_url = joined_url;
         }
-        // If it's an error, it might already be an absolute URL. Ignore.
-        
-        println!(" ");
-        println!("📦️ Filename     {}", file.name);
-        let mut download_action = "╰╼ Downloading  ";
-        let mut download_complete = "├╼ Downloading  ";
 
-        // Check if the file already exists
-        if Path::new(&file.name).exists() {
-            println!("├╼ Hash Check   🧮");
-            // Calculate the MD5 hash of the local file
-            let local_md5 = match calculate_md5(&file.name, &running) {
-                Ok(hash) => hash,
-                Err(e) => {
-                    // Check if this is an interruption by looking at the error message
-                    if e.to_string().contains("interrupted by signal") {
-                        println!("\nDownload interrupted. Run the command again to resume remaining files.");
-                        return Ok(());
-                    }
-                    return Err(e.into());
-                }
-            };
-            let expected_md5 = file.md5.as_ref().unwrap();
-            if &local_md5 != expected_md5 {
-                download_action = "╰╼ Resuming     ";
-                download_complete = "├╼ Resuming     ";
-            } else {
-                println!("╰╼ Completed:   ✅");
-                continue;
-            }
-        }
-
-        // Check if file.name includes a path
-        if let Some(path) = std::path::Path::new(&file.name).parent() {
-            // Create the local directory if it doesn't exist and path has a file name
-            if path.file_name().is_some() && !path.exists() {
-                fs::create_dir_all(path)?;
-            }
-        }
-
-        // Create a new file for writing
-        let mut download = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&file.name)?;
-
-        // Get the size of the local file if it already exists
-        let file_size = download.metadata()?.len();
-        if file_size > 0 {
-            // Set the starting position for resuming the download
-            download.seek(std::io::SeekFrom::Start(file_size))?;
-        }
-
-        // Set the Range header to specify the starting offset
-        let mut initial_request = client.get(absolute_url);
-        let range_header = format!("bytes={}-", file_size);
-        let mut headers = HeaderMap::new();
-        headers.insert(reqwest::header::RANGE, HeaderValue::from_str(&range_header)?);
-        initial_request = initial_request.headers(headers);
-
-        let mut response = initial_request.send().await?;
-
-        // Get the content length from the response headers
-        let content_length = response.content_length().unwrap_or(0);
-        let pb = create_progress_bar(
-            content_length + file_size,
-            download_action,
-            None, // Default to green/green
-            true  // Include ETA
-        );
-
-        // Download the remaining chunks and update the progress bar
-        let mut total_bytes: u64 = file_size;
-        while let Some(chunk) = response.chunk().await? {
-            // Check for signal interruption during download
-            if !running.load(Ordering::SeqCst) {
-                pb.finish_and_clear();
-                println!("\nDownload interrupted during file transfer. Progress saved, resume with the same command.");
-                return Ok(());
-            }
-            
-            download.write_all(&chunk)?;
-            total_bytes += chunk.len() as u64;
-            pb.set_position(total_bytes);
-        }
-
-        // Update progress bar style for completion
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template(&format!("{}{{elapsed_precise}}     {{bar:40.green/green}} {{total_bytes}}", download_complete))
-                .expect("Failed to set progress bar style")
-        );
-        pb.finish();
-
-        println!("├╼ Hash Check   🧮");
-        // Calculate the MD5 hash of the local file
-        let local_md5 = match calculate_md5(&file.name, &running) {
-            Ok(hash) => hash,
-            Err(e) => {
-                println!("╰╼ Failed to calculate MD5 hash: {}", e);
-                continue;
-            }
-        };
-        
-        match &file.md5 {
-            Some(expected_md5) => {
-                if local_md5 != *expected_md5 {
-                    println!("╰╼ Failure:     ❌");
-                    // We don't return the error here since we want to continue with other files
-                    // But we could with: 
-                    // return Err(IaGetError::HashMismatchError(PathBuf::from(&file.name)).into());
-                } else {
-                    println!("╰╼ Success:     ✅");
-                }
-            },
-            None => println!("╰╼ No MD5:      ⚠️"),
-        }
+        // Download the file
+        download_file(
+            &client, 
+            absolute_url.as_str(), 
+            &file.name, 
+            file.md5.as_deref(), 
+            &running
+        ).await?;
     }
 
     Ok(())
