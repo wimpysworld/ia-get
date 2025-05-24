@@ -130,6 +130,25 @@ fn create_progress_bar(total: u64, action: &str, color: Option<&str>, with_eta: 
     pb
 }
 
+/// Create a spinner with braille animation
+/// 
+/// # Arguments
+/// * `message` - Message to display next to the spinner
+/// 
+/// # Returns
+/// A configured spinner
+fn create_spinner(message: &str) -> ProgressBar {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+            .template(&format!("{{spinner}} {message}"))
+            .expect("Failed to set spinner style")
+    );
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+    spinner
+}
+
 /// Calculates the MD5 hash of a file
 /// 
 /// Uses a streaming approach to compute the MD5 hash by reading the file in chunks,
@@ -563,51 +582,84 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Create a regex object with the static pattern
     let regex = Regex::new(PATTERN)?;
 
-    println!("Archive.org URL: {}", cli.url);
+    // Start a single spinner for the entire initialization process
+    let spinner = create_spinner(&format!("Processing archive.org URL: {}", cli.url));
+    
+    // Validate URL format
     if !regex.is_match(&cli.url) {
+        spinner.finish_with_message(format!("❌ Invalid archive.org URL format: {}", cli.url));
         println!("├╼ Archive.org URL is not in the expected format");
         println!("╰╼ Expected format: https://archive.org/details/<identifier>/");
         return Err(IaGetError::UrlFormatError(format!("URL '{}' does not match expected format", cli.url)).into());
     }
 
-    // Update calls to is_url_accessible to use the existing client
-    match is_url_accessible(&cli.url, &client).await {
-        Ok(()) => println!("╰╼ Archive.org URL online: 🟢"),
-        Err(e) => {
-            println!("├╼ Archive.org URL online: 🔴");
-            eprintln!("╰╼ Exiting due to error: {}", e);
-            process::exit(1);
-        }
+    // Check URL accessibility
+    if let Err(e) = is_url_accessible(&cli.url, &client).await {
+        spinner.finish_with_message(format!("🔴 Archive.org URL not accessible: {}", cli.url));
+        eprintln!("╰╼ Exiting due to error: {}", e);
+        process::exit(1);
     }
 
+    // Derive XML URL
     let xml_url = get_xml_url(&cli.url);
-    println!("Archive.org XML: {}", xml_url);
+    spinner.set_message(format!("Accessing XML metadata: {}", xml_url));
 
-    // Update this call as well
-    match is_url_accessible(&xml_url, &client).await {
-        Ok(()) => println!("├╼ Archive.org XML online: 🟢"),
-        Err(e) => {
-            println!("├╼ Archive.org XML online: 🔴");
-            eprintln!("╰╼ Exiting due to error: {}", e);
-            process::exit(1);
-        }
+    // Check XML URL accessibility
+    if let Err(e) = is_url_accessible(&xml_url, &client).await {
+        spinner.finish_with_message(format!("🔴 XML metadata not accessible: {}", xml_url));
+        eprintln!("╰╼ Exiting due to error: {}", e);
+        process::exit(1);
     }
 
-    println!("├╼ Parsing XML file        👀");
+    // Parse XML metadata
+    spinner.set_message("Parsing archive metadata... 👀");
+    
     // Get the base URL from the XML URL
-    let base_url = reqwest::Url::parse(&xml_url)?;
+    let base_url = match reqwest::Url::parse(&xml_url) {
+        Ok(url) => url,
+        Err(e) => {
+            spinner.finish_with_message("Failed to parse XML URL ❌");
+            return Err(e.into());
+        }
+    };
 
     // Download XML file
-    let response = client.get(xml_url).send().await?.text().await?;
+    let response = match client.get(xml_url).send().await {
+        Ok(resp) => {
+            match resp.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    spinner.finish_with_message("Failed to read XML response ❌");
+                    return Err(e.into());
+                }
+            }
+        },
+        Err(e) => {
+            spinner.finish_with_message("Failed to fetch XML metadata ❌");
+            return Err(e.into());
+        }
+    };
     
-    let files: XmlFiles = from_str(&response).map_err(|e| {
-        eprintln!("XML parsing error: {}", e);
-        eprintln!("XML content: {}", &response[..response.len().min(1000)]);
-        e
-    })?;
-    println!("╰╼ Done                    👍️");
+    // Parse XML content
+    let files: XmlFiles = match from_str(&response) {
+        Ok(files) => files,
+        Err(e) => {
+            spinner.finish_with_message("Failed to parse XML content ❌");
+            eprintln!("XML parsing error: {}", e);
+            eprintln!("XML content: {}", &response[..response.len().min(1000)]);
+            return Err(e.into());
+        }
+    };
 
-    // Iterate over the XML files struct and print every field
+    // Successfully finished initialization - replace with green tick
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template(&format!("✅ Ready to download {} files from archive.org ✨", files.files.len()))
+            .expect("Failed to set completion style")
+    );
+    spinner.finish();
+
+    // Iterate over the XML files struct and download each file
     for file in files.files {
         // Check if we should stop due to signal
         if !running.load(Ordering::SeqCst) {
