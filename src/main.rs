@@ -21,6 +21,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use md5;
 
+/// Buffer size for file operations (8KB)
+const BUFFER_SIZE: usize = 8192;
+
+/// File size threshold for showing hash progress bar (16MB)
+const LARGE_FILE_THRESHOLD: u64 = 16 * 1024 * 1024;
+
+/// User agent string for HTTP requests
+const USER_AGENT: &str = "ia-get";
+
+/// Default timeout for HTTP requests in seconds
+const DEFAULT_HTTP_TIMEOUT: u64 = 60;
+
+/// Timeout for URL accessibility checks in seconds
+const URL_CHECK_TIMEOUT: u64 = 30;
+
+/// Spinner tick interval in milliseconds
+const SPINNER_TICK_INTERVAL: u64 = 100;
+
+/// Regex pattern for validating archive.org details URLs
+const PATTERN: &str = r"^https://archive\.org/details/[a-zA-Z0-9_\-.@]+$";
+
 /// Root structure for parsing the XML files list from archive.org
 /// The actual XML structure has a `files` root element containing multiple `file` elements
 #[derive(Deserialize, Debug)]
@@ -62,7 +83,7 @@ struct XmlFile {
 /// Checks if a URL is accessible by sending a HEAD request
 async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
     let response = client.head(url)
-        .timeout(std::time::Duration::from_secs(30)) // Add a reasonable timeout
+        .timeout(std::time::Duration::from_secs(URL_CHECK_TIMEOUT))
         .send().await
         .map_err(|e| {
             if e.is_connect() || e.is_timeout() {
@@ -145,7 +166,7 @@ fn create_spinner(message: &str) -> ProgressBar {
             .template(&format!("{{spinner}} {message}"))
             .expect("Failed to set spinner style")
     );
-    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+    spinner.enable_steady_tick(std::time::Duration::from_millis(SPINNER_TICK_INTERVAL));
     spinner
 }
 
@@ -165,11 +186,11 @@ fn create_spinner(message: &str) -> ProgressBar {
 fn calculate_md5(file_path: &str, running: &Arc<AtomicBool>) -> Result<String> {
     let file = File::open(file_path)?;
     let file_size = file.metadata()?.len();
-    let is_large_file = file_size > 16 * 1024 * 1024; // 16 MB threshold
+    let is_large_file = file_size > LARGE_FILE_THRESHOLD;
     
-    let mut reader = BufReader::with_capacity(8192, file);
+    let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
     let mut context = md5::Context::new();
-    let mut buffer = [0; 8192]; // 8KB buffer size
+    let mut buffer = [0; BUFFER_SIZE];
     
     // Only show progress bar for large files to avoid UI clutter
     let pb = if is_large_file {
@@ -376,19 +397,12 @@ async fn download_file_content(
     pb.finish_and_clear();
     
     // Show completion message with size, time and speed
-    if is_resuming {
-        println!("├╼ Downloaded   ⤵️ {} in {} ({:.2} {}/s)", 
-            format_size(downloaded_bytes),
-            format_duration(elapsed),
-            rate,
-            unit);
-    } else {
-        println!("├╼ Downloaded   ⤵️ {} in {} ({:.2} {}/s)", 
-            format_size(downloaded_bytes),
-            format_duration(elapsed),
-            rate,
-            unit);
-    }
+    println!("├╼ Downloaded   ⤵️ {} in {} ({:.2} {}/s)", 
+        format_size(downloaded_bytes),
+        format_duration(elapsed),
+        rate,
+        unit);
+
     
     Ok(total_bytes)
 }
@@ -531,9 +545,6 @@ async fn download_file(
     Ok(())
 }
 
-/// Define the regular expression pattern for the expected format as a static constant
-static PATTERN: &str = r"^https://archive\.org/details/[a-zA-Z0-9_\-.@]+$";
-
 /// Command-line interface for ia-get
 #[derive(Parser)]
 #[command(name = "ia-get")]
@@ -575,8 +586,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     
     // Create a single client instance for all requests
     let client = Client::builder()
-        .user_agent("ia-get")
-        .timeout(std::time::Duration::from_secs(60)) // Default timeout for all requests
+        .user_agent(USER_AGENT)
+        .timeout(std::time::Duration::from_secs(DEFAULT_HTTP_TIMEOUT))
         .build()?;
 
     // Create a regex object with the static pattern
