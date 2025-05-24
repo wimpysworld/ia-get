@@ -1,97 +1,4 @@
-## 1. Extract Download Logic into Separate Functions (Confidence: 9/10)
-
-The main function is quite long (~200 lines) and handles multiple concerns. Extracting the download logic will make the code more modular and testable.
-
-```rust
-/// Download a file from archive.org with resume capability
-async fn download_file(
-    client: &Client,
-    url: &reqwest::Url,
-    file_path: &str,
-    expected_md5: Option<&str>,
-    running: &Arc<AtomicBool>
-) -> Result<()> {
-    println!(" ");
-    println!("📦️ Filename     {}", file_path);
-    
-    // Check if the file exists and has correct hash
-    if let Some(valid) = check_existing_file(file_path, expected_md5, running)? {
-        if valid {
-            println!("╰╼ Completed:   ✅");
-            return Ok(());
-        }
-    }
-    
-    // Create directories if needed
-    ensure_parent_directories(file_path)?;
-    
-    // Perform the actual download with resume capability
-    let mut download = prepare_file_for_download(file_path)?;
-    let file_size = download.metadata()?.len();
-    
-    // Download and verify
-    let total_bytes = download_file_content(client, url, file_size, &mut download, running).await?;
-    verify_downloaded_file(file_path, expected_md5, running)?;
-    
-    Ok(())
-}
-```
-
-The main function would then become much cleaner:
-
-```rust
-#[tokio::main]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
-    let running = setup_signal_handler();
-    let client = setup_client()?;
-    
-    validate_archive_url(&cli.url)?;
-    let xml_url = get_xml_url(&cli.url);
-    let files = fetch_archive_metadata(&client, &xml_url).await?;
-    
-    for file in files.files {
-        if !running.load(Ordering::SeqCst) {
-            println!("\nDownload interrupted. Run the command again to resume remaining files.");
-            break;
-        }
-        
-        let mut absolute_url = make_absolute_url(&xml_url, &file.name)?;
-        download_file(&client, &absolute_url, &file.name, file.md5.as_deref(), &running).await?;
-    }
-    
-    Ok(())
-}
-```
-
-## 2. Create a Progress Bar Factory (Confidence: 8/10)
-
-The code creates several progress bars with similar styling. A factory function would centralize this logic:
-
-```rust
-/// Create a consistent progress bar with appropriate styling
-fn create_progress_bar(total: u64, action: &str) -> ProgressBar {
-    let pb = ProgressBar::new(total);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(&format!("{action}{{elapsed_precise}}     {{bar:40.cyan/blue}} {{bytes}}/{{total_bytes}} (ETA: {{eta}})"))
-            .expect("Failed to set progress bar style")
-            .progress_chars("▓▒░"),
-    );
-    pb
-}
-```
-
-Usage:
-```rust
-// For downloading
-let pb = create_progress_bar(content_length + file_size, "╰╼ Downloading  ");
-
-// For hashing
-let pb = create_progress_bar(file_size, "╰╼ Hashing      ");
-```
-
-## 3. Introduce Error Context and Consistent Error Handling (Confidence: 9/10)
+## 1. Introduce Error Context and Consistent Error Handling (Confidence: 9/10)
 
 The error handling is inconsistent. Consider using the context pattern from `anyhow`:
 
@@ -126,7 +33,7 @@ let response = client.get(xml_url).send().await
     .context("Failed to read XML response")?;
 ```
 
-## 4. Extract Hash Verification to a Separate Function (Confidence: 7/10)
+## 2. Extract Hash Verification to a Separate Function (Confidence: 7/10)
 
 The hash verification logic appears twice - once when checking existing files and once after downloading:
 
@@ -156,7 +63,7 @@ fn verify_file_hash(file_path: &str, expected_md5: Option<&str>, running: &Arc<A
 }
 ```
 
-## 5. Encapsulate URL Validation and Construction (Confidence: 7/10)
+## 3. Encapsulate URL Validation and Construction (Confidence: 7/10)
 
 The URL handling logic is scattered throughout the code and could be centralized:
 
@@ -210,7 +117,7 @@ impl ArchiveUrl {
 }
 ```
 
-## 6. Use Constants for Configuration Values (Confidence: 6/10)
+## 4. Use Constants for Configuration Values (Confidence: 6/10)
 
 Define constants for buffer sizes, thresholds, etc., for better maintainability:
 
@@ -225,7 +132,7 @@ const LARGE_FILE_THRESHOLD: u64 = 16 * 1024 * 1024;
 const USER_AGENT: &str = "ia-get";
 ```
 
-## 7. Implement a File Download Manager (Confidence: 8/10)
+## 5. Implement a File Download Manager (Confidence: 8/10)
 
 Create a struct to manage the download state and operations:
 
@@ -261,7 +168,7 @@ impl FileDownloader {
 }
 ```
 
-## 8. Improve Error Type with Structured Context (Confidence: 7/10)
+## 6. Improve Error Type with Structured Context (Confidence: 7/10)
 
 Enhance the error type to include structured context:
 
@@ -295,9 +202,7 @@ pub enum IaGetError {
 
 These refactoring opportunities focus on making the code more modular, consistent, and easier to maintain while preserving all existing functionality. The highest-impact changes are:
 
-1. Extracting download logic (9/10)
-2. Consistent error handling (9/10)
-3. Implementing a download manager (8/10)
-4. Creating a progress bar factory (8/10)
+1. Consistent error handling (9/10)
+2. Implementing a download manager (8/10)
 
 These changes would significantly improve code organization and maintainability without changing the user-facing behavior.
