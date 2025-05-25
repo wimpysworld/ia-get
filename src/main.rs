@@ -13,6 +13,7 @@ use ia_get::archive_metadata::{XmlFiles, parse_xml_files};
 use indicatif::ProgressStyle;
 use reqwest::Client;
 use clap::Parser;
+use colored::*; // Add this line
 
 /// Checks if a URL is accessible by sending a HEAD request
 async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
@@ -41,7 +42,7 @@ fn get_xml_url(original_url: &str) -> String {
     // The identifier is the last segment of the trimmed URL
     // This expect is considered safe because get_xml_url is only called after
     // validate_archive_url has confirmed the URL structure.
-    let identifier = trimmed_url.split('/').last()
+    let identifier = trimmed_url.rsplit('/').next() // Changed from split().last() to address clippy warning
         .expect("Validated URL should have a valid identifier segment after validation");
 
     // The base URL for download is "https://archive.org/download/{identifier}"
@@ -64,22 +65,30 @@ fn get_xml_url(original_url: &str) -> String {
 /// # Returns
 /// Tuple of (XmlFiles, base_url) for download processing
 async fn fetch_xml_metadata(
-    details_url: &str, 
-    client: &Client, 
-    spinner: &indicatif::ProgressBar
+    details_url: &str,
+    client: &Client,
+    spinner: &indicatif::ProgressBar,
 ) -> Result<(XmlFiles, reqwest::Url)> {
     // Generate XML URL
     let xml_url = get_xml_url(details_url);
-    spinner.set_message(format!("Accessing XML metadata: {}", xml_url));
+    spinner.set_message(format!(
+        "{} Accessing XML metadata: {}",
+        "⚙".blue(),
+        xml_url.bold()
+    ));
 
     // Check XML URL accessibility
     if let Err(e) = is_url_accessible(&xml_url, client).await {
-        spinner.finish_with_message(format!("🔴 XML metadata not accessible: {}", xml_url));
+        spinner.finish_with_message(format!(
+            "{} XML metadata not accessible: {}",
+            "✘".red().bold(),
+            xml_url.bold()
+        ));
         return Err(e); // Propagate the error
     }
 
-    spinner.set_message("Parsing archive metadata... 👀");
-    
+    spinner.set_message(format!("{} {}", "⚙".blue(), "Parsing archive metadata...".bold()));
+
     // Parse base URL and fetch XML content
     let base_url = reqwest::Url::parse(&xml_url)?;
     let response = client.get(&xml_url).send().await?;
@@ -109,7 +118,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    
+
     // Create a single client instance for all requests
     let client = Client::builder()
         .user_agent(USER_AGENT)
@@ -117,28 +126,38 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     // Start a single spinner for the entire initialization process
-    let spinner = create_spinner(&format!("Processing archive.org URL: {}", cli.url));
-    
+    let spinner = create_spinner(&format!("Processing archive.org URL: {}", cli.url.bold()));
+
     // Validate URL format using consolidated function
     if let Err(e) = validate_archive_url(&cli.url) {
-        spinner.finish_with_message(format!("❌ {}", e));
+        spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
         return Err(e.into());
     }
 
     // Check URL accessibility
     if let Err(e) = is_url_accessible(&cli.url, &client).await {
-        spinner.finish_with_message(format!("🔴 Archive.org URL not accessible: {}", cli.url));
+        spinner.finish_with_message(format!(
+            "{} Archive.org URL not accessible: {}",
+            "✘".red().bold(),
+            cli.url.bold()
+        ));
         return Err(e.into()); // Propagate error
     }
 
     // Fetch and parse XML metadata in one operation
     let (files, base_url) = fetch_xml_metadata(&cli.url, &client, &spinner).await?;
 
-    // Successfully finished initialization - replace with green tick
+    // Successfully finished initialization
     spinner.set_style(
         ProgressStyle::default_spinner()
-            .template(&format!("✅ Ready to download {} files from archive.org ✨", files.files.len()))
-            .expect("Failed to set completion style")
+            .template(&format!(
+                "{} {} to download {} files from archive.org {}",
+                "✔".green().bold(),
+                "Ready".bold(),
+                files.files.len().to_string().bold(),
+                "★".yellow()
+            ))
+            .expect("Failed to set completion style"),
     );
     spinner.finish();
 

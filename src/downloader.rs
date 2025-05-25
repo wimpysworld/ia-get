@@ -8,15 +8,17 @@ use std::sync::Arc;
 
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
+use colored::*; // Add this line
 
 use crate::Result;
-use crate::utils::{create_progress_bar, format_duration, format_size, format_transfer_rate};
+use crate::error::IaGetError; // Import IaGetError for explicit error conversion
+use crate::utils::{create_progress_bar, format_duration, format_size, format_transfer_rate}; // Import utility functions
 
 /// Buffer size for file operations (8KB)
 const BUFFER_SIZE: usize = 8192;
 
-/// File size threshold for showing hash progress bar (16MB)
-const LARGE_FILE_THRESHOLD: u64 = 2 * 1024 * 1024;
+/// File size threshold for showing hash progress bar (2MB)
+const LARGE_FILE_THRESHOLD: u64 = 2 * 1024 * 1024; 
 
 /// Sets up signal handling for graceful shutdown on Ctrl+C
 /// 
@@ -28,7 +30,7 @@ fn setup_signal_handler() -> Arc<AtomicBool> {
     
     ctrlc::set_handler(move || {
         r.store(false, Ordering::SeqCst);
-        println!("\nReceived Ctrl+C, finishing current operation...");
+        println!("\n{} Received Ctrl+C, finishing current operation...", "✘".red().bold());
     }).expect("Error setting Ctrl+C handler");
     
     running
@@ -45,11 +47,8 @@ fn calculate_md5(file_path: &str, running: &Arc<AtomicBool>) -> Result<String> {
     let mut buffer = [0; BUFFER_SIZE];
     
     let pb = if is_large_file {
-        let progress_bar = create_progress_bar(file_size, "╰╼ Hashing      ", Some("cyan/blue"), false);
-        Some(progress_bar)
-    } else {
-        None
-    };
+        Some(create_progress_bar(file_size, &format!("{} {}    ", "╰╼".cyan().dimmed(), "Verifying".white()), Some("blue/blue"), false))
+    } else { None };
     
     let mut bytes_processed: u64 = 0;
     
@@ -77,9 +76,7 @@ fn calculate_md5(file_path: &str, running: &Arc<AtomicBool>) -> Result<String> {
         }
     }
     
-    if let Some(progress_bar) = pb {
-        progress_bar.finish_and_clear();
-    }
+    if let Some(progress_bar) = pb.as_ref() { progress_bar.finish_and_clear(); }
     
     let hash = context.compute();
     Ok(format!("{:x}", hash))
@@ -101,7 +98,7 @@ fn check_existing_file(file_path: &str, expected_md5: Option<&str>, running: &Ar
             if e.to_string().contains("interrupted by signal") {
                 return Err(e);
             }
-            println!("╰╼ Failed to calculate MD5 hash: {}", e);
+            println!("{} {} to calculate MD5 hash: {}", "╰╼".cyan().dimmed(), "Failed".red().bold(), e);
             return Ok(Some(false));
         }
     };
@@ -142,35 +139,31 @@ async fn download_file_content(
     running: &Arc<AtomicBool>,
     is_resuming: bool
 ) -> Result<u64> {
-    let download_action = if is_resuming { "╰╼ Resuming     " } else { "╰╼ Downloading  " };
+    let download_action = if is_resuming {
+        format!("{} {}     ", "╰╼".cyan().dimmed(), "Resuming".white())
+    } else {
+        format!("{} {}  ", "╰╼".cyan().dimmed(), "Downloading".white())
+    };
     
-    let mut response = if file_size > 0 {
-        // Resume download with range request
-        let range_header = format!("bytes={}-", file_size);
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            reqwest::header::RANGE, 
-            HeaderValue::from_str(&range_header).map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput, 
-                    format!("Invalid header value: {}", e)
-                )
-            })?
-        );
-        
+    let mut headers = HeaderMap::new();
+    if file_size > 0 {
+        // Use IaGetError::Network for header parsing errors
+        headers.insert(reqwest::header::RANGE, HeaderValue::from_str(&format!("bytes={}-", file_size)).map_err(|e| IaGetError::Network(format!("Invalid range header value: {}", e)))?);
+    }
+
+    let mut response = if file_size > 0 && is_resuming { // Ensure headers are only used for resume
         client.get(url).headers(headers).send().await?
     } else {
-        // Fresh download
         client.get(url).send().await?
     };
 
     let content_length = response.content_length().unwrap_or(0);
-    let total_expected_size = content_length + file_size;
+    let total_expected_size = if is_resuming { content_length + file_size } else { content_length };
     
     let pb = create_progress_bar(
-        total_expected_size,
-        download_action,
-        None, 
+        total_expected_size, 
+        &download_action, 
+        Some("green/green"), // Color for download bar
         true
     );
 
@@ -201,90 +194,55 @@ async fn download_file_content(
 
     let elapsed = start_time.elapsed();
     let elapsed_secs = elapsed.as_secs_f64();
-    
-    let transfer_rate = if elapsed_secs > 0.0 {
+    let transfer_rate_val = if elapsed_secs > 0.0 {
         downloaded_bytes as f64 / elapsed_secs
-    } else {
-        0.0 
-    };
-    
-    let (rate, unit) = format_transfer_rate(transfer_rate);
-    
+    } else { 0.0 };
+
+    let (rate, unit) = format_transfer_rate(transfer_rate_val);
+
     pb.finish_and_clear();
-    
-    if downloaded_bytes > 0 {
-        println!("├╼ Downloaded   ⤵️ {} in {} ({:.2} {}/s)", 
-            format_size(downloaded_bytes),
-            format_duration(elapsed),
-            rate,
-            unit);
-    }
+    println!(
+        "{} {}   {} {} in {} ({:.2} {}/s)",
+        "├╼".cyan().dimmed(),
+        "Downloaded".white(),
+        "↓".green().bold(),
+        format_size(downloaded_bytes).bold(),
+        format_duration(elapsed).bold(),
+        rate,
+        unit
+    );
     
     Ok(total_bytes)
 }
 
 /// Verify a downloaded file's hash against an expected value
-fn verify_downloaded_file(file_path: &str, expected_md5: Option<&str>, running: &Arc<AtomicBool>) -> Result<bool> {   
-    let local_md5 = match calculate_md5(file_path, running) {
-        Ok(hash) => hash,
-        Err(e) => {
-            println!("╰╼ Failed to calculate MD5 hash: {}", e);
-            return Ok(false);
-        }
-    };
-    
-    match expected_md5 {
-        Some(expected) => {
-            let matches = local_md5 == expected;
-            if !matches {
-                println!("╰╼ Hash         ❌");
-            } else {
-                println!("╰╼ Hash         ✅");
-            }
-            Ok(matches)
-        },
-        None => {
-            println!("╰╼ No MD5:      ⚠️");
-            Ok(true) 
-        },
+fn verify_downloaded_file(file_path: &str, expected_md5: Option<&str>, running: &Arc<AtomicBool>) -> Result<bool> {
+    if expected_md5.is_none() {
+        println!("{} {}", "-".dimmed(), "No MD5 hash provided for verification.".dimmed());
+        return Ok(true); // No hash to check against, consider it verified
     }
-}
-
-/// Download a file from archive.org with resume capability
-/// 
-/// This function handles signal setup internally and manages graceful shutdown
-/// during download operations.
-pub async fn download_file(
-    client: &Client,
-    url: &str,
-    file_path: &str,
-    expected_md5: Option<&str>,
-) -> Result<()> {
-    // Set up signal handling for this download session
-    let running = setup_signal_handler();
-    
-    println!(" ");
-    println!("📦️ Filename     {}", file_path);
-    
-    if let Some(is_valid) = check_existing_file(file_path, expected_md5, &running)? {
-        if is_valid {
-            println!("╰╼ Downloaded   ✅");
-            return Ok(());
-        } else {
-            println!("├╼ Partial      🔄");
-        }
+    let expected_md5_str = expected_md5.unwrap();
+    let local_md5 = calculate_md5(file_path, running)?;
+    if local_md5 == expected_md5_str {
+        println!(
+            "{} {}         {} {}",
+            "╰╼".cyan().dimmed(),
+            "Hash".white(),
+            "✔".green().bold(),
+            format!("({})", local_md5).dimmed()
+        );
+        Ok(true)
+    } else {
+        println!(
+            "{} {}         {} ({}) Expected ({})",
+            "╰╼".cyan().dimmed(),
+            "Hash".white(),
+            "✘".red().bold(),
+            local_md5.red(),
+            expected_md5_str.dimmed()
+        );
+        Ok(false)
     }
-
-    ensure_parent_directories(file_path)?;
-    
-    let mut file = prepare_file_for_download(file_path)?;
-    
-    let file_size = file.metadata()?.len();        
-    let is_resuming = file_size > 0;
-    download_file_content(client, url, file_size, &mut file, &running, is_resuming).await?;
-    verify_downloaded_file(file_path, expected_md5, &running)?;
-    
-    Ok(())
 }
 
 /// Download multiple files with shared signal handling
@@ -305,20 +263,32 @@ where
     for (index, (url, file_path, expected_md5)) in files.into_iter().enumerate() {
         // Check if we should stop due to signal
         if !running.load(Ordering::SeqCst) {
-            println!("\nDownload interrupted. Run the command again to resume remaining files.");
+            println!("\n{} Download interrupted. Run the command again to resume remaining files.", "✘".red().bold());
             break;
         }
         
         println!(" ");
-        println!("📦️ Filename     {}", file_path);
-        println!("├╼ Count        {} of {}", index + 1, total_files);
+        println!(
+            "{}  {}     {}", 
+            "▣".bright_cyan().bold(), 
+            "Filename".white(),
+            file_path.bold()
+        );
+        println!(
+            "{} {}        {} {} of {}", 
+            "├╼".cyan().dimmed(),
+            "Count".white(),
+            "#".blue().bold(), 
+            (index + 1).to_string().bold(), 
+            total_files.to_string().bold()
+        );
         
         if let Some(is_valid) = check_existing_file(&file_path, expected_md5.as_deref(), &running)? {
             if is_valid {
-                println!("╰╼ Downloaded   ✅");
+                println!("{} {}   {}", "╰╼".cyan().dimmed(), "Downloaded".white(), "✔".green().bold());
                 continue;
             } else {
-                println!("├╼ Partial      🔄");
+                println!("{} {}      {}", "├╼".cyan().dimmed(), "Partial".white(), "▲".yellow().bold());
             }
         }
 
