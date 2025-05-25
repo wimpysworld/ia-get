@@ -152,7 +152,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }).collect::<Vec<_>>();
 
     // Download all files with integrated signal handling
-    downloader::download_files(&client, download_data).await?;
+    downloader::download_files(&client, download_data.clone(), download_data.len()).await?;
 
     Ok(())
 }

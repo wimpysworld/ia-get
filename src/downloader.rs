@@ -294,6 +294,7 @@ pub async fn download_file(
 pub async fn download_files<I>(
     client: &Client,
     files: I,
+    total_files: usize,
 ) -> Result<()> 
 where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
@@ -301,7 +302,7 @@ where
     // Set up signal handling for the entire download session
     let running = setup_signal_handler();
     
-    for (url, file_path, expected_md5) in files {
+    for (index, (url, file_path, expected_md5)) in files.into_iter().enumerate() {
         // Check if we should stop due to signal
         if !running.load(Ordering::SeqCst) {
             println!("\nDownload interrupted. Run the command again to resume remaining files.");
@@ -310,6 +311,7 @@ where
         
         println!(" ");
         println!("📦️ Filename     {}", file_path);
+        println!("├╼ Count        {} of {}", index + 1, total_files);
         
         if let Some(is_valid) = check_existing_file(&file_path, expected_md5.as_deref(), &running)? {
             if is_valid {
