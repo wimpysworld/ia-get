@@ -7,6 +7,7 @@
 
 pub mod error;
 pub mod utils;
+pub mod archive_metadata;
 
 // Re-export the error types for convenience
 pub use error::{IaGetError, Result};
