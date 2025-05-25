@@ -15,8 +15,6 @@ use reqwest::Client;
 use serde_xml_rs::from_str;
 use clap::Parser;
 use std::process;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use ia_get::archive_metadata::XmlFiles;
 
 /// Checks if a URL is accessible by sending a HEAD request
@@ -59,33 +57,13 @@ struct Cli {
     url: String,
 }
 
-/// Sets up signal handling for graceful shutdown on Ctrl+C
-/// 
-/// Returns an Arc<AtomicBool> that can be checked to see if the process
-/// should stop. When Ctrl+C is pressed, this will be set to false.
-fn setup_signal_handler() -> Arc<AtomicBool> {
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-    
-    ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-        println!("\nReceived Ctrl+C, finishing current operation...");
-    }).expect("Error setting Ctrl+C handler");
-    
-    running
-}
-
 /// Main application entry point
 /// 
 /// Parses command line arguments, validates the archive.org URL, checks URL accessibility,
-/// downloads XML metadata, and iterates through files to download them with resume capability
-/// and hash verification.
+/// downloads XML metadata, and initiates file downloads with built-in signal handling.
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    
-    // Set up signal handling for graceful shutdown
-    let running = setup_signal_handler();
     
     // Create a single client instance for all requests
     let client = Client::builder()
@@ -150,31 +128,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     );
     spinner.finish();
 
-    // Iterate over the XML files struct and download each file
-    for file in files.files {
-        // Check if we should stop due to signal
-        if !running.load(Ordering::SeqCst) {
-            println!("\nDownload interrupted. Run the command again to resume remaining files.");
-            break;
-        }
-
-        // Create a clone of the base URL
+    // Prepare download data for batch processing
+    let download_data = files.files.into_iter().map(|file| {
         let mut absolute_url = base_url.clone();
-
-        // If the URL is relative, join it with the base_url to make it absolute
         if let Ok(joined_url) = absolute_url.join(&file.name) {
             absolute_url = joined_url;
         }
+        (absolute_url.to_string(), file.name, file.md5)
+    }).collect::<Vec<_>>();
 
-        // Download the file
-        downloader::download_file( // Updated to use downloader::download_file
-            &client, 
-            absolute_url.as_str(), 
-            &file.name, 
-            file.md5.as_deref(), 
-            &running
-        ).await?;
-    }
+    // Download all files with integrated signal handling
+    downloader::download_files(&client, download_data).await?;
 
     Ok(())
 }
