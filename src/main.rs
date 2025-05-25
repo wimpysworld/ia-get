@@ -8,6 +8,7 @@
 use ia_get::{IaGetError, Result};
 use ia_get::utils::create_spinner;
 use ia_get::downloader; 
+use ia_get::constants::{USER_AGENT, HTTP_TIMEOUT, URL_PATTERN};
 use indicatif::ProgressStyle;
 use regex::Regex;
 use reqwest::Client;
@@ -17,15 +18,6 @@ use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use ia_get::archive_metadata::XmlFiles;
-
-/// User agent string for HTTP requests
-const USER_AGENT: &str = "ia-get";
-
-/// Timeout for all HTTP requests in seconds
-const HTTP_TIMEOUT: u64 = 60;
-
-/// Regex pattern for validating archive.org details URLs
-const PATTERN: &str = r"^https://archive\.org/details/[a-zA-Z0-9_\-.@]+$";
 
 /// Checks if a URL is accessible by sending a HEAD request
 async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
@@ -114,7 +106,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     // Compile regex pattern for URL validation
-    let url_regex = Regex::new(PATTERN)?;
+    let url_regex = Regex::new(URL_PATTERN)?;
 
     // Start a single spinner for the entire initialization process
     let spinner = create_spinner(&format!("Processing archive.org URL: {}", cli.url));
@@ -225,10 +217,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ia_get::constants::URL_PATTERN;
 
     #[test]
     fn check_valid_pattern() {
-        let url_regex = Regex::new(PATTERN).unwrap();
+        let url_regex = Regex::new(URL_PATTERN).unwrap();
         assert!(url_regex.is_match("https://archive.org/details/Valid-Pattern"));
         assert!(url_regex.is_match("https://archive.org/details/test123"));
         assert!(url_regex.is_match("https://archive.org/details/test_file-name.data"));
@@ -237,7 +230,7 @@ mod tests {
 
     #[test]
     fn check_invalid_pattern() {
-        let url_regex = Regex::new(PATTERN).unwrap();
+        let url_regex = Regex::new(URL_PATTERN).unwrap();
         assert!(!url_regex.is_match("https://archive.org/details/Invalid-Pattern-*"));
         assert!(!url_regex.is_match("https://archive.org/details/"));
         assert!(!url_regex.is_match("https://example.com/details/test"));
