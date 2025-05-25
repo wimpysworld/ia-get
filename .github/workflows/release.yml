@@ -85,7 +85,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
         with:
-          generate_release_notes: true
           files: |
             ia-get-*-${{ matrix.job.target }}.*
             ia-get*.deb
