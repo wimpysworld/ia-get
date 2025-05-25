@@ -63,7 +63,7 @@ I've picked up some Rust along the way and some refactoring came directly from m
 
 # Demo 🧑‍💻
 
-<div align="center"><a href="https://asciinema.org/a/BO3vMD8rJawKhM1iZ3SZqVx0F?autoplay=1" target="_blank"><img src="https://asciinema.org/a/BO3vMD8rJawKhM1iZ3SZqVx0F.svg" /></a></div>
+<div align="center"><img alt="ia-get demo" src="assets/ia-get.gif" width="1024" /></div>
 
 
 # Development 🏗️
