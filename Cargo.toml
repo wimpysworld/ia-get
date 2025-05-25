@@ -24,6 +24,7 @@ thiserror = "1.0"
 url = "2.4.1"
 clap = { version = "4.0", features = ["derive"] }
 ctrlc = "3.4"
+colored = "2.1.0"
 
 [profile.release]
 strip = true  # Automatically strip symbols from the binary.

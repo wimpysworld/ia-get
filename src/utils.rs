@@ -5,6 +5,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 use crate::constants::URL_PATTERN;
 use crate::{Result, IaGetError};
+use colored::*; // Add this line
 
 /// Spinner tick interval in milliseconds
 pub const SPINNER_TICK_INTERVAL: u64 = 100;
@@ -57,11 +58,18 @@ pub fn validate_archive_url(url: &str) -> Result<()> {
 pub fn create_progress_bar(total: u64, action: &str, color: Option<&str>, with_eta: bool) -> ProgressBar {
     let pb = ProgressBar::new(total);
     let color_str = color.unwrap_or("green/green");
+
+    let styled_action = if action.contains("├╼") || action.contains("╰╼") {
+        action.replace("├╼", &"├╼".cyan().dimmed().to_string())
+              .replace("╰╼", &"╰╼".cyan().dimmed().to_string())
+    } else {
+        action.to_string()
+    };
     
     let template = if with_eta {
-        format!("{action}{{elapsed_precise}}     {{bar:40.{color_str}}} {{bytes}}/{{total_bytes}} (ETA: {{eta}})")
+        format!("{}{{elapsed_precise}} {{bar:40.{}}} {{bytes}}/{{total_bytes}} (ETA: {{eta}})", styled_action, color_str)
     } else {
-        format!("{action}{{elapsed_precise}}     {{bar:40.{color_str}}} {{bytes}}/{{total_bytes}}")
+        format!("{}{{elapsed_precise}} {{bar:40.{}}} {{bytes}}/{{total_bytes}}", styled_action, color_str)
     };
     
     pb.set_style(
@@ -86,7 +94,7 @@ pub fn create_spinner(message: &str) -> ProgressBar {
     spinner.set_style(
         ProgressStyle::default_spinner()
             .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-            .template(&format!("{{spinner}} {message}"))
+            .template(&format!("{} {}", "{spinner}".yellow().bold(), message))
             .expect("Failed to set spinner style")
     );
     spinner.enable_steady_tick(std::time::Duration::from_millis(SPINNER_TICK_INTERVAL));
