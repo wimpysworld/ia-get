@@ -46,6 +46,52 @@ fn get_xml_url(original_url: &str) -> String {
     }
 }
 
+/// Fetches and parses XML metadata from archive.org
+/// 
+/// Combines XML URL generation, accessibility check, download, and parsing
+/// into a single operation with integrated error handling.
+/// 
+/// # Arguments
+/// * `details_url` - The original archive.org details URL
+/// * `client` - HTTP client for requests
+/// * `spinner` - Progress spinner to update during processing
+/// 
+/// # Returns
+/// Tuple of (XmlFiles, base_url) for download processing
+async fn fetch_xml_metadata(
+    details_url: &str, 
+    client: &Client, 
+    spinner: &indicatif::ProgressBar
+) -> Result<(XmlFiles, reqwest::Url)> {
+    // Generate XML URL
+    let xml_url = get_xml_url(details_url);
+    spinner.set_message(format!("Accessing XML metadata: {}", xml_url));
+
+    // Check XML URL accessibility
+    if let Err(e) = is_url_accessible(&xml_url, client).await {
+        spinner.finish_with_message(format!("🔴 XML metadata not accessible: {}", xml_url));
+        eprintln!("╰╼ Exiting due to error: {}", e);
+        process::exit(1);
+    }
+
+    spinner.set_message("Parsing archive metadata... 👀");
+    
+    // Parse base URL and fetch XML content
+    let base_url = reqwest::Url::parse(&xml_url)?;
+    let response = client.get(&xml_url).send().await?;
+    let xml_content = response.text().await?;
+    
+    // Parse XML content with error context
+    let files: XmlFiles = from_str(&xml_content)
+        .map_err(|e| {
+            eprintln!("XML parsing error: {}", e);
+            eprintln!("XML content: {}", &xml_content[..xml_content.len().min(1000)]);
+            e
+        })?;
+
+    Ok((files, base_url))
+}
+
 /// Command-line interface for ia-get
 #[derive(Parser)]
 #[command(name = "ia-get")]
@@ -92,33 +138,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         process::exit(1);
     }
 
-    // Derive XML URL
-    let xml_url = get_xml_url(&cli.url);
-    spinner.set_message(format!("Accessing XML metadata: {}", xml_url));
-
-    // Check XML URL accessibility
-    if let Err(e) = is_url_accessible(&xml_url, &client).await {
-        spinner.finish_with_message(format!("🔴 XML metadata not accessible: {}", xml_url));
-        eprintln!("╰╼ Exiting due to error: {}", e);
-        process::exit(1);
-    }
-
-    // Parse XML metadata
-    spinner.set_message("Parsing archive metadata... 👀");
-    
-    // Get the base URL from the XML URL
-    let base_url = reqwest::Url::parse(&xml_url)?;
-
-    // Download and parse XML file
-    let response = client.get(&xml_url).send().await?;
-    let xml_content = response.text().await?;
-    
-    let files: XmlFiles = from_str(&xml_content)
-        .map_err(|e| {
-            eprintln!("XML parsing error: {}", e);
-            eprintln!("XML content: {}", &xml_content[..xml_content.len().min(1000)]);
-            e
-        })?;
+    // Fetch and parse XML metadata in one operation
+    let (files, base_url) = fetch_xml_metadata(&cli.url, &client, &spinner).await?;
 
     // Successfully finished initialization - replace with green tick
     spinner.set_style(
