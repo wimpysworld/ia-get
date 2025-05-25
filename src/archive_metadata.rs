@@ -1,4 +1,7 @@
 use serde::Deserialize;
+use serde_xml_rs::from_str;
+use crate::{Result, IaGetError};
+use crate::constants::XML_DEBUG_TRUNCATE_LEN;
 
 /// Root structure for parsing the XML files list from archive.org
 /// The actual XML structure has a `files` root element containing multiple `file` elements
@@ -36,4 +39,29 @@ pub struct XmlFile {
     pub btih: Option<String>,
     pub summation: Option<String>,
     pub original: Option<String>,
+}
+
+/// Parses XML content into XmlFiles structure with improved error context
+/// 
+/// # Arguments
+/// * `xml_content` - Raw XML content string from archive.org
+/// 
+/// # Returns
+/// * `Ok(XmlFiles)` if parsing succeeds
+/// * `Err(IaGetError)` with context if parsing fails
+pub fn parse_xml_files(xml_content: &str) -> Result<XmlFiles> {
+    from_str(xml_content).map_err(|e| {
+        let preview = if xml_content.len() > XML_DEBUG_TRUNCATE_LEN {
+            &xml_content[..XML_DEBUG_TRUNCATE_LEN]
+        } else {
+            xml_content
+        };
+        
+        IaGetError::XmlParse(format!(
+            "Failed to parse XML metadata: {}. Content preview: {}{}",
+            e,
+            preview,
+            if xml_content.len() > XML_DEBUG_TRUNCATE_LEN { "..." } else { "" }
+        ))
+    })
 }

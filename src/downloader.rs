@@ -16,7 +16,7 @@ use crate::utils::{create_progress_bar, format_duration, format_size, format_tra
 const BUFFER_SIZE: usize = 8192;
 
 /// File size threshold for showing hash progress bar (16MB)
-const LARGE_FILE_THRESHOLD: u64 = 16 * 1024 * 1024;
+const LARGE_FILE_THRESHOLD: u64 = 2 * 1024 * 1024;
 
 /// Sets up signal handling for graceful shutdown on Ctrl+C
 /// 
