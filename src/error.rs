@@ -27,10 +27,6 @@ pub enum IaGetError {
     /// XML parsing errors
     #[error("Failed to parse XML: {0}")]
     XmlParsing(String),
-
-    /// XML parsing error
-    #[error("XML parsing error: {0}")]
-    XmlParse(String),
 }
 
 impl From<reqwest::Error> for IaGetError {
