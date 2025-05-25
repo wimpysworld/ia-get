@@ -57,7 +57,7 @@ pub fn parse_xml_files(xml_content: &str) -> Result<XmlFiles> {
             xml_content
         };
         
-        IaGetError::XmlParse(format!(
+        IaGetError::XmlParsing(format!(
             "Failed to parse XML metadata: {}. Content preview: {}{}",
             e,
             preview,
