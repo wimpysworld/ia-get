@@ -268,10 +268,10 @@ pub async fn download_file(
     
     if let Some(is_valid) = check_existing_file(file_path, expected_md5, &running)? {
         if is_valid {
-            println!("✅ File already exists and is valid: {}", file_path);
+            println!("╰╼ Downloaded   ✅");
             return Ok(());
         } else {
-            println!("🔄 File exists but is invalid, re-downloading: {}", file_path);
+            println!("├╼ Partial      🔄");
         }
     }
 
@@ -313,10 +313,10 @@ where
         
         if let Some(is_valid) = check_existing_file(&file_path, expected_md5.as_deref(), &running)? {
             if is_valid {
-                println!("✅ File already exists and is valid: {}", file_path);
+                println!("╰╼ Downloaded   ✅");
                 continue;
             } else {
-                println!("🔄 File exists but is invalid, re-downloading: {}", file_path);
+                println!("├╼ Partial      🔄");
             }
         }
 
