@@ -18,6 +18,22 @@ const BUFFER_SIZE: usize = 8192;
 /// File size threshold for showing hash progress bar (16MB)
 const LARGE_FILE_THRESHOLD: u64 = 16 * 1024 * 1024;
 
+/// Sets up signal handling for graceful shutdown on Ctrl+C
+/// 
+/// Returns an Arc<AtomicBool> that can be checked to see if the process
+/// should stop. When Ctrl+C is pressed, this will be set to false.
+fn setup_signal_handler() -> Arc<AtomicBool> {
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+        println!("\nReceived Ctrl+C, finishing current operation...");
+    }).expect("Error setting Ctrl+C handler");
+    
+    running
+}
+
 /// Calculates the MD5 hash of a file
 fn calculate_md5(file_path: &str, running: &Arc<AtomicBool>) -> Result<String> {
     let file = File::open(file_path)?;
@@ -218,17 +234,22 @@ fn verify_downloaded_file(file_path: &str, expected_md5: Option<&str>, running: 
 }
 
 /// Download a file from archive.org with resume capability
+/// 
+/// This function handles signal setup internally and manages graceful shutdown
+/// during download operations.
 pub async fn download_file(
     client: &Client,
     url: &str,
     file_path: &str,
     expected_md5: Option<&str>,
-    running: &Arc<AtomicBool>
 ) -> Result<()> {
+    // Set up signal handling for this download session
+    let running = setup_signal_handler();
+    
     println!(" ");
     println!("📦️ Filename     {}", file_path);
     
-    if let Some(is_valid) = check_existing_file(file_path, expected_md5, running)? {
+    if let Some(is_valid) = check_existing_file(file_path, expected_md5, &running)? {
         if is_valid {
             println!("✅ File already exists and is valid: {}", file_path);
             return Ok(());
@@ -243,8 +264,54 @@ pub async fn download_file(
     
     let file_size = file.metadata()?.len();        
     let is_resuming = file_size > 0;
-    download_file_content(client, url, file_size, &mut file, running, is_resuming).await?;
-    verify_downloaded_file(file_path, expected_md5, running)?;
+    download_file_content(client, url, file_size, &mut file, &running, is_resuming).await?;
+    verify_downloaded_file(file_path, expected_md5, &running)?;
+    
+    Ok(())
+}
+
+/// Download multiple files with shared signal handling
+/// 
+/// This function sets up signal handling once for the entire download session
+/// and allows for graceful interruption between files.
+pub async fn download_files<I>(
+    client: &Client,
+    files: I,
+) -> Result<()> 
+where
+    I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
+{
+    // Set up signal handling for the entire download session
+    let running = setup_signal_handler();
+    
+    for (url, file_path, expected_md5) in files {
+        // Check if we should stop due to signal
+        if !running.load(Ordering::SeqCst) {
+            println!("\nDownload interrupted. Run the command again to resume remaining files.");
+            break;
+        }
+        
+        println!(" ");
+        println!("📦️ Filename     {}", file_path);
+        
+        if let Some(is_valid) = check_existing_file(&file_path, expected_md5.as_deref(), &running)? {
+            if is_valid {
+                println!("✅ File already exists and is valid: {}", file_path);
+                continue;
+            } else {
+                println!("🔄 File exists but is invalid, re-downloading: {}", file_path);
+            }
+        }
+
+        ensure_parent_directories(&file_path)?;
+        
+        let mut file = prepare_file_for_download(&file_path)?;
+        
+        let file_size = file.metadata()?.len();        
+        let is_resuming = file_size > 0;
+        download_file_content(client, &url, file_size, &mut file, &running, is_resuming).await?;
+        verify_downloaded_file(&file_path, expected_md5.as_deref(), &running)?;
+    }
     
     Ok(())
 }
