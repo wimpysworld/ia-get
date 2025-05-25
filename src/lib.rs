@@ -6,6 +6,7 @@
 //! with support for resumable downloads and MD5 hash verification.
 
 pub mod error;
+pub mod utils;
 
 // Re-export the error types for convenience
 pub use error::{IaGetError, Result};
