@@ -1,7 +1,7 @@
 //! Module for handling file downloads, verification, and related operations.
 
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Read, Write, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -121,11 +121,14 @@ fn ensure_parent_directories(file_path: &str) -> Result<()> {
 
 /// Prepare a file for download
 fn prepare_file_for_download(file_path: &str) -> Result<File> {
-    let file = std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
         .open(file_path)?;
+    
+    // Seek to the end of the file for resume capability
+    file.seek(SeekFrom::End(0))?;
     
     Ok(file)
 }
@@ -141,29 +144,38 @@ async fn download_file_content(
 ) -> Result<u64> {
     let download_action = if is_resuming { "╰╼ Resuming     " } else { "╰╼ Downloading  " };
     
-    let mut initial_request = client.get(url);
-    let range_header = format!("bytes={}-", file_size);
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        reqwest::header::RANGE, 
-        HeaderValue::from_str(&range_header).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput, 
-                format!("Invalid header value: {}", e)
-            )
-        })?
-    );
-    initial_request = initial_request.headers(headers);
-
-    let mut response = initial_request.send().await?;
+    let mut response = if file_size > 0 {
+        // Resume download with range request
+        let range_header = format!("bytes={}-", file_size);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::RANGE, 
+            HeaderValue::from_str(&range_header).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput, 
+                    format!("Invalid header value: {}", e)
+                )
+            })?
+        );
+        
+        client.get(url).headers(headers).send().await?
+    } else {
+        // Fresh download
+        client.get(url).send().await?
+    };
 
     let content_length = response.content_length().unwrap_or(0);
+    let total_expected_size = content_length + file_size;
+    
     let pb = create_progress_bar(
-        content_length + file_size,
+        total_expected_size,
         download_action,
         None, 
         true
     );
+
+    // Set initial progress to current file size for resumed downloads
+    pb.set_position(file_size);
 
     let start_time = std::time::Instant::now();
     let mut total_bytes: u64 = file_size;
@@ -184,6 +196,9 @@ async fn download_file_content(
         pb.set_position(total_bytes);
     }
 
+    // Ensure data is written to disk
+    file.flush()?;
+
     let elapsed = start_time.elapsed();
     let elapsed_secs = elapsed.as_secs_f64();
     
@@ -197,11 +212,13 @@ async fn download_file_content(
     
     pb.finish_and_clear();
     
-    println!("├╼ Downloaded   ⤵️ {} in {} ({:.2} {}/s)", 
-        format_size(downloaded_bytes),
-        format_duration(elapsed),
-        rate,
-        unit);
+    if downloaded_bytes > 0 {
+        println!("├╼ Downloaded   ⤵️ {} in {} ({:.2} {}/s)", 
+            format_size(downloaded_bytes),
+            format_duration(elapsed),
+            rate,
+            unit);
+    }
     
     Ok(total_bytes)
 }
