@@ -11,7 +11,6 @@ use indicatif::ProgressStyle;
 use regex::Regex;
 use reqwest::header::{HeaderValue, HeaderMap};
 use reqwest::Client;
-use serde::Deserialize;
 use serde_xml_rs::from_str;
 use clap::Parser;
 use std::fs::{self, File};
@@ -20,6 +19,7 @@ use std::process;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use ia_get::archive_metadata::XmlFiles;
 
 /// Buffer size for file operations (8KB)
 const BUFFER_SIZE: usize = 8192;
@@ -38,44 +38,6 @@ const URL_CHECK_TIMEOUT: u64 = 30;
 
 /// Regex pattern for validating archive.org details URLs
 const PATTERN: &str = r"^https://archive\.org/details/[a-zA-Z0-9_\-.@]+$";
-
-/// Root structure for parsing the XML files list from archive.org
-/// The actual XML structure has a `files` root element containing multiple `file` elements
-#[derive(Deserialize, Debug)]
-struct XmlFiles {
-    #[serde(rename = "file", default)]
-    files: Vec<XmlFile>,
-}
-
-/// Represents a single file entry from the archive.org XML metadata
-/// 
-/// Archive.org XML structure has both attributes and nested elements:
-/// ```xml
-/// <file name="..." source="...">
-///   <mtime>...</mtime>
-///   <size>...</size>
-///   <md5>...</md5>
-///   ...
-/// </file>
-/// ```
-#[allow(dead_code)]
-#[derive(Deserialize, Debug)]
-struct XmlFile {
-    #[serde(rename = "@name")]
-    name: String,
-    #[serde(rename = "@source")]
-    source: String,
-    mtime: Option<u64>,
-    size: Option<u64>,
-    format: Option<String>,
-    rotation: Option<u32>,
-    md5: Option<String>,
-    crc32: Option<String>,
-    sha1: Option<String>,
-    btih: Option<String>,
-    summation: Option<String>,
-    original: Option<String>,
-}
 
 /// Checks if a URL is accessible by sending a HEAD request
 async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
