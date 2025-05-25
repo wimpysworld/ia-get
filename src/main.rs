@@ -119,9 +119,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     
     // Validate URL format using consolidated function
     if let Err(e) = validate_archive_url(&cli.url) {
-        spinner.finish_with_message(format!("❌ Invalid archive.org URL format: {}", cli.url));
-        println!("├╼ Archive.org URL is not in the expected format");
-        println!("╰╼ Expected format: https://archive.org/details/<identifier>[/]");
+        spinner.finish_with_message(format!("❌ {}", e));
         return Err(e.into());
     }
 
