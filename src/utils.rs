@@ -33,13 +33,15 @@ static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// ```
 pub fn validate_archive_url(url: &str) -> Result<()> {
     if URL_REGEX.is_match(url) {
-        Ok(())
-    } else {
-        Err(IaGetError::UrlFormat(format!(
-            "URL '{}' does not match expected format. Expected: https://archive.org/details/<identifier>[/]", 
-            url
-        )))
+        // Further check: ensure there's an identifier after "details/"
+        // and that the identifier is not empty.
+        if let Some(path_segment) = url.split("/details/").nth(1) {
+            if !path_segment.trim_end_matches('/').is_empty() {
+                return Ok(());
+            }
+        }
     }
+    Err(IaGetError::UrlFormat(url.to_string()))
 }
 
 /// Create a progress bar with consistent styling

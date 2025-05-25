@@ -17,7 +17,7 @@ pub enum IaGetError {
     FileSystem(String),
 
     /// URL format or parsing errors
-    #[error("Invalid URL: {0}")]
+    #[error("Invalid archive.org URL: {0}. Expected format: https://archive.org/details/<identifier>[/]")]
     UrlFormat(String),
 
     /// MD5 hash verification failures
