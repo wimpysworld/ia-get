@@ -28,6 +28,7 @@ static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// use ia_get::utils::validate_archive_url;
 /// 
 /// assert!(validate_archive_url("https://archive.org/details/valid-item").is_ok());
+/// assert!(validate_archive_url("https://archive.org/details/valid-item/").is_ok());
 /// assert!(validate_archive_url("https://example.com/invalid").is_err());
 /// ```
 pub fn validate_archive_url(url: &str) -> Result<()> {
@@ -35,7 +36,7 @@ pub fn validate_archive_url(url: &str) -> Result<()> {
         Ok(())
     } else {
         Err(IaGetError::UrlFormat(format!(
-            "URL '{}' does not match expected format. Expected: https://archive.org/details/<identifier>", 
+            "URL '{}' does not match expected format. Expected: https://archive.org/details/<identifier>[/]", 
             url
         )))
     }

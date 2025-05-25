@@ -36,12 +36,18 @@ async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
 /// # Returns
 /// The corresponding XML files list URL
 fn get_xml_url(original_url: &str) -> String {
-    let base_new_url = original_url.replacen("details", "download", 1);
-    if let Some(last_segment) = original_url.split('/').next_back() {
-        format!("{}/{}_files.xml", base_new_url, last_segment)
-    } else {
-        base_new_url
-    }
+    // Remove trailing slash if present to get a consistent base for identifier extraction
+    let trimmed_url = original_url.trim_end_matches('/');
+
+    // The identifier is the last segment of the trimmed URL
+    let identifier = trimmed_url.split('/').last()
+        .expect("Validated URL should have a valid identifier segment after validation");
+
+    // The base URL for download is "https://archive.org/download/{identifier}"
+    let download_url_base = format!("https://archive.org/download/{}", identifier);
+
+    // The XML URL is "{download_url_base}/{identifier}_files.xml"
+    format!("{}/{}_files.xml", download_url_base, identifier)
 }
 
 /// Fetches and parses XML metadata from archive.org
@@ -117,7 +123,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = validate_archive_url(&cli.url) {
         spinner.finish_with_message(format!("❌ Invalid archive.org URL format: {}", cli.url));
         println!("├╼ Archive.org URL is not in the expected format");
-        println!("╰╼ Expected format: https://archive.org/details/<identifier>/");
+        println!("╰╼ Expected format: https://archive.org/details/<identifier>[/]");
         return Err(e.into());
     }
 
@@ -162,17 +168,42 @@ mod tests {
     #[test]
     fn check_valid_pattern() {
         assert!(validate_archive_url("https://archive.org/details/Valid-Pattern").is_ok());
+        assert!(validate_archive_url("https://archive.org/details/Valid-Pattern/").is_ok());
         assert!(validate_archive_url("https://archive.org/details/test123").is_ok());
+        assert!(validate_archive_url("https://archive.org/details/test123/").is_ok());
         assert!(validate_archive_url("https://archive.org/details/test_file-name.data").is_ok());
+        assert!(validate_archive_url("https://archive.org/details/test_file-name.data/").is_ok());
         assert!(validate_archive_url("https://archive.org/details/user@domain").is_ok());
+        assert!(validate_archive_url("https://archive.org/details/user@domain/").is_ok());
     }
 
     #[test]
     fn check_invalid_pattern() {
         assert!(validate_archive_url("https://archive.org/details/Invalid-Pattern-*").is_err());
-        assert!(validate_archive_url("https://archive.org/details/").is_err());
+        assert!(validate_archive_url("https://archive.org/details/").is_err()); // This should still be an error (empty identifier)
         assert!(validate_archive_url("https://example.com/details/test").is_err());
         assert!(validate_archive_url("http://archive.org/details/test").is_err());
         assert!(validate_archive_url("https://archive.org/details/test/extra").is_err());
+        assert!(validate_archive_url("https://archive.org/details/test//").is_err()); // Multiple trailing slashes
+    }
+
+    #[test]
+    fn check_get_xml_url() {
+        assert_eq!(
+            get_xml_url("https://archive.org/details/item1"),
+            "https://archive.org/download/item1/item1_files.xml"
+        );
+        assert_eq!(
+            get_xml_url("https://archive.org/details/item1/"), // With trailing slash
+            "https://archive.org/download/item1/item1_files.xml"
+        );
+        assert_eq!(
+            get_xml_url("https://archive.org/details/another-item_v2.0"),
+            "https://archive.org/download/another-item_v2.0/another-item_v2.0_files.xml"
+        );
+        assert_eq!(
+            get_xml_url("https://archive.org/details/another-item_v2.0/"), // With trailing slash
+            "https://archive.org/download/another-item_v2.0/another-item_v2.0_files.xml"
+        );
     }
 }
