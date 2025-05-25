@@ -39,6 +39,8 @@ fn get_xml_url(original_url: &str) -> String {
     let trimmed_url = original_url.trim_end_matches('/');
 
     // The identifier is the last segment of the trimmed URL
+    // This expect is considered safe because get_xml_url is only called after
+    // validate_archive_url has confirmed the URL structure.
     let identifier = trimmed_url.split('/').last()
         .expect("Validated URL should have a valid identifier segment after validation");
 
