@@ -58,7 +58,7 @@ pub fn parse_xml_files(xml_content: &str) -> Result<XmlFiles> {
         };
         
         IaGetError::XmlParsing(format!(
-            "Failed to parse XML metadata: {}. Content preview: {}{}",
+            "Failed to parse _files.xml metadata: {}. Content preview: {}{}",
             e,
             preview,
             if xml_content.len() > XML_DEBUG_TRUNCATE_LEN { "..." } else { "" }
