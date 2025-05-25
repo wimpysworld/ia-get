@@ -6,7 +6,8 @@
 //! with support for resumable downloads and MD5 hash verification.
 
 use ia_get::{IaGetError, Result};
-use indicatif::{ProgressBar, ProgressStyle};
+use ia_get::utils::{create_progress_bar, create_spinner, format_duration, format_size, format_transfer_rate};
+use indicatif::ProgressStyle;
 use regex::Regex;
 use reqwest::header::{HeaderValue, HeaderMap};
 use reqwest::Client;
@@ -14,12 +15,11 @@ use serde::Deserialize;
 use serde_xml_rs::from_str;
 use clap::Parser;
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Write}; // Removed unused Seek import
+use std::io::{BufReader, Read, Write};
 use std::process;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use md5;
 
 /// Buffer size for file operations (8KB)
 const BUFFER_SIZE: usize = 8192;
@@ -35,9 +35,6 @@ const DEFAULT_HTTP_TIMEOUT: u64 = 60;
 
 /// Timeout for URL accessibility checks in seconds
 const URL_CHECK_TIMEOUT: u64 = 30;
-
-/// Spinner tick interval in milliseconds
-const SPINNER_TICK_INTERVAL: u64 = 100;
 
 /// Regex pattern for validating archive.org details URLs
 const PATTERN: &str = r"^https://archive\.org/details/[a-zA-Z0-9_\-.@]+$";
@@ -119,55 +116,6 @@ fn get_xml_url(original_url: &str) -> String {
     } else {
         base_new_url
     }
-}
-
-/// Create a progress bar with consistent styling
-/// 
-/// # Arguments
-/// * `total` - Total value for the progress bar
-/// * `action` - Action text to show at the beginning (e.g., "╰╼ Downloading  ")
-/// * `color` - Optional color style (defaults to "green/green")
-/// * `with_eta` - Whether to include ETA in the template
-/// 
-/// # Returns
-/// A configured progress bar
-fn create_progress_bar(total: u64, action: &str, color: Option<&str>, with_eta: bool) -> ProgressBar {
-    let pb = ProgressBar::new(total);
-    let color_str = color.unwrap_or("green/green");
-    
-    let template = if with_eta {
-        format!("{action}{{elapsed_precise}}     {{bar:40.{color_str}}} {{bytes}}/{{total_bytes}} (ETA: {{eta}})")
-    } else {
-        format!("{action}{{elapsed_precise}}     {{bar:40.{color_str}}} {{bytes}}/{{total_bytes}}")
-    };
-    
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(&template)
-            .expect("Failed to set progress bar style")
-            .progress_chars("▓▒░"),
-    );
-    
-    pb
-}
-
-/// Create a spinner with braille animation
-/// 
-/// # Arguments
-/// * `message` - Message to display next to the spinner
-/// 
-/// # Returns
-/// A configured spinner
-fn create_spinner(message: &str) -> ProgressBar {
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-            .template(&format!("{{spinner}} {message}"))
-            .expect("Failed to set spinner style")
-    );
-    spinner.enable_steady_tick(std::time::Duration::from_millis(SPINNER_TICK_INTERVAL));
-    spinner
 }
 
 /// Calculates the MD5 hash of a file
@@ -405,58 +353,6 @@ async fn download_file_content(
 
     
     Ok(total_bytes)
-}
-
-/// Format a duration into a human-readable string
-fn format_duration(duration: std::time::Duration) -> String {
-    let total_secs = duration.as_secs();
-    if total_secs < 60 {
-        return format!("{}.{:02}s", total_secs, duration.subsec_millis() / 10);
-    }
-    
-    let hours = total_secs / 3600;
-    let mins = (total_secs % 3600) / 60;
-    let secs = total_secs % 60;
-    
-    if hours > 0 {
-        format!("{}h {}m {}s", hours, mins, secs)
-    } else {
-        format!("{}m {}s", mins, secs)
-    }
-}
-
-/// Format a size in bytes to a human-readable string
-fn format_size(size: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    
-    if size < KB {
-        format!("{}B", size)
-    } else if size < MB {
-        format!("{:.2}KB", size as f64 / KB as f64)
-    } else if size < GB {
-        format!("{:.2}MB", size as f64 / MB as f64)
-    } else {
-        format!("{:.2}GB", size as f64 / GB as f64)
-    }
-}
-
-/// Format transfer rate to appropriate units
-fn format_transfer_rate(bytes_per_sec: f64) -> (f64, &'static str) {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    
-    if bytes_per_sec < KB {
-        (bytes_per_sec, "B")
-    } else if bytes_per_sec < MB {
-        (bytes_per_sec / KB, "KB")
-    } else if bytes_per_sec < GB {
-        (bytes_per_sec / MB, "MB")
-    } else {
-        (bytes_per_sec / GB, "GB")
-    }
 }
 
 /// Verify a downloaded file's hash against an expected value
