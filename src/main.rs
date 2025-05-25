@@ -5,17 +5,15 @@
 //! This tool takes an archive.org details URL and downloads all associated files,
 //! with support for resumable downloads and MD5 hash verification.
 
-use ia_get::{IaGetError, Result};
-use ia_get::utils::create_spinner;
+use ia_get::{Result};
+use ia_get::utils::{create_spinner, validate_archive_url};
 use ia_get::downloader; 
-use ia_get::constants::{USER_AGENT, HTTP_TIMEOUT, URL_PATTERN};
+use ia_get::constants::{USER_AGENT, HTTP_TIMEOUT};
+use ia_get::archive_metadata::{XmlFiles, parse_xml_files};
 use indicatif::ProgressStyle;
-use regex::Regex;
 use reqwest::Client;
-use serde_xml_rs::from_str;
 use clap::Parser;
 use std::process;
-use ia_get::archive_metadata::XmlFiles;
 
 /// Checks if a URL is accessible by sending a HEAD request
 async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
@@ -81,13 +79,8 @@ async fn fetch_xml_metadata(
     let response = client.get(&xml_url).send().await?;
     let xml_content = response.text().await?;
     
-    // Parse XML content with error context
-    let files: XmlFiles = from_str(&xml_content)
-        .map_err(|e| {
-            eprintln!("XML parsing error: {}", e);
-            eprintln!("XML content: {}", &xml_content[..xml_content.len().min(1000)]);
-            e
-        })?;
+    // Parse XML content with improved error handling
+    let files = parse_xml_files(&xml_content)?;
 
     Ok((files, base_url))
 }
@@ -117,18 +110,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT))
         .build()?;
 
-    // Compile regex pattern for URL validation
-    let url_regex = Regex::new(URL_PATTERN)?;
-
     // Start a single spinner for the entire initialization process
     let spinner = create_spinner(&format!("Processing archive.org URL: {}", cli.url));
     
-    // Validate URL format
-    if !url_regex.is_match(&cli.url) {
+    // Validate URL format using consolidated function
+    if let Err(e) = validate_archive_url(&cli.url) {
         spinner.finish_with_message(format!("❌ Invalid archive.org URL format: {}", cli.url));
         println!("├╼ Archive.org URL is not in the expected format");
         println!("╰╼ Expected format: https://archive.org/details/<identifier>/");
-        return Err(IaGetError::UrlFormat(format!("URL '{}' does not match expected format", cli.url)).into());
+        return Err(e.into());
     }
 
     // Check URL accessibility
@@ -167,24 +157,22 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ia_get::constants::URL_PATTERN;
+    use ia_get::utils::validate_archive_url;
 
     #[test]
     fn check_valid_pattern() {
-        let url_regex = Regex::new(URL_PATTERN).unwrap();
-        assert!(url_regex.is_match("https://archive.org/details/Valid-Pattern"));
-        assert!(url_regex.is_match("https://archive.org/details/test123"));
-        assert!(url_regex.is_match("https://archive.org/details/test_file-name.data"));
-        assert!(url_regex.is_match("https://archive.org/details/user@domain"));
+        assert!(validate_archive_url("https://archive.org/details/Valid-Pattern").is_ok());
+        assert!(validate_archive_url("https://archive.org/details/test123").is_ok());
+        assert!(validate_archive_url("https://archive.org/details/test_file-name.data").is_ok());
+        assert!(validate_archive_url("https://archive.org/details/user@domain").is_ok());
     }
 
     #[test]
     fn check_invalid_pattern() {
-        let url_regex = Regex::new(URL_PATTERN).unwrap();
-        assert!(!url_regex.is_match("https://archive.org/details/Invalid-Pattern-*"));
-        assert!(!url_regex.is_match("https://archive.org/details/"));
-        assert!(!url_regex.is_match("https://example.com/details/test"));
-        assert!(!url_regex.is_match("http://archive.org/details/test"));
-        assert!(!url_regex.is_match("https://archive.org/details/test/extra"));
+        assert!(validate_archive_url("https://archive.org/details/Invalid-Pattern-*").is_err());
+        assert!(validate_archive_url("https://archive.org/details/").is_err());
+        assert!(validate_archive_url("https://example.com/details/test").is_err());
+        assert!(validate_archive_url("http://archive.org/details/test").is_err());
+        assert!(validate_archive_url("https://archive.org/details/test/extra").is_err());
     }
 }
