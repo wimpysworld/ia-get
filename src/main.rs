@@ -13,7 +13,6 @@ use ia_get::archive_metadata::{XmlFiles, parse_xml_files};
 use indicatif::ProgressStyle;
 use reqwest::Client;
 use clap::Parser;
-use std::process;
 
 /// Checks if a URL is accessible by sending a HEAD request
 async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
@@ -74,8 +73,7 @@ async fn fetch_xml_metadata(
     // Check XML URL accessibility
     if let Err(e) = is_url_accessible(&xml_url, client).await {
         spinner.finish_with_message(format!("🔴 XML metadata not accessible: {}", xml_url));
-        eprintln!("╰╼ Exiting due to error: {}", e);
-        process::exit(1);
+        return Err(e); // Propagate the error
     }
 
     spinner.set_message("Parsing archive metadata... 👀");
@@ -130,8 +128,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Check URL accessibility
     if let Err(e) = is_url_accessible(&cli.url, &client).await {
         spinner.finish_with_message(format!("🔴 Archive.org URL not accessible: {}", cli.url));
-        eprintln!("╰╼ Exiting due to error: {}", e);
-        process::exit(1);
+        return Err(e.into()); // Propagate error
     }
 
     // Fetch and parse XML metadata in one operation
