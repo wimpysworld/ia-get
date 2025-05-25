@@ -23,21 +23,9 @@ use ia_get::archive_metadata::XmlFiles;
 async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
     let response = client.head(url)
         .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT))
-        .send().await
-        .map_err(|e| {
-            if e.is_connect() || e.is_timeout() {
-                IaGetError::UrlError(format!("Failed to connect to {}: {}", url, e))
-            } else {
-                IaGetError::NetworkError(e)
-            }
-        })?;
+        .send().await?;
     
-    response.error_for_status()
-        .map_err(|e| {
-            let status = e.status().unwrap_or_default();
-            IaGetError::UrlError(format!("URL returned error status {}: {}", status, url))
-        })?;
-    
+    response.error_for_status()?;
     Ok(())
 }
 
@@ -116,7 +104,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         spinner.finish_with_message(format!("❌ Invalid archive.org URL format: {}", cli.url));
         println!("├╼ Archive.org URL is not in the expected format");
         println!("╰╼ Expected format: https://archive.org/details/<identifier>/");
-        return Err(IaGetError::UrlFormatError(format!("URL '{}' does not match expected format", cli.url)).into());
+        return Err(IaGetError::UrlFormat(format!("URL '{}' does not match expected format", cli.url)).into());
     }
 
     // Check URL accessibility
@@ -141,41 +129,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     spinner.set_message("Parsing archive metadata... 👀");
     
     // Get the base URL from the XML URL
-    let base_url = match reqwest::Url::parse(&xml_url) {
-        Ok(url) => url,
-        Err(e) => {
-            spinner.finish_with_message("Failed to parse XML URL ❌");
-            return Err(e.into());
-        }
-    };
+    let base_url = reqwest::Url::parse(&xml_url)?;
 
-    // Download XML file
-    let response = match client.get(xml_url).send().await {
-        Ok(resp) => {
-            match resp.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    spinner.finish_with_message("Failed to read XML response ❌");
-                    return Err(e.into());
-                }
-            }
-        },
-        Err(e) => {
-            spinner.finish_with_message("Failed to fetch XML metadata ❌");
-            return Err(e.into());
-        }
-    };
+    // Download and parse XML file
+    let response = client.get(&xml_url).send().await?;
+    let xml_content = response.text().await?;
     
-    // Parse XML content
-    let files: XmlFiles = match from_str(&response) {
-        Ok(files) => files,
-        Err(e) => {
-            spinner.finish_with_message("Failed to parse XML content ❌");
+    let files: XmlFiles = from_str(&xml_content)
+        .map_err(|e| {
             eprintln!("XML parsing error: {}", e);
-            eprintln!("XML content: {}", &response[..response.len().min(1000)]);
-            return Err(e.into());
-        }
-    };
+            eprintln!("XML content: {}", &xml_content[..xml_content.len().min(1000)]);
+            e
+        })?;
 
     // Successfully finished initialization - replace with green tick
     spinner.set_style(

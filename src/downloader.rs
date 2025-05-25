@@ -9,7 +9,7 @@ use std::sync::Arc;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
 
-use crate::{IaGetError, Result};
+use crate::Result;
 use crate::utils::{create_progress_bar, format_duration, format_size, format_transfer_rate};
 
 /// Buffer size for file operations (8KB)
@@ -130,7 +130,12 @@ async fn download_file_content(
     let mut headers = HeaderMap::new();
     headers.insert(
         reqwest::header::RANGE, 
-        HeaderValue::from_str(&range_header).map_err(|e| IaGetError::UrlError(format!("Invalid header value: {}", e)))?
+        HeaderValue::from_str(&range_header).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput, 
+                format!("Invalid header value: {}", e)
+            )
+        })?
     );
     initial_request = initial_request.headers(headers);
 
@@ -225,20 +230,20 @@ pub async fn download_file(
     
     if let Some(is_valid) = check_existing_file(file_path, expected_md5, running)? {
         if is_valid {
-            println!("╰╼ Completed:   ✅");
+            println!("✅ File already exists and is valid: {}", file_path);
             return Ok(());
+        } else {
+            println!("🔄 File exists but is invalid, re-downloading: {}", file_path);
         }
     }
-    
+
     ensure_parent_directories(file_path)?;
     
     let mut file = prepare_file_for_download(file_path)?;
     
-    let file_size = file.metadata()?.len();
+    let file_size = file.metadata()?.len();        
     let is_resuming = file_size > 0;
-    
     download_file_content(client, url, file_size, &mut file, running, is_resuming).await?;
-    
     verify_downloaded_file(file_path, expected_md5, running)?;
     
     Ok(())
