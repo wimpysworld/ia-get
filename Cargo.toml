@@ -12,19 +12,19 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-futures = "0.3.29"
-indicatif = "0.17.9"
-md5 = "0.7"
-regex = "1.11"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-tokio = { version = "1.42.1", features = ["full"] }
-serde = { version = "1.0.190", features = ["derive"] }
+futures = "0.3.31"
+indicatif = "0.17.11"
+md5 = "0.7.0"
+regex = "1.11.1"
+reqwest = { version = "0.12.15", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1.45.1", features = ["full"] }
+serde = { version = "1.0.219", features = ["derive"] }
 serde-xml-rs = "0.8.0"
-thiserror = "1.0"
-url = "2.4.1"
-clap = { version = "4.0", features = ["derive"] }
-ctrlc = "3.4"
-colored = "2.1.0"
+thiserror = "2.0.12"
+url = "2.5.4"
+clap = { version = "4.5.38", features = ["derive"] }
+ctrlc = "3.4.7"
+colored = "3.0.0"
 
 [profile.release]
 strip = true  # Automatically strip symbols from the binary.
