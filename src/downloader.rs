@@ -1,4 +1,3 @@
-//! Module for handling file downloads, verification, and related operations.
 
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write, Seek, SeekFrom};
@@ -8,49 +7,25 @@ use std::sync::Arc;
 
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
-use colored::*; // Add this line
+use colored::*; // For colored terminal output
+use chrono::Local; // For timestamp formatting in log files
+use serde::{Serialize, Deserialize};
+use std::collections::HashSet;
 
 use crate::Result;
 use crate::error::IaGetError; // Import IaGetError for explicit error conversion
-use crate::utils::{create_progress_bar, format_duration, format_size, format_transfer_rate}; // Import utility functions
+// Remove unused import
+// use crate::utils::{create_progress_bar};
 
 /// Buffer size for file operations (8KB)
 const BUFFER_SIZE: usize = 8192;
 
-/// File size threshold for showing hash progress bar (2MB)
-const LARGE_FILE_THRESHOLD: u64 = 2 * 1024 * 1024; 
-
-/// Sets up signal handling for graceful shutdown on Ctrl+C
-/// 
-/// Returns an Arc<AtomicBool> that can be checked to see if the process
-/// should stop. When Ctrl+C is pressed, this will be set to false.
-fn setup_signal_handler() -> Arc<AtomicBool> {
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-    
-    ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-        println!("\n{} Received Ctrl+C, finishing current operation...", "✘".red().bold());
-    }).expect("Error setting Ctrl+C handler");
-    
-    running
-}
-
-/// Calculates the MD5 hash of a file
+/// Calculates the MD5 hash of a file silently (no separate progress bar)
 fn calculate_md5(file_path: &str, running: &Arc<AtomicBool>) -> Result<String> {
     let file = File::open(file_path)?;
-    let file_size = file.metadata()?.len();
-    let is_large_file = file_size > LARGE_FILE_THRESHOLD;
-    
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
     let mut context = md5::Context::new();
     let mut buffer = [0; BUFFER_SIZE];
-    
-    let pb = if is_large_file {
-        Some(create_progress_bar(file_size, &format!("{} {}    ", "╰╼".cyan().dimmed(), "Verifying".white()), Some("blue/blue"), false))
-    } else { None };
-    
-    let mut bytes_processed: u64 = 0;
     
     loop {
         let bytes_read = reader.read(&mut buffer)?;
@@ -59,9 +34,6 @@ fn calculate_md5(file_path: &str, running: &Arc<AtomicBool>) -> Result<String> {
         }
         
         if !running.load(Ordering::SeqCst) {
-            if let Some(ref progress_bar) = pb {
-                progress_bar.finish_and_clear();
-            }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "Hash calculation interrupted by signal",
@@ -69,16 +41,9 @@ fn calculate_md5(file_path: &str, running: &Arc<AtomicBool>) -> Result<String> {
         }
         
         context.consume(&buffer[..bytes_read]);
-        
-        if let Some(ref progress_bar) = pb {
-            bytes_processed += bytes_read as u64;
-            progress_bar.set_position(bytes_processed);
-        }
     }
     
-    if let Some(progress_bar) = pb.as_ref() { progress_bar.finish_and_clear(); }
-    
-    let hash = context.compute();
+    let hash = context.finalize();
     Ok(format!("{:x}", hash))
 }
 
@@ -98,7 +63,7 @@ fn check_existing_file(file_path: &str, expected_md5: Option<&str>, running: &Ar
             if e.to_string().contains("interrupted by signal") {
                 return Err(e);
             }
-            println!("{} {} to calculate MD5 hash: {}", "╰╼".cyan().dimmed(), "Failed".red().bold(), e);
+            // Silently return false for hash calculation errors to avoid creating new lines
             return Ok(Some(false));
         }
     };
@@ -130,53 +95,36 @@ fn prepare_file_for_download(file_path: &str) -> Result<File> {
     Ok(file)
 }
 
-/// Download file content with progress reporting
-async fn download_file_content(
+/// Download file content with progress updates on the main progress bar
+async fn download_file_content_simple(
     client: &Client, 
     url: &str, 
     file_size: u64, 
     file: &mut File,
     running: &Arc<AtomicBool>,
-    is_resuming: bool
+    progress_bar: &indicatif::ProgressBar,
+    file_name: &str,
 ) -> Result<u64> {
-    let download_action = if is_resuming {
-        format!("{} {}     ", "╰╼".cyan().dimmed(), "Resuming".white())
-    } else {
-        format!("{} {}  ", "╰╼".cyan().dimmed(), "Downloading".white())
-    };
-    
     let mut headers = HeaderMap::new();
     if file_size > 0 {
-        // Use IaGetError::Network for header parsing errors
         headers.insert(reqwest::header::RANGE, HeaderValue::from_str(&format!("bytes={}-", file_size)).map_err(|e| IaGetError::Network(format!("Invalid range header value: {}", e)))?);
     }
 
-    let mut response = if file_size > 0 && is_resuming { // Ensure headers are only used for resume
-        client.get(url).headers(headers).send().await?
+    let mut response = if file_size > 0 {
+        client.get(url).headers(headers).send().await.map_err(|e| IaGetError::Network(format!("Download failed: {}", e)))?
     } else {
-        client.get(url).send().await?
+        client.get(url).send().await.map_err(|e| IaGetError::Network(format!("Download failed: {}", e)))?
     };
 
     let content_length = response.content_length().unwrap_or(0);
-    let total_expected_size = if is_resuming { content_length + file_size } else { content_length };
-    
-    let pb = create_progress_bar(
-        total_expected_size, 
-        &download_action, 
-        Some("green/green"), // Color for download bar
-        true
-    );
-
-    // Set initial progress to current file size for resumed downloads
-    pb.set_position(file_size);
-
-    let start_time = std::time::Instant::now();
+    let total_expected_size = if file_size > 0 { content_length + file_size } else { content_length };
     let mut total_bytes: u64 = file_size;
     let mut downloaded_bytes: u64 = 0;
     
+    let start_time = std::time::Instant::now();
+    
     while let Some(chunk) = response.chunk().await? {
         if !running.load(Ordering::SeqCst) {
-            pb.finish_and_clear();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "Download interrupted during file transfer",
@@ -186,121 +134,269 @@ async fn download_file_content(
         file.write_all(&chunk)?;
         downloaded_bytes += chunk.len() as u64;
         total_bytes += chunk.len() as u64;
-        pb.set_position(total_bytes);
+        
+        // Update progress bar with download percentage and speed
+        if total_expected_size > 0 {
+            let percentage = (total_bytes * 100) / total_expected_size;
+            let elapsed = start_time.elapsed().as_secs_f64();
+            if elapsed > 1.0 { // Only show speed after 1 second
+                let speed_bytes_per_sec = downloaded_bytes as f64 / elapsed;
+                let speed_mb_per_sec = speed_bytes_per_sec / (1024.0 * 1024.0);
+                if speed_mb_per_sec >= 1.0 {
+                    progress_bar.set_prefix(format!("{} ({}% @ {:.1}MB/s)", file_name, percentage, speed_mb_per_sec));
+                } else {
+                    let speed_kb_per_sec = speed_bytes_per_sec / 1024.0;
+                    progress_bar.set_prefix(format!("{} ({}% @ {:.0}KB/s)", file_name, percentage, speed_kb_per_sec));
+                }
+            } else {
+                progress_bar.set_prefix(format!("{} ({}%)", file_name, percentage));
+            }
+        } else {
+            // If we don't know the total size, just show downloaded amount
+            let mb_downloaded = downloaded_bytes as f64 / (1024.0 * 1024.0);
+            if mb_downloaded >= 1.0 {
+                progress_bar.set_prefix(format!("{} ({:.1}MB downloaded)", file_name, mb_downloaded));
+            } else {
+                let kb_downloaded = downloaded_bytes as f64 / 1024.0;
+                progress_bar.set_prefix(format!("{} ({:.0}KB downloaded)", file_name, kb_downloaded));
+            }
+        }
     }
 
     // Ensure data is written to disk
     file.flush()?;
-
-    let elapsed = start_time.elapsed();
-    let elapsed_secs = elapsed.as_secs_f64();
-    let transfer_rate_val = if elapsed_secs > 0.0 {
-        downloaded_bytes as f64 / elapsed_secs
-    } else { 0.0 };
-
-    let (rate, unit) = format_transfer_rate(transfer_rate_val);
-
-    pb.finish_and_clear();
-    println!(
-        "{} {}   {} {} in {} ({:.2} {}/s)",
-        "├╼".cyan().dimmed(),
-        "Downloaded".white(),
-        "↓".green().bold(),
-        format_size(downloaded_bytes).bold(),
-        format_duration(elapsed).bold(),
-        rate,
-        unit
-    );
     
     Ok(total_bytes)
 }
 
-/// Verify a downloaded file's hash against an expected value
-fn verify_downloaded_file(file_path: &str, expected_md5: Option<&str>, running: &Arc<AtomicBool>) -> Result<bool> {
+/// Verify a downloaded file's hash against an expected value (no separate progress output)
+fn verify_downloaded_file_simple(
+    file_path: &str, 
+    expected_md5: Option<&str>, 
+    running: &Arc<AtomicBool>,
+) -> Result<bool> {
     if expected_md5.is_none() {
-        println!("{} {}", "-".dimmed(), "No MD5 hash provided for verification.".dimmed());
         return Ok(true); // No hash to check against, consider it verified
     }
     let expected_md5_str = expected_md5.unwrap();
+    
     let local_md5 = calculate_md5(file_path, running)?;
-    if local_md5 == expected_md5_str {
-        println!(
-            "{} {}         {} {}",
-            "╰╼".cyan().dimmed(),
-            "Hash".white(),
-            "✔".green().bold(),
-            format!("({})", local_md5).dimmed()
-        );
-        Ok(true)
-    } else {
-        println!(
-            "{} {}         {} ({}) Expected ({})",
-            "╰╼".cyan().dimmed(),
-            "Hash".white(),
-            "✘".red().bold(),
-            local_md5.red(),
-            expected_md5_str.dimmed()
-        );
-        Ok(false)
-    }
+    
+    Ok(local_md5 == expected_md5_str)
 }
 
-/// Download multiple files with shared signal handling
+/// Download multiple files with shared signal handling and single-line progress display
 /// 
-/// This function sets up signal handling once for the entire download session
-/// and allows for graceful interruption between files.
+/// This function provides a clean, single-line progress display that updates in-place
+/// showing current file, progress, overall progress, hash matches, fails, and remaining files.
 pub async fn download_files<I>(
     client: &Client,
     files: I,
     total_files: usize,
-) -> Result<()> 
+    log_hash_errors: bool,
+    running: Arc<AtomicBool>,
+) -> Result<()>
 where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
 {
-    // Set up signal handling for the entire download session
-    let running = setup_signal_handler();
-    
-    for (index, (url, file_path, expected_md5)) in files.into_iter().enumerate() {
+    use indicatif::{ProgressBar, ProgressStyle};
+
+    // Collect files into a Vec to allow multiple passes
+    let files_vec: Vec<(String, String, Option<String>)> = files.into_iter().collect();
+
+    // Create a single progress bar for the entire batch
+    let progress_bar = ProgressBar::new(total_files as u64);
+    progress_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("{bar:40.cyan/blue} {pos:>2}/{len:2} | {msg} | {prefix}")
+            .expect("Failed to set progress bar style")
+            .progress_chars("█▉▊▋▌▍▎▏ "),
+    );
+
+    // Statistics tracking - these should be mutually exclusive
+    let mut downloaded_count = 0;  // Successfully downloaded new files
+    let mut skipped_count = 0;     // Files already existed with correct hash
+    let mut failed_count = 0;      // Files that failed to download or verify
+
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    struct BatchLogEntry {
+        url: String,
+        file_path: String,
+        expected_md5: Option<String>,
+        error: String,
+        timestamp: String,
+    }
+
+    let mut batchlog: Vec<BatchLogEntry> = Vec::new();
+    let batchlog_path = "batchlog.json";
+    // If file exists, load previous log (to avoid duplicate entries)
+    if log_hash_errors && std::path::Path::new(batchlog_path).exists() {
+        if let Ok(data) = std::fs::read_to_string(batchlog_path) {
+            if let Ok(entries) = serde_json::from_str::<Vec<BatchLogEntry>>(&data) {
+                batchlog = entries;
+            }
+        }
+    }
+
+    for (index, (url, file_path, expected_md5)) in files_vec.into_iter().enumerate() {
         // Check if we should stop due to signal
         if !running.load(Ordering::SeqCst) {
-            println!("\n{} Download interrupted. Run the command again to resume remaining files.", "✘".red().bold());
+            progress_bar.abandon_with_message("Download interrupted by user".to_string());
             break;
         }
-        
-        println!(" ");
-        println!(
-            "{}  {}     {}", 
-            "▣".bright_cyan().bold(), 
-            "Filename".white(),
-            file_path.bold()
-        );
-        println!(
-            "{} {}        {} {} of {}", 
-            "├╼".cyan().dimmed(),
-            "Count".white(),
-            "#".blue().bold(), 
-            (index + 1).to_string().bold(), 
-            total_files.to_string().bold()
+
+        let remaining = total_files - index;
+        let file_name = std::path::Path::new(&file_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Unknown file");
+
+        // Update progress bar with current statistics and file info
+        let stats_msg = format!("OK:{} ERR:{} SKIP:{} LEFT:{}",
+            downloaded_count + skipped_count,  // Total successful files
+            failed_count,
+            skipped_count,
+            remaining
         );
         
-        if let Some(is_valid) = check_existing_file(&file_path, expected_md5.as_deref(), &running)? {
-            if is_valid {
-                println!("{} {}   {}", "╰╼".cyan().dimmed(), "Downloaded".white(), "✔".green().bold());
-                continue;
-            } else {
-                println!("{} {}      {}", "├╼".cyan().dimmed(), "Partial".white(), "▲".yellow().bold());
+        progress_bar.set_message(stats_msg);
+        progress_bar.set_prefix(file_name.to_string());
+
+        // Try up to 2 attempts: first with resume, second (if needed) from scratch
+        let mut attempt = 0;
+        let max_attempts = 2;
+        let mut success = false;
+        let mut delay = std::time::Duration::from_secs(60);
+        
+        while attempt < max_attempts {
+            // Update progress to show we're checking existing file
+            if Path::new(&file_path).exists() {
+                progress_bar.set_prefix(format!("{} (checking hash)", file_name));
+            }
+            
+            // Check existing file
+            if let Some(is_valid) = check_existing_file(&file_path, expected_md5.as_deref(), &running)? {
+                if is_valid {
+                    skipped_count += 1;  // Only count as skipped, not as hash match
+                    success = true;
+                    break;
+                }
+            }
+
+            // Reset prefix for download
+            progress_bar.set_prefix(file_name.to_string());
+
+            ensure_parent_directories(&file_path)?;
+
+            // If this is the second attempt, delete the file and start from scratch
+            if attempt == 1 && Path::new(&file_path).exists() {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                fs::remove_file(&file_path)?;
+            }
+
+            let mut file = prepare_file_for_download(&file_path)?;
+            let file_size = file.metadata()?.len();
+            
+            let download_result = download_file_content_simple(
+                client, 
+                &url, 
+                file_size, 
+                &mut file, 
+                &running, 
+                &progress_bar,
+                file_name
+            ).await;
+            
+            match download_result {
+                Ok(_) => {
+                    // Update progress to show we're verifying hash
+                    progress_bar.set_prefix(format!("{} (verifying)", file_name));
+                    let verified = verify_downloaded_file_simple(&file_path, expected_md5.as_deref(), &running)?;
+                    // Reset prefix
+                    progress_bar.set_prefix(file_name.to_string());
+                    
+                    if verified {
+                        downloaded_count += 1;  // Successfully downloaded and verified
+                        success = true;
+                        break;
+                    } else {
+                        // Hash verification failed, will retry if attempts remain
+                        // Don't increment failed_count here as we might retry
+                    }
+                }
+                Err(e) => {
+                    // Only pause if it's a transient network error
+                    let is_transient = matches!(e, IaGetError::Network(_));
+                    if is_transient && attempt + 1 < max_attempts {
+                        tokio::time::sleep(delay).await;
+                        delay *= 2;
+                    } else if !is_transient {
+                        // For non-transient errors, break immediately
+                        break;
+                    }
+                }
+            }
+            attempt += 1;
+        }
+        
+        if !success {
+            failed_count += 1;
+            if log_hash_errors {
+                let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                let entry = BatchLogEntry {
+                    url: url.clone(),
+                    file_path: file_path.clone(),
+                    expected_md5: expected_md5.clone(),
+                    error: "Failed to download file with correct hash".to_string(),
+                    timestamp,
+                };
+                // Avoid duplicate entries (by file_path)
+                let already_logged: HashSet<_> = batchlog.iter().map(|e| &e.file_path).collect();
+                if !already_logged.contains(&file_path) {
+                    batchlog.push(entry);
+                }
             }
         }
 
-        ensure_parent_directories(&file_path)?;
+        // Update progress
+        progress_bar.inc(1);
         
-        let mut file = prepare_file_for_download(&file_path)?;
-        
-        let file_size = file.metadata()?.len();        
-        let is_resuming = file_size > 0;
-        download_file_content(client, &url, file_size, &mut file, &running, is_resuming).await?;
-        verify_downloaded_file(&file_path, expected_md5.as_deref(), &running)?;
+        // Update final message for this file
+        let stats_msg = format!("OK:{} ERR:{} SKIP:{} LEFT:{}",
+            downloaded_count + skipped_count,  // Total successful files
+            failed_count,
+            skipped_count,
+            total_files - index - 1
+        );
+        progress_bar.set_message(stats_msg);
     }
     
+    // Finish with summary
+    progress_bar.finish_with_message(format!(
+        "Complete: OK:{} ERR:{} SKIP:{}",
+        downloaded_count + skipped_count,  // Total successful files
+        failed_count,
+        skipped_count
+    ));
+    
+    // Write batchlog to file if logging is enabled
+    if log_hash_errors {
+        match serde_json::to_string_pretty(&batchlog) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(batchlog_path, json) {
+                    eprintln!("{} Failed to write batchlog.json: {}", "▲".yellow(), e);
+                }
+            },
+            Err(e) => {
+                eprintln!("{} Failed to serialize batch log: {}", "▲".yellow(), e);
+            }
+        }
+        // Ensure the file exists even if there are no errors
+        if batchlog.is_empty() && !std::path::Path::new(batchlog_path).exists() {
+            if let Err(e) = std::fs::write(batchlog_path, "[]") {
+                eprintln!("{} Failed to create empty batchlog.json: {}", "▲".yellow(), e);
+            }
+        }
+    }
     Ok(())
 }
