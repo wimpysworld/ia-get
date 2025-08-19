@@ -20,7 +20,7 @@ reqwest = { version = "0.12.22", default-features = false, features = ["rustls-t
 tokio = { version = "1.47.1", features = ["full"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde-xml-rs = "0.8.1"
-thiserror = "2.0.14"
+thiserror = "2.0.15"
 url = "2.5.4"
 clap = { version = "4.5.44", features = ["derive"] }
 ctrlc = "3.4.7"
