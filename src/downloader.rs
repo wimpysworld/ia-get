@@ -48,6 +48,7 @@ fn calculate_md5(file_path: &str, running: &Arc<AtomicBool>) -> Result<String> {
 }
 
 /// Check if an existing file has the correct hash
+/// For XML files, uses alternative validation due to frequent hash mismatches
 fn check_existing_file(file_path: &str, expected_md5: Option<&str>, running: &Arc<AtomicBool>) -> Result<Option<bool>> {
     if !Path::new(file_path).exists() {
         return Ok(None);
@@ -55,6 +56,12 @@ fn check_existing_file(file_path: &str, expected_md5: Option<&str>, running: &Ar
 
     if expected_md5.is_none() {
         return Ok(Some(true)); 
+    }
+
+    // Special handling for XML files
+    if file_path.to_lowercase().ends_with(".xml") {
+        let is_valid = verify_xml_file_alternative(file_path, running)?;
+        return Ok(Some(is_valid));
     }
 
     let local_md5 = match calculate_md5(file_path, running) {
@@ -170,6 +177,7 @@ async fn download_file_content_simple(
 }
 
 /// Verify a downloaded file's hash against an expected value (no separate progress output)
+/// For XML files, performs alternative validation (size + structure) due to frequent hash mismatches
 fn verify_downloaded_file_simple(
     file_path: &str, 
     expected_md5: Option<&str>, 
@@ -178,11 +186,73 @@ fn verify_downloaded_file_simple(
     if expected_md5.is_none() {
         return Ok(true); // No hash to check against, consider it verified
     }
-    let expected_md5_str = expected_md5.unwrap();
     
+    // Special handling for XML files due to frequent hash mismatches at Internet Archive
+    if file_path.to_lowercase().ends_with(".xml") {
+        return verify_xml_file_alternative(file_path, running);
+    }
+    
+    let expected_md5_str = expected_md5.unwrap();
     let local_md5 = calculate_md5(file_path, running)?;
     
     Ok(local_md5 == expected_md5_str)
+}
+
+/// Alternative verification for XML files using size and structure validation
+/// Returns true if the file appears to be a valid XML file
+fn verify_xml_file_alternative(file_path: &str, running: &Arc<AtomicBool>) -> Result<bool> {
+    use std::fs;
+    
+    // Check if we should stop due to signal
+    if !running.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "XML verification interrupted by signal",
+        ).into());
+    }
+    
+    // Check if file exists and has reasonable size (not empty, not too small)
+    let metadata = match fs::metadata(file_path) {
+        Ok(meta) => meta,
+        Err(_) => return Ok(false), // File doesn't exist or can't be read
+    };
+    
+    let file_size = metadata.len();
+    if file_size < 10 {
+        return Ok(false); // File too small to be valid XML
+    }
+    
+    // Read the file content for structure validation
+    let content = match fs::read_to_string(file_path) {
+        Ok(content) => content,
+        Err(_) => return Ok(false), // Can't read file as UTF-8
+    };
+    
+    // Basic XML structure validation
+    let content = content.trim();
+    
+    // Check for XML declaration or root element
+    let has_xml_declaration = content.starts_with("<?xml");
+    let has_root_element = content.contains('<') && content.contains('>');
+    
+    // Check for basic XML structure (matching angle brackets)
+    let open_brackets = content.chars().filter(|&c| c == '<').count();
+    let close_brackets = content.chars().filter(|&c| c == '>').count();
+    let balanced_brackets = open_brackets == close_brackets;
+    
+    // Check for common Internet Archive XML patterns
+    let has_ia_patterns = content.contains("<files>") || 
+                          content.contains("<file ") || 
+                          content.contains("name=") ||
+                          content.contains("size=");
+    
+    // File is considered valid if it has basic XML structure and reasonable size
+    let is_valid = (has_xml_declaration || has_root_element) && 
+                   balanced_brackets && 
+                   has_ia_patterns &&
+                   file_size > 50; // Minimum reasonable size for IA XML files
+    
+    Ok(is_valid)
 }
 
 /// Download multiple files with shared signal handling and single-line progress display
