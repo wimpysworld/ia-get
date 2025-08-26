@@ -58,6 +58,13 @@ async fn main() -> Result<()> {
     let max_file_size = matches.get_one::<String>("max-size")
         .and_then(|s| parse_size_string(s).ok());
 
+    // Compression settings - enable by default as requested
+    let enable_compression = !matches.get_flag("no-compress"); // Default to true unless --no-compress is specified
+    let auto_decompress = matches.get_flag("decompress");
+    let decompress_formats = matches.get_many::<String>("decompress-formats")
+        .map(|values| values.map(|s| s.to_string()).collect::<Vec<_>>())
+        .unwrap_or_default();
+
     // Create HTTP client
     let client = Client::builder()
         .user_agent(get_user_agent())
@@ -75,6 +82,9 @@ async fn main() -> Result<()> {
         verify_md5: true,
         preserve_mtime: true,
         user_agent: get_user_agent(),
+        enable_compression,
+        auto_decompress,
+        decompress_formats: decompress_formats.clone(),
     };
 
     // Create session directory
@@ -87,6 +97,8 @@ async fn main() -> Result<()> {
         true,  // verify_md5
         true,  // preserve_mtime
         session_dir,
+        enable_compression,
+        auto_decompress,
     );
 
     println!("{} Initializing download for archive: {}", 
@@ -109,7 +121,10 @@ async fn main() -> Result<()> {
         &include_formats,
         max_file_size,
         concurrent_downloads,
-        dry_run
+        dry_run,
+        enable_compression,
+        auto_decompress,
+        &decompress_formats
     ).await {
         Ok(_) => {
             if !dry_run {
@@ -172,6 +187,9 @@ fn create_download_config(
     concurrent_downloads: usize,
     include_formats: &[String],
     max_file_size: Option<u64>,
+    enable_compression: bool,
+    auto_decompress: bool,
+    decompress_formats: &[String],
 ) -> Result<DownloadConfig> {
     Ok(DownloadConfig {
         output_dir: output_dir.to_string_lossy().to_string(),
@@ -182,6 +200,9 @@ fn create_download_config(
         verify_md5: true,
         preserve_mtime: true,
         user_agent: get_user_agent(),
+        enable_compression,
+        auto_decompress,
+        decompress_formats: decompress_formats.to_vec(),
     })
 }
 
@@ -235,6 +256,9 @@ async fn fetch_and_display_metadata(
     max_file_size: Option<u64>,
     concurrent_downloads: usize,
     dry_run: bool,
+    enable_compression: bool,
+    auto_decompress: bool,
+    decompress_formats: &[String],
 ) -> Result<()> {
     // Create a client for metadata operations
     let client = Client::builder()
@@ -260,7 +284,7 @@ async fn fetch_and_display_metadata(
     println!("{} Fetching metadata for: {}", "📡".cyan(), identifier);
 
     // Use the existing fetch_json_metadata function instead of duplicating logic
-    let (metadata, _base_url) = fetch_json_metadata(archive_url, &client, &progress).await
+    let (metadata, _base_url) = fetch_json_metadata(archive_url, &client).await
         .context("Failed to fetch metadata using JSON API")?;
 
     progress.finish_and_clear();
@@ -353,7 +377,15 @@ async fn fetch_and_display_metadata(
         }
         
         // Create proper download configuration
-        let download_config = create_download_config(output_dir, concurrent_downloads, include_formats, max_file_size)?;
+        let download_config = create_download_config(
+            output_dir, 
+            concurrent_downloads, 
+            include_formats, 
+            max_file_size,
+            enable_compression,
+            auto_decompress,
+            decompress_formats
+        )?;
         
         // Get list of file names to download
         let requested_files: Vec<String> = filtered_files.iter().map(|f| f.name.clone()).collect();
@@ -481,6 +513,26 @@ fn build_cli() -> Command {
                 .long("max-size")
                 .help("Maximum file size to download (e.g., 100MB, 1GB)")
                 .value_name("SIZE")
+        )
+        .arg(
+            Arg::new("no-compress")
+                .long("no-compress")
+                .help("Disable HTTP compression during downloads (compression is enabled by default)")
+                .action(ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("decompress")
+                .long("decompress")
+                .help("Automatically decompress downloaded files")
+                .action(ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("decompress-formats")
+                .long("decompress-formats")
+                .help("Compression formats to auto-decompress (comma-separated: gzip,bzip2,xz,tar)")
+                .value_name("FORMATS")
+                .value_delimiter(',')
+                .action(ArgAction::Append)
         )
 }
 
