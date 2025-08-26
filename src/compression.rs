@@ -289,7 +289,8 @@ pub fn should_decompress(format: &CompressionFormat, enabled_formats: &[String])
         matches!(format, 
             CompressionFormat::Gzip | 
             CompressionFormat::Bzip2 | 
-            CompressionFormat::Xz
+            CompressionFormat::Xz |
+            CompressionFormat::TarGz  // Include tar.gz in default decompression
         )
     } else {
         let format_str = match format {

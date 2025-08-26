@@ -102,7 +102,7 @@ fn test_should_decompress_configuration() {
 
     // Test default behavior (empty config enables common formats)
     assert!(should_decompress(&gzip_format, &[]));
-    assert!(should_decompress(&tar_gz_format, &[])); // tar.gz is not in default list
+    assert!(should_decompress(&tar_gz_format, &[])); // tar.gz is now included in default list
     assert!(!should_decompress(&zip_format, &[]));
 
     // Test explicit configuration
