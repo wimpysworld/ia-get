@@ -14,17 +14,20 @@ edition = "2021"
 [dependencies]
 indicatif = "0.18.0"
 md5 = "0.8.0"
-reqwest = { version = "0.12.22", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12.23", default-features = false, features = ["rustls-tls", "stream"] }
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "fs", "io-util", "signal"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde-xml-rs = "0.8.1"
-thiserror = "2.0.14"
-url = "2.5.4"
-clap = { version = "4.5.42", features = ["derive"] }
+thiserror = "2.0.16"
+url = "2.5.7"
+clap = { version = "4.5.45", features = ["derive"] }
 ctrlc = "3.4.7"
 colored = "3.0.0"
 chrono = "0.4.41"
-serde_json = "1.0.142"
+serde_json = "1.0.143"
+toml = "0.9.5"
+futures-util = "0.3"
+anyhow = "1.0"
 
 [profile.release]
 strip = true  # Automatically strip symbols from the binary.
