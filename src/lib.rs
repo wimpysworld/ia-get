@@ -18,6 +18,7 @@ pub mod downloads;
 pub mod enhanced_downloader;
 pub mod metadata_storage;
 pub mod filters;
+pub mod compression;
 
 // Re-export the error types for convenience
 pub use error::{IaGetError, Result};

@@ -76,6 +76,18 @@ pub struct Cli {
     /// Show what would be downloaded without actually downloading
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Enable HTTP compression during downloads
+    #[arg(long)]
+    pub compress: bool,
+
+    /// Automatically decompress downloaded files
+    #[arg(long)]
+    pub decompress: bool,
+
+    /// Comma-separated list of formats to auto-decompress (e.g., gzip,bzip2,xz)
+    #[arg(long, value_delimiter = ',')]
+    pub decompress_formats: Vec<String>,
     
     /// Subcommands
     #[command(subcommand)]

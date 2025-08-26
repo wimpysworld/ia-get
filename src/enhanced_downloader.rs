@@ -24,6 +24,8 @@ pub struct ArchiveDownloader {
     verify_md5: bool,
     preserve_mtime: bool,
     session_dir: PathBuf,
+    enable_compression: bool,
+    auto_decompress: bool,
 }
 
 impl ArchiveDownloader {
@@ -34,6 +36,8 @@ impl ArchiveDownloader {
         verify_md5: bool,
         preserve_mtime: bool,
         session_dir: PathBuf,
+        enable_compression: bool,
+        auto_decompress: bool,
     ) -> Self {
         Self {
             client,
@@ -41,6 +45,8 @@ impl ArchiveDownloader {
             verify_md5,
             preserve_mtime,
             session_dir,
+            enable_compression,
+            auto_decompress,
         }
     }
 
@@ -108,6 +114,9 @@ impl ArchiveDownloader {
                 let semaphore_clone = semaphore.clone();
                 let verify_md5 = self.verify_md5;
                 let preserve_mtime = self.preserve_mtime;
+                let enable_compression = self.enable_compression;
+                let auto_decompress = self.auto_decompress;
+                let decompress_formats = session.download_config.decompress_formats.clone();
                 
                 // Create individual progress bar for this file
                 let file_progress = multi_progress.add(ProgressBar::new(file_info.size.unwrap_or(0)));
@@ -130,6 +139,9 @@ impl ArchiveDownloader {
                         output_path,
                         verify_md5,
                         preserve_mtime,
+                        enable_compression,
+                        auto_decompress,
+                        decompress_formats,
                         file_progress,
                     ).await
                 });
@@ -195,6 +207,9 @@ impl ArchiveDownloader {
         output_path: PathBuf,
         verify_md5: bool,
         preserve_mtime: bool,
+        enable_compression: bool,
+        auto_decompress: bool,
+        decompress_formats: Vec<String>,
         progress_bar: ProgressBar,
     ) -> Result<()> {
         // Create output directory if it doesn't exist
@@ -246,6 +261,7 @@ impl ArchiveDownloader {
                 &output_path,
                 &file_info,
                 &progress_bar,
+                enable_compression,
             ).await {
                 Ok(_) => {
                     // Verify MD5 if required and available
@@ -277,6 +293,56 @@ impl ArchiveDownloader {
                         let _ = tokio::task::spawn_blocking(move || {
                             file_info_clone.set_file_mtime(&path_str)
                         }).await;
+                    }
+
+                    // Handle automatic decompression if enabled
+                    if auto_decompress && file_info.is_compressed() {
+                        if let Some(compression_format) = file_info.get_compression_format() {
+                            if let Some(format) = crate::compression::CompressionFormat::from_filename(&file_info.name) {
+                                if crate::compression::should_decompress(&format, &decompress_formats) {
+                                    progress_bar.set_message(format!("Decompressing {}", file_info.name));
+                                    
+                                    // Determine output path for decompressed file(s)
+                                    let decompressed_name = file_info.get_decompressed_name();
+                                    let decompressed_path = if let Some(parent) = output_path.parent() {
+                                        parent.join(&decompressed_name)
+                                    } else {
+                                        PathBuf::from(&decompressed_name)
+                                    };
+
+                                    // Perform decompression
+                                    let output_path_clone = output_path.clone();
+                                    let decompressed_path_clone = decompressed_path.clone();
+                                    let progress_clone = progress_bar.clone();
+                                    
+                                    let decompress_result = tokio::task::spawn_blocking(move || {
+                                        crate::compression::decompress_file(
+                                            &output_path_clone,
+                                            &decompressed_path_clone,
+                                            format,
+                                            Some(&progress_clone),
+                                        )
+                                    }).await;
+
+                                    match decompress_result {
+                                        Ok(Ok(())) => {
+                                            progress_bar.set_message(format!("Decompressed {} → {}", file_info.name, decompressed_name));
+                                            
+                                            // Optionally remove the compressed file after successful decompression
+                                            // For now, we'll keep both to be safe
+                                        }
+                                        Ok(Err(e)) => {
+                                            progress_bar.set_message(format!("Decompression failed for {}: {}", file_info.name, e));
+                                            // Continue without failing the download
+                                        }
+                                        Err(e) => {
+                                            progress_bar.set_message(format!("Decompression task failed for {}: {}", file_info.name, e));
+                                            // Continue without failing the download
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     progress_bar.finish_with_message(format!("✓ Downloaded {}", file_info.name).green().to_string());
@@ -313,8 +379,16 @@ impl ArchiveDownloader {
         output_path: &Path,
         file_info: &ArchiveFile,
         progress_bar: &ProgressBar,
+        enable_compression: bool,
     ) -> Result<()> {
-        let response = client.get(url)
+        let mut request = client.get(url);
+        
+        // Enable HTTP compression if requested
+        if enable_compression {
+            request = request.header("Accept-Encoding", "gzip, deflate, br");
+        }
+        
+        let response = request
             .send()
             .await
             .map_err(|e| IaGetError::Network(format!("Failed to start download: {}", e)))?;
