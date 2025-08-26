@@ -1,11 +1,40 @@
-//! File filtering utilities for ia-get
+//! File filtering and formatting utilities
 //!
-//! Provides functionality to filter files by extension, size, and other criteria.
+//! This module provides comprehensive file filtering capabilities for selecting
+//! specific files from Internet Archive collections based on various criteria.
+//!
+//! ## Features
+//!
+//! - **Extension Filtering**: Include/exclude files by file extension
+//! - **Size Filtering**: Filter files by maximum size with human-readable formats
+//! - **Size Formatting**: Convert bytes to human-readable format (KB, MB, GB, etc.)
+//! - **Pattern Matching**: Flexible filtering with multiple extension support
+//!
+//! ## Usage Examples
+//!
+//! ```rust
+//! use ia_get::filters::{filter_files, parse_size_string, format_size};
+//!
+//! // Parse size strings
+//! let size = parse_size_string("100MB")?; // Returns 104857600 bytes
+//! let size = parse_size_string("2.5GB")?; // Returns 2684354560 bytes
+//!
+//! // Format bytes to human-readable
+//! let formatted = format_size(1048576); // Returns "1.0 MB"
+//!
+//! // Filter files by criteria
+//! let filtered = filter_files(files, &filter_options)?;
+//! ```
+//!
+//! ## Supported Size Units
+//!
+//! - **B**: Bytes
+//! - **KB**: Kilobytes (1000 bytes)
+//! - **MB**: Megabytes (1000 KB)
+//! - **GB**: Gigabytes (1000 MB)
+//! - **TB**: Terabytes (1000 GB)
 
 use crate::{archive_metadata::FileEntry, cli::Commands, Result, error::IaGetError};
-
-#[cfg(test)]
-use crate::archive_metadata::XmlFile;
 
 /// Trait for extracting filter options from different CLI structures
 pub trait FilterOptions {
@@ -168,8 +197,10 @@ mod tests {
 
     #[test]
     fn test_filter_files() {
+        use crate::archive_metadata::JsonFile;
+        
         let files = vec![
-            XmlFile {
+            JsonFile {
                 name: "test.txt".to_string(),
                 source: "original".to_string(),
                 mtime: None,
@@ -183,7 +214,7 @@ mod tests {
                 summation: None,
                 original: None,
             },
-            XmlFile {
+            JsonFile {
                 name: "image.jpg".to_string(),
                 source: "original".to_string(),
                 mtime: None,
@@ -197,7 +228,7 @@ mod tests {
                 summation: None,
                 original: None,
             },
-            XmlFile {
+            JsonFile {
                 name: "document.pdf".to_string(),
                 source: "original".to_string(),
                 mtime: None,

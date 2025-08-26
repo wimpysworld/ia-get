@@ -1,4 +1,30 @@
-//! Error types for ia-get
+//! Comprehensive error handling for ia-get
+//!
+//! This module defines all error types used throughout the ia-get library,
+//! providing clear error messages and context for debugging and user feedback.
+//!
+//! ## Error Categories
+//!
+//! - **Network**: Connection failures, timeouts, HTTP errors
+//! - **FileSystem**: Local file operations, permission issues, disk space
+//! - **UrlFormat**: Invalid or malformed Internet Archive URLs
+//! - **Parse**: JSON/data parsing failures from API responses
+//! - **Io**: Low-level I/O operations (wraps std::io::Error)
+//! - **ReqwestError**: HTTP client errors (wraps reqwest::Error)
+//!
+//! ## Usage
+//!
+//! ```rust
+//! use ia_get::{Result, IaGetError};
+//!
+//! fn download_file() -> Result<()> {
+//!     // Operations that might fail
+//!     if invalid_url {
+//!         return Err(IaGetError::UrlFormat("Invalid identifier".to_string()));
+//!     }
+//!     Ok(())
+//! }
+//! ```
 
 use thiserror::Error;
 
@@ -23,10 +49,6 @@ pub enum IaGetError {
     /// MD5 hash verification failures
     #[error("Hash verification failed: {0}")]
     HashMismatch(String),
-
-    /// XML parsing errors
-    #[error("Failed to parse XML: {0}")]
-    XmlParsing(String),
 
     /// JSON parsing errors
     #[error("Failed to parse JSON: {0}")]
@@ -68,8 +90,3 @@ impl From<url::ParseError> for IaGetError {
     }
 }
 
-impl From<serde_xml_rs::Error> for IaGetError {
-    fn from(err: serde_xml_rs::Error) -> Self {
-        IaGetError::XmlParsing(err.to_string())
-    }
-}

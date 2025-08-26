@@ -1,13 +1,38 @@
-//! Metadata processing module for ia-get
+//! Internet Archive metadata processing
 //!
-//! Handles JSON and XML metadata fetching and parsing from Internet Archive.
-//! Implements the Internet Archive Metadata API as documented at:
-//! https://archive.org/developers/md-read.html
+//! This module provides comprehensive metadata fetching and parsing functionality
+//! for the Internet Archive's JSON API. It handles retries, error recovery, and
+//! provides a clean interface for accessing archive file information.
+//!
+//! ## API Reference
+//! 
+//! Internet Archive Metadata API: https://archive.org/developers/md-read.html
+//! 
+//! ## Usage
+//! 
+//! ```rust
+//! use ia_get::metadata::fetch_json_metadata;
+//! 
+//! // Fetch metadata for an archive
+//! let metadata = fetch_json_metadata("internetarchive").await?;
+//! println!("Found {} files", metadata.files.len());
+//! 
+//! // List all file names
+//! for file in &metadata.files {
+//!     println!("File: {}", file.name);
+//! }
+//! ```
+//! 
+//! ## Features
+//! 
+//! - **Automatic Retries**: Robust retry logic for transient network errors
+//! - **Progress Indicators**: Visual feedback during metadata fetching
+//! - **JSON-Only**: Uses the modern JSON API (no legacy XML support)
+//! - **Error Context**: Detailed error messages with context
 
 use crate::{
     Result, 
     error::IaGetError, 
-    archive_metadata::{XmlFiles, parse_xml_files}, 
     metadata_storage::ArchiveMetadata,
     network::is_transient_error
 };
@@ -15,33 +40,44 @@ use reqwest::Client;
 use colored::*;
 use indicatif::ProgressBar;
 
-/// Generates XML metadata URL from archive.org details URL (legacy)
-pub fn get_xml_url(original_url: &str) -> String {
-    if original_url.contains("/details/") {
-        original_url.replace("/details/", "/metadata/") + "?output=xml"
-    } else if original_url.contains("://archive.org/metadata/") {
-        if original_url.contains("?output=xml") || original_url.contains("&output=xml") {
-            original_url.to_string()
-        } else {
-            original_url.to_string() + "?output=xml"
-        }
-    } else {
-        // Fallback: extract identifier and construct XML URL
-        let identifier = original_url
-            .rsplit('/')
-            .next()
-            .unwrap_or(original_url);
-        format!("https://archive.org/metadata/{}?output=xml", identifier)
-    }
-}
-
-/// Generates JSON metadata URL from archive.org details URL (current API default)
+/// Converts an archive.org details URL to the corresponding JSON metadata URL
+/// 
+/// The Internet Archive provides metadata in JSON format which is preferred over XML
+/// due to better performance, support for partial reads, and cleaner data structures.
+/// 
+/// ## Supported URL Formats
+/// 
+/// - Details URL: `https://archive.org/details/identifier` → `https://archive.org/metadata/identifier`
+/// - Already metadata URL: `https://archive.org/metadata/identifier` → unchanged
+/// - Bare identifier: `identifier` → `https://archive.org/metadata/identifier`
+/// 
+/// ## Examples
+/// 
+/// ```rust
+/// use ia_get::metadata::get_json_url;
+/// 
+/// // Convert details URL
+/// let url = get_json_url("https://archive.org/details/internetarchive");
+/// assert_eq!(url, "https://archive.org/metadata/internetarchive");
+/// 
+/// // Handle bare identifier
+/// let url = get_json_url("internetarchive");
+/// assert_eq!(url, "https://archive.org/metadata/internetarchive");
+/// ```
+/// 
+/// ## Arguments
+/// 
+/// * `original_url` - The input URL or identifier to convert
+/// 
+/// ## Returns
+/// 
+/// A properly formatted JSON metadata URL
 pub fn get_json_url(original_url: &str) -> String {
     if original_url.contains("/details/") {
         original_url.replace("/details/", "/metadata/")
     } else if original_url.contains("://archive.org/metadata/") {
-        // Remove any output=xml parameter for JSON API
-        original_url.replace("?output=xml", "").replace("&output=xml", "")
+        // Already a metadata URL, use as-is
+        original_url.to_string()
     } else {
         // Fallback: extract identifier and construct JSON URL
         let identifier = original_url
@@ -52,145 +88,45 @@ pub fn get_json_url(original_url: &str) -> String {
     }
 }
 
-/// Fetches and parses XML metadata with retry logic for transient errors
-pub async fn fetch_xml_metadata(
-    details_url: &str,
-    client: &Client,
-    spinner: &ProgressBar,
-) -> Result<(XmlFiles, reqwest::Url)> {
-    // Generate XML URL
-    let xml_url = get_xml_url(details_url);
-    spinner.set_message(format!(
-        "{} Accessing XML metadata: {}",
-        "⚙".blue(),
-        xml_url.bold()
-    ));
-
-    // Check XML URL accessibility
-    if let Err(e) = crate::network::is_url_accessible(&xml_url, client, Some(spinner)).await {
-        spinner.finish_with_message(format!(
-            "{} XML metadata not accessible: {}",
-            "✘".red().bold(),
-            xml_url.bold()
-        ));
-        return Err(e); // Propagate the error
-    }
-
-    spinner.set_message(format!("{} {}", "⚙".blue(), "Parsing archive metadata...".bold()));
-
-    // Parse base URL and fetch XML content with retry logic
-    let base_url = reqwest::Url::parse(&xml_url).map_err(|e| IaGetError::Network(format!("URL parse failed: {}", e)))?;
-    let mut retries = 0;
-    let max_retries = 3;
-    let mut delay = std::time::Duration::from_secs(60);
-    let max_delay = std::time::Duration::from_secs(900); // 15 minutes
-    let xml_content = loop {
-        let result = client.get(&xml_url).send().await.map_err(|e| IaGetError::Network(format!("GET request failed: {}", e)));
-        match result {
-            Ok(response) => {
-                // Check for HTTP 429 and Retry-After header BEFORE moving response
-                if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    let wait_time = response.headers().get(reqwest::header::RETRY_AFTER)
-                        .and_then(|h| h.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(60);
-                    
-                    let wait_reason = format!("Rate limited during XML fetch (HTTP 429) - waiting {}s as requested", wait_time);
-                    spinner.set_message(format!("{} {}", "⏳".yellow(), wait_reason));
-                    
-                    tokio::time::sleep(std::time::Duration::from_secs(wait_time)).await;
-                    retries += 1;
-                    continue;
-                }
-                if let Err(e) = response.error_for_status_ref() {
-                    if retries < max_retries && is_transient_error(&e) {
-                        let wait_reason = format!("Server error during XML fetch (HTTP {}) - retrying in {}s (attempt {}/{})", 
-                                                e.status().map(|s| s.as_u16()).unwrap_or(0), 
-                                                delay.as_secs(), 
-                                                retries + 1, 
-                                                max_retries);
-                        spinner.set_message(format!("{} {}", "⏳".yellow(), wait_reason));
-                        
-                        retries += 1;
-                        tokio::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, max_delay);
-                        continue;
-                    } else {
-                        return Err(e.into());
-                    }
-                }
-                let text = response.text().await;
-                match text {
-                    Ok(t) => break t,
-                    Err(e) => {
-                        let is_transient = crate::network::is_transient_reqwest_error(&e);
-                        if retries < max_retries && is_transient {
-                            let wait_reason = format!("Network error during XML fetch - retrying in {}s (attempt {}/{})", 
-                                                    delay.as_secs(), 
-                                                    retries + 1, 
-                                                    max_retries);
-                            spinner.set_message(format!("{} {}", "⏳".yellow(), wait_reason));
-                            
-                            retries += 1;
-                            tokio::time::sleep(delay).await;
-                            delay = std::cmp::min(delay * 2, max_delay);
-                            continue;
-                        } else {
-                            return Err(e.into());
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                let is_transient = matches!(&e, IaGetError::Network(_));
-                if retries < max_retries && is_transient {
-                    let wait_reason = format!("Network error during XML fetch - retrying in {}s (attempt {}/{})", 
-                                            delay.as_secs(), 
-                                            retries + 1, 
-                                            max_retries);
-                    spinner.set_message(format!("{} {}", "⏳".yellow(), wait_reason));
-                    
-                    retries += 1;
-                    tokio::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, max_delay);
-                    continue;
-                } else {
-                    return Err(e);
-                }
-            }
-        }
-    };
-    // Parse XML content with improved error handling
-    let files = parse_xml_files(&xml_content)?;
-
-    Ok((files, base_url))
-}
-
-/// Fetches and parses JSON metadata with retry logic for transient errors (primary method)
+/// Fetches and parses JSON metadata with retry logic for transient errors
+/// 
+/// This function handles the complete flow of fetching metadata from the Internet Archive:
+/// 1. Validates URL accessibility
+/// 2. Fetches JSON content with retry logic for transient errors
+/// 3. Parses the response into a structured ArchiveMetadata object
+/// 
+/// # Arguments
+/// * `details_url` - The archive.org details URL or identifier
+/// * `client` - HTTP client for making requests
+/// * `progress` - Progress bar for user feedback
+/// 
+/// # Returns
+/// * `Ok((ArchiveMetadata, reqwest::Url))` - Parsed metadata and the actual URL used
+/// * `Err(IaGetError)` - Various error conditions (network, parsing, not found, etc.)
 pub async fn fetch_json_metadata(
     details_url: &str,
     client: &Client,
-    spinner: &ProgressBar,
+    progress: &ProgressBar,
 ) -> Result<(ArchiveMetadata, reqwest::Url)> {
-    // Generate JSON URL
+    // Generate JSON metadata URL
     let json_url = get_json_url(details_url);
-    spinner.set_message(format!(
+    progress.set_message(format!(
         "{} Accessing JSON metadata: {}",
         "⚙".blue(),
         json_url.bold()
     ));
 
     // Check JSON URL accessibility
-    if let Err(e) = crate::network::is_url_accessible(&json_url, client, Some(spinner)).await {
-        spinner.finish_with_message(format!(
+    if let Err(e) = crate::network::is_url_accessible(&json_url, client, Some(progress)).await {
+        progress.finish_with_message(format!(
             "{} JSON metadata not accessible: {}",
             "✘".red().bold(),
             json_url.bold()
         ));
-        return Err(e); // Propagate the error
+        return Err(e);
     }
 
-    spinner.set_message(format!("{} {}", "⚙".blue(), "Parsing archive metadata...".bold()));
+    progress.set_message(format!("{} {}", "⚙".blue(), "Parsing archive metadata...".bold()));
 
     // Parse base URL and fetch JSON content with retry logic
     let base_url = reqwest::Url::parse(&json_url).map_err(|e| IaGetError::Network(format!("URL parse failed: {}", e)))?;
@@ -198,11 +134,12 @@ pub async fn fetch_json_metadata(
     let max_retries = 3;
     let mut delay = std::time::Duration::from_secs(60);
     let max_delay = std::time::Duration::from_secs(900); // 15 minutes
+    
     let json_content = loop {
         let result = client.get(&json_url).send().await.map_err(|e| IaGetError::Network(format!("GET request failed: {}", e)));
         match result {
             Ok(response) => {
-                // Check for HTTP 429 and Retry-After header BEFORE moving response
+                // Check for HTTP 429 and Retry-After header
                 if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
                     let wait_time = response.headers().get(reqwest::header::RETRY_AFTER)
                         .and_then(|h| h.to_str().ok())
@@ -210,61 +147,45 @@ pub async fn fetch_json_metadata(
                         .unwrap_or(60);
                     
                     let wait_reason = format!("Rate limited during JSON fetch (HTTP 429) - waiting {}s as requested", wait_time);
-                    spinner.set_message(format!("{} {}", "⏳".yellow(), wait_reason));
+                    progress.set_message(format!("{} {}", "⏳".yellow(), wait_reason));
                     
                     tokio::time::sleep(std::time::Duration::from_secs(wait_time)).await;
-                    retries += 1;
                     continue;
                 }
-                if let Err(e) = response.error_for_status_ref() {
-                    if retries < max_retries && is_transient_error(&e) {
-                        let wait_reason = format!("Server error during JSON fetch (HTTP {}) - retrying in {}s (attempt {}/{})", 
-                                                e.status().map(|s| s.as_u16()).unwrap_or(0), 
-                                                delay.as_secs(), 
-                                                retries + 1, 
-                                                max_retries);
-                        spinner.set_message(format!("{} {}", "⏳".yellow(), wait_reason));
-                        
-                        retries += 1;
-                        tokio::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, max_delay);
-                        continue;
-                    } else {
-                        return Err(e.into());
-                    }
+
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let body_text = response.text().await.unwrap_or_else(|_| "Unable to read response body".to_string());
+                    return Err(IaGetError::Network(format!("HTTP {}: {}", status, body_text)));
                 }
-                let text = response.text().await;
-                match text {
-                    Ok(t) => break t,
+
+                match response.text().await {
+                    Ok(text) => break text,
                     Err(e) => {
-                        let is_transient = crate::network::is_transient_reqwest_error(&e);
-                        if retries < max_retries && is_transient {
-                            let wait_reason = format!("Network error during JSON fetch - retrying in {}s (attempt {}/{})", 
-                                                    delay.as_secs(), 
-                                                    retries + 1, 
-                                                    max_retries);
-                            spinner.set_message(format!("{} {}", "⏳".yellow(), wait_reason));
-                            
+                        if is_transient_error(&e) && retries < max_retries {
                             retries += 1;
+                            let wait_reason = format!("Response read failed (attempt {}/{}): {}", retries, max_retries + 1, e);
+                            progress.set_message(format!("{} {} - retrying in {}s", "⏳".yellow(), wait_reason, delay.as_secs()));
                             tokio::time::sleep(delay).await;
                             delay = std::cmp::min(delay * 2, max_delay);
                             continue;
                         } else {
-                            return Err(e.into());
+                            return Err(IaGetError::Network(format!("Response text failed after {} retries: {}", retries, e)));
                         }
                     }
                 }
             }
             Err(e) => {
-                let is_transient = matches!(&e, IaGetError::Network(_));
-                if retries < max_retries && is_transient {
-                    let wait_reason = format!("Network error during JSON fetch - retrying in {}s (attempt {}/{})", 
-                                            delay.as_secs(), 
-                                            retries + 1, 
-                                            max_retries);
-                    spinner.set_message(format!("{} {}", "⏳".yellow(), wait_reason));
-                    
+                // For IaGetError, check if it's a network error that might be transient
+                let is_transient = match &e {
+                    IaGetError::Network(msg) => msg.contains("timeout") || msg.contains("connection"),
+                    _ => false
+                };
+                
+                if is_transient && retries < max_retries {
                     retries += 1;
+                    let wait_reason = format!("Request failed (attempt {}/{}): {}", retries, max_retries + 1, e);
+                    progress.set_message(format!("{} {} - retrying in {}s", "⏳".yellow(), wait_reason, delay.as_secs()));
                     tokio::time::sleep(delay).await;
                     delay = std::cmp::min(delay * 2, max_delay);
                     continue;
@@ -274,35 +195,56 @@ pub async fn fetch_json_metadata(
             }
         }
     };
-    // Parse JSON content as ArchiveMetadata
+
+    // Parse the JSON response
     let metadata = parse_archive_metadata(&json_content)?;
+    
+    progress.set_message(format!(
+        "{} Successfully parsed metadata: {} files", 
+        "✓".green(), 
+        metadata.files.len()
+    ));
 
     Ok((metadata, base_url))
 }
 
-/// Parses JSON content into ArchiveMetadata structure
+/// Parses archive metadata from JSON content
+/// 
+/// Converts the raw JSON response from Internet Archive into a structured ArchiveMetadata object.
+/// This function handles the complex JSON structure and provides helpful error messages for debugging.
 /// 
 /// # Arguments
-/// * `json_content` - Raw JSON content string from archive.org
+/// * `json_content` - Raw JSON string from the metadata API
 /// 
 /// # Returns
-/// * `Ok(ArchiveMetadata)` if parsing succeeds
-/// * `Err(IaGetError)` with context if parsing fails
+/// * `Ok(ArchiveMetadata)` - Successfully parsed metadata
+/// * `Err(IaGetError)` - Parsing failed with context for debugging
 pub fn parse_archive_metadata(json_content: &str) -> Result<ArchiveMetadata> {
-    serde_json::from_str(json_content).map_err(|e| {
-        let preview = if json_content.len() > crate::constants::XML_DEBUG_TRUNCATE_LEN {
-            &json_content[..crate::constants::XML_DEBUG_TRUNCATE_LEN]
-        } else {
-            json_content
-        };
-        
-        IaGetError::JsonParsing(format!(
-            "Failed to parse JSON metadata: {}. Content preview: {}{}",
-            e,
-            preview,
-            if json_content.len() > crate::constants::XML_DEBUG_TRUNCATE_LEN { "..." } else { "" }
-        ))
-    })
+    match serde_json::from_str::<ArchiveMetadata>(json_content) {
+        Ok(metadata) => {
+            if metadata.files.is_empty() {
+                eprintln!("Warning: Parsed JSON metadata but found no files");
+            }
+            Ok(metadata)
+        }
+        Err(e) => {
+            // Provide helpful debugging information
+            const DEBUG_TRUNCATE_LEN: usize = 200;
+            let preview = if json_content.len() > DEBUG_TRUNCATE_LEN {
+                &json_content[..DEBUG_TRUNCATE_LEN]
+            } else {
+                json_content
+            };
+            
+            eprintln!(
+                "JSON parsing failed.\nError: {}\nContent preview: {}{}", 
+                e, 
+                preview,
+                if json_content.len() > DEBUG_TRUNCATE_LEN { "..." } else { "" }
+            );
+            Err(IaGetError::JsonParsing(format!("Failed to parse JSON metadata: {}", e)))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -310,58 +252,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_xml_url_details() {
-        let details_url = "https://archive.org/details/example";
-        let xml_url = get_xml_url(details_url);
-        assert_eq!(xml_url, "https://archive.org/metadata/example?output=xml");
+    fn test_get_json_url_from_details() {
+        let details_url = "https://archive.org/details/example-item";
+        let expected = "https://archive.org/metadata/example-item";
+        assert_eq!(get_json_url(details_url), expected);
     }
 
     #[test]
-    fn test_get_xml_url_metadata() {
-        let metadata_url = "https://archive.org/metadata/example";
-        let xml_url = get_xml_url(metadata_url);
-        assert_eq!(xml_url, "https://archive.org/metadata/example?output=xml");
+    fn test_get_json_url_from_metadata_url() {
+        let metadata_url = "https://archive.org/metadata/example-item";
+        assert_eq!(get_json_url(metadata_url), metadata_url);
     }
 
     #[test]
-    fn test_get_xml_url_already_xml() {
-        let xml_url_input = "https://archive.org/metadata/example?output=xml";
-        let xml_url = get_xml_url(xml_url_input);
-        assert_eq!(xml_url, "https://archive.org/metadata/example?output=xml");
-    }
-
-    #[test]
-    fn test_get_xml_url_fallback() {
-        let simple_url = "example";
-        let xml_url = get_xml_url(simple_url);
-        assert_eq!(xml_url, "https://archive.org/metadata/example?output=xml");
-    }
-
-    #[test]
-    fn test_get_json_url_details() {
-        let details_url = "https://archive.org/details/example";
-        let json_url = get_json_url(details_url);
-        assert_eq!(json_url, "https://archive.org/metadata/example");
-    }
-
-    #[test]
-    fn test_get_json_url_metadata() {
-        let metadata_url = "https://archive.org/metadata/example";
-        let json_url = get_json_url(metadata_url);
-        assert_eq!(json_url, "https://archive.org/metadata/example");
-    }
-
-    #[test]
-    fn test_get_json_url_removes_xml_param() {
-        let xml_url = "https://archive.org/metadata/example?output=xml";
-        let json_url = get_json_url(xml_url);
-        assert_eq!(json_url, "https://archive.org/metadata/example");
-    }
-
-    #[test]
-    fn test_get_json_url_fallback() {
-        let simple_url = "example";
-        let json_url = get_json_url(simple_url);
-        assert_eq!(json_url, "https://archive.org/metadata/example");
+    fn test_get_json_url_from_identifier() {
+        let identifier = "example-item";
+        let expected = "https://archive.org/metadata/example-item";
+        assert_eq!(get_json_url(identifier), expected);
     }
 }

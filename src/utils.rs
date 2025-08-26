@@ -2,10 +2,6 @@
 
 use indicatif::{ProgressBar, ProgressStyle};
 use colored::*;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use crate::Result;
-use std::io::Read;
 
 /// Spinner tick interval in milliseconds
 pub const SPINNER_TICK_INTERVAL: u64 = 100;

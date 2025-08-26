@@ -1,8 +1,6 @@
 //! Application constants for ia-get
 //! 
-//! Note: XML files from Internet Archive often have mismatched MD5 hashes due to dynamic
-//! generation or updates after the hash was calculated. The downloader uses alternative
-//! validation for .xml files, checking file size and XML structure instead of hash validation.
+//! Contains user agent strings, timeout values, and other configuration constants.
 
 /// Generate a dynamic user agent string with system information
 pub fn get_user_agent() -> String {
@@ -30,6 +28,3 @@ pub const USER_AGENT: &str = "ia-get-cli/1.0 (Internet Archive File Downloader)"
 
 /// Timeout for all HTTP requests in seconds
 pub const HTTP_TIMEOUT: u64 = 60;
-
-/// Maximum length for XML content in debug output (characters)
-pub const XML_DEBUG_TRUNCATE_LEN: usize = 1000;

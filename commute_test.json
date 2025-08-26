@@ -1,0 +1,23 @@
+🧪 Testing enhanced JSON metadata API
+URL: https://archive.org/details/mario
+
+📊 Archive Information:
+  Identifier: mario
+  Total files: 5
+  Archive size: 13453 bytes
+  Server: ia903409.us.archive.org
+  Available servers: ia903409.us.archive.org, ia803409.us.archive.org
+  Directory: /16/items/mario
+
+📁 Files in archive:
+  1. mario_archive.torrent - Archive BitTorrent (1379 bytes) [MD5: 8f1e231969a73360a9944e3f86278732]
+  2. mario_files.xml - Metadata [MD5: 97d741c3107aa1416d6f30367b31f585]
+  3. mario_meta.xml - Metadata (804 bytes) [MD5: bf862f5b26db0aba8f1fb69159e56fbd]
+  4. mario_reviews.xml - Metadata (772 bytes) [MD5: f937c38562d3cb43039d33cc2937dcfe]
+  5. smb_over.mid - mid (10498 bytes) [MD5: b73385fb41dea37a2567fff5cf52a08c]
+
+🌐 Download URLs using workable servers:
+  Server 1: https://ia903409.us.archive.org/16/items/mario/mario_archive.torrent
+  Server 2: https://ia803409.us.archive.org/16/items/mario/mario_archive.torrent
+
+✅ JSON API test completed successfully!

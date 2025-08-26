@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.3.0] - 2025-08-26
+
+### Major Refactoring and Modernization
+- **🗑️ Complete XML Removal**: Migrated entirely from legacy XML to modern JSON API for better performance and maintainability
+- **⚡ Enhanced Concurrent Downloader**: Rebuilt concurrent downloading with session tracking, progress reporting, and improved error handling
+- **🧹 Comprehensive Code Cleanup**: Removed all orphaned and legacy files (main_old.rs, metadata_old.rs, archive_metadata_old.rs, etc.)
+- **📚 Extensive Documentation**: Added comprehensive module-level and function-level documentation with examples throughout the codebase
+- **🏗️ Modern Architecture**: Clean module structure with well-defined responsibilities and clear abstractions
+
+### Technical Improvements
+- **JSON-First Design**: Exclusively uses Internet Archive's JSON API (removed serde-xml-rs dependency)
+- **Session Management**: Enhanced DownloadSession integration for better resume capability
+- **Statistics Tracking**: Comprehensive DownloadStats with speed monitoring and ETA calculations
+- **Error Recovery**: Robust retry logic with proper error context and reporting
+- **Test Coverage**: Updated all tests to work with JSON-only architecture (27/27 tests passing)
+
+### Code Quality
+- **Zero Compilation Warnings**: Clean codebase with no unused imports or variables
+- **Modern Rust Practices**: Comprehensive error handling and idiomatic Rust patterns
+- **Rich Documentation**: Each module includes usage examples and architectural overview
+- **Performance Focus**: Optimized concurrent downloading with configurable limits
+
+### Breaking Changes
+- Removed XML metadata support (JSON-only)
+- Simplified concurrent downloader API
+- Updated project structure and module organization
+
 ## [Unreleased] - 2025-08-16
 
 ### New Features

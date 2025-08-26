@@ -4,9 +4,9 @@
 //! downloaded from Internet Archive following their compression guidelines.
 
 use crate::{Result, IaGetError};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::fs::File;
-use std::io::{BufReader, Write};
+use std::io::BufReader;
 use indicatif::ProgressBar;
 
 /// Supported compression formats for automatic decompression
@@ -255,7 +255,7 @@ fn decompress_tar_xz<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()>
 }
 
 /// Decompress a ZIP file
-fn decompress_zip<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()> {
+fn decompress_zip<P: AsRef<Path>>(_input_path: P, _output_dir: P) -> Result<()> {
     // For now, we'll return an error for ZIP files as we don't have zip dependency
     // TODO: Add zip dependency and implement ZIP decompression
     Err(IaGetError::Parse(

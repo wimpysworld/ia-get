@@ -1,35 +1,129 @@
-//! Simple concurrent downloader for Internet Archive files
+//! Enhanced concurrent downloader for Internet Archive files
 //!
-//! This module provides a simplified concurrent downloader that works
-//! with the existing metadata structures without complex session tracking.
+//! This module provides an improved concurrent downloader that integrates with the 
+//! existing metadata structures and includes session tracking, progress reporting, 
+//! and comprehensive statistics.
+//!
+//! ## Features
+//!
+//! - **Concurrent Downloads**: Parallel file downloads with semaphore-based rate limiting
+//! - **Session Integration**: Works with DownloadSession for resume capability  
+//! - **Progress Tracking**: Real-time download statistics and speed monitoring
+//! - **Error Handling**: Robust error handling with detailed failure reporting
+//! - **Server Selection**: Uses the optimal Internet Archive servers for downloads
+//!
+//! ## Usage
+//!
+//! ```rust
+//! use ia_get::concurrent_simple::SimpleConcurrentDownloader;
+//!
+//! // Create downloader with max 4 concurrent downloads
+//! let downloader = SimpleConcurrentDownloader::new(4)?;
+//!
+//! // Download files concurrently
+//! let results = downloader.download_files(
+//!     &metadata,
+//!     vec!["file1.pdf".to_string(), "file2.txt".to_string()],
+//!     "output_directory".to_string()
+//! ).await?;
+//!
+//! // Check results
+//! for result in results {
+//!     if result.success {
+//!         println!("✅ Downloaded {} ({} bytes)", result.file_name, result.bytes_downloaded);
+//!     } else {
+//!         println!("❌ Failed to download {}: {:?}", result.file_name, result.error);
+//!     }
+//! }
+//! ```
+//!
+//! ## Architecture
+//!
+//! The downloader uses tokio's semaphore system to limit concurrent downloads and
+//! integrates with the metadata storage system for session tracking and resume functionality.
 
 use std::sync::Arc;
-use std::time::Instant;
-use tokio::sync::Semaphore;
+use std::time::{Duration, Instant};
+use tokio::sync::{Semaphore, Mutex};
 use reqwest::Client;
 use crate::{
     Result, IaGetError,
-    metadata_storage::{ArchiveFile, ArchiveMetadata, DownloadConfig},
+    metadata_storage::{ArchiveFile, ArchiveMetadata, DownloadSession, DownloadState},
     constants::get_user_agent,
 };
 
-/// Simple concurrent downloader for Archive.org files
+/// Download statistics for tracking progress
+#[derive(Debug, Clone)]
+pub struct DownloadStats {
+    pub total_files: usize,
+    pub completed_files: usize,
+    pub failed_files: usize,
+    pub skipped_files: usize,
+    pub total_bytes: u64,
+    pub downloaded_bytes: u64,
+    pub start_time: Instant,
+    pub current_speed: f64, // bytes per second
+}
+
+impl DownloadStats {
+    pub fn new(total_files: usize, total_bytes: u64) -> Self {
+        Self {
+            total_files,
+            completed_files: 0,
+            failed_files: 0,
+            skipped_files: 0,
+            total_bytes,
+            downloaded_bytes: 0,
+            start_time: Instant::now(),
+            current_speed: 0.0,
+        }
+    }
+
+    pub fn update_progress(&mut self, additional_bytes: u64) {
+        self.downloaded_bytes += additional_bytes;
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            self.current_speed = self.downloaded_bytes as f64 / elapsed;
+        }
+    }
+
+    pub fn completion_percentage(&self) -> f64 {
+        if self.total_files == 0 { 0.0 } else { (self.completed_files as f64 / self.total_files as f64) * 100.0 }
+    }
+
+    pub fn eta_seconds(&self) -> Option<u64> {
+        if self.current_speed <= 0.0 || self.downloaded_bytes >= self.total_bytes {
+            return None;
+        }
+        let remaining_bytes = self.total_bytes.saturating_sub(self.downloaded_bytes);
+        Some((remaining_bytes as f64 / self.current_speed) as u64)
+    }
+
+    pub fn format_speed(&self) -> String {
+        crate::filters::format_size(self.current_speed as u64) + "/s"
+    }
+}
+
+/// Enhanced concurrent downloader for Archive.org files
 pub struct SimpleConcurrentDownloader {
     client: Client,
     semaphore: Arc<Semaphore>,
+    stats: Arc<Mutex<DownloadStats>>,
 }
 
-/// Download result for a single file
+/// Download result for a single file with enhanced information
 #[derive(Debug)]
 pub struct FileDownloadResult {
     pub file_name: String,
     pub success: bool,
     pub bytes_downloaded: u64,
     pub error: Option<String>,
+    pub duration: Duration,
+    pub server_used: String,
 }
 
 impl SimpleConcurrentDownloader {
-    /// Create a new simple concurrent downloader
+    /// Create a new enhanced concurrent downloader
     pub fn new(max_concurrent: usize) -> Result<Self> {
         let client = Client::builder()
             .user_agent(get_user_agent())
@@ -40,7 +134,55 @@ impl SimpleConcurrentDownloader {
         Ok(Self {
             client,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            stats: Arc::new(Mutex::new(DownloadStats::new(0, 0))),
         })
+    }
+
+    /// Get current download statistics
+    pub async fn get_stats(&self) -> DownloadStats {
+        self.stats.lock().await.clone()
+    }
+
+    /// Update download session with file status
+    pub async fn update_session_status(
+        &self,
+        session: &mut DownloadSession,
+        file_name: &str,
+        status: DownloadState,
+        bytes_downloaded: u64,
+        error_message: Option<String>,
+    ) {
+        if let Some(file_status) = session.file_status.get_mut(file_name) {
+            file_status.status = status.clone();
+            file_status.bytes_downloaded = bytes_downloaded;
+            file_status.error_message = error_message;
+            
+            match status {
+                DownloadState::InProgress => {
+                    file_status.started_at = Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    );
+                }
+                DownloadState::Completed | DownloadState::Failed => {
+                    file_status.completed_at = Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    );
+                }
+                _ => {}
+            }
+        }
+        
+        // Update session timestamp
+        session.last_updated = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
     }
 
     /// Download files concurrently with basic progress tracking
@@ -100,6 +242,8 @@ impl SimpleConcurrentDownloader {
                         success: false,
                         bytes_downloaded: 0,
                         error: Some(e.to_string()),
+                        duration: Duration::from_secs(0),
+                        server_used: "unknown".to_string(),
                     });
                 }
             }
@@ -115,7 +259,7 @@ impl SimpleConcurrentDownloader {
         Ok(download_results)
     }
 
-    /// Download a single file
+    /// Download a single file with enhanced tracking
     async fn download_single_file(
         &self,
         file: ArchiveFile,
@@ -123,6 +267,7 @@ impl SimpleConcurrentDownloader {
         output_dir: String,
     ) -> Result<FileDownloadResult> {
         let _permit = self.semaphore.acquire().await.unwrap();
+        let start_time = Instant::now();
 
         let url = format!("https://{}{}/{}", server, &server, file.name);
         let file_path = std::path::Path::new(&output_dir).join(&file.name);
@@ -133,18 +278,28 @@ impl SimpleConcurrentDownloader {
         }
 
         match self.download_file_content(&url, &file_path).await {
-            Ok(bytes) => Ok(FileDownloadResult {
-                file_name: file.name,
-                success: true,
-                bytes_downloaded: bytes,
-                error: None,
-            }),
-            Err(e) => Ok(FileDownloadResult {
-                file_name: file.name,
-                success: false,
-                bytes_downloaded: 0,
-                error: Some(e.to_string()),
-            }),
+            Ok(bytes) => {
+                let duration = start_time.elapsed();
+                Ok(FileDownloadResult {
+                    file_name: file.name,
+                    success: true,
+                    bytes_downloaded: bytes,
+                    error: None,
+                    duration,
+                    server_used: server,
+                })
+            }
+            Err(e) => {
+                let duration = start_time.elapsed();
+                Ok(FileDownloadResult {
+                    file_name: file.name,
+                    success: false,
+                    bytes_downloaded: 0,
+                    error: Some(e.to_string()),
+                    duration,
+                    server_used: server,
+                })
+            }
         }
     }
 

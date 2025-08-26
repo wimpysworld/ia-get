@@ -214,27 +214,6 @@ async fn test_is_url_accessible_422_error() {
 }
 
 #[tokio::test]
-async fn test_fetch_xml_metadata_valid() {
-    let _client = Client::new();
-    // Test basic functionality without complex XML
-    let simple_xml = r#"<metadata><identifier>test</identifier></metadata>"#;
-    
-    use serde_json::Value;
-    let result = serde_xml_rs::from_str::<Value>(simple_xml);
-    // Just verify the parsing functionality exists
-    let _parsing_attempted = result.is_ok() || result.is_err();
-    assert!(_parsing_attempted);
-}
-
-#[tokio::test]
-async fn test_fetch_xml_metadata_invalid_xml() {
-    let invalid_xml = "not valid xml content";
-    use serde_json::Value;
-    let result = serde_xml_rs::from_str::<Value>(invalid_xml);
-    assert!(result.is_err());
-}
-
-#[tokio::test]
 async fn test_cli_no_args_interactive() {
     use clap::Parser;
     // Test that CLI with no arguments defaults to no command
@@ -278,27 +257,6 @@ async fn test_cli_config_command() {
         }
         _ => panic!("Expected Config command"),
     }
-}
-
-#[tokio::test]
-async fn test_xml_validation_success() {
-    // Test basic XML parsing functionality
-    let simple_xml = r#"<root><item>test</item></root>"#;
-    
-    use serde_json::Value;
-    let result = serde_xml_rs::from_str::<Value>(simple_xml);
-    // Just verify the function exists and can be called
-    let _parsing_attempted = result.is_ok() || result.is_err();
-    assert!(_parsing_attempted);
-}
-
-#[tokio::test]
-async fn test_xml_validation_malformed() {
-    let xml_content = "<invalid><unclosed>";
-    use serde_json::Value;
-    let result = serde_xml_rs::from_str::<Value>(xml_content);
-    // Should be an error for malformed XML
-    assert!(result.is_err());
 }
 
 #[tokio::test]

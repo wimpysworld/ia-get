@@ -1,7 +1,41 @@
-//! Enhanced downloader module for ia-get
+//! Enhanced Internet Archive downloader
 //!
-//! Implements comprehensive downloading with metadata storage, resume functionality,
-//! and full compliance with Internet Archive API recommendations.
+//! This module provides the main download engine for ia-get with comprehensive
+//! session management, progress tracking, and resume capabilities.
+//!
+//! ## Features
+//!
+//! - **Session Management**: Persistent download sessions for resume capability
+//! - **Concurrent Downloads**: Configurable parallel downloading with rate limiting
+//! - **Progress Tracking**: Real-time progress bars and statistics
+//! - **Error Recovery**: Automatic retry logic for transient failures
+//! - **Filtering**: Advanced file filtering by format, size, and patterns
+//! - **Compression**: Automatic decompression of downloaded archives
+//! - **Verification**: MD5 hash verification for data integrity
+//!
+//! ## Usage
+//!
+//! ```rust
+//! use ia_get::{
+//!     enhanced_downloader::EnhancedDownloader,
+//!     metadata_storage::DownloadConfig,
+//! };
+//!
+//! // Create downloader with 4 concurrent connections
+//! let downloader = EnhancedDownloader::new(4)?;
+//!
+//! // Configure download settings
+//! let config = DownloadConfig {
+//!     output_dir: "downloads".to_string(),
+//!     max_concurrent: 4,
+//!     verify_md5: true,
+//!     auto_decompress: true,
+//!     // ... other settings
+//! };
+//!
+//! // Download entire archive
+//! downloader.download_archive(&metadata, "output", &config).await?;
+//! ```
 
 use crate::{
     Result, 
@@ -297,7 +331,7 @@ impl ArchiveDownloader {
 
                     // Handle automatic decompression if enabled
                     if auto_decompress && file_info.is_compressed() {
-                        if let Some(compression_format) = file_info.get_compression_format() {
+                        if let Some(_compression_format) = file_info.get_compression_format() {
                             if let Some(format) = crate::compression::CompressionFormat::from_filename(&file_info.name) {
                                 if crate::compression::should_decompress(&format, &decompress_formats) {
                                     progress_bar.set_message(format!("Decompressing {}", file_info.name));
