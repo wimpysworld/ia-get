@@ -1,49 +1,10 @@
 //! Utility functions for ia-get.
 
 use indicatif::{ProgressBar, ProgressStyle};
-use regex::Regex;
-use std::sync::LazyLock;
-use crate::constants::URL_PATTERN;
-use crate::{Result, IaGetError};
-use colored::*; // Add this line
+use colored::*;
 
 /// Spinner tick interval in milliseconds
 pub const SPINNER_TICK_INTERVAL: u64 = 100;
-
-/// Compiled regex for URL validation (initialized once)
-static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(URL_PATTERN).expect("Invalid URL regex pattern")
-});
-
-/// Validates an archive.org details URL format
-/// 
-/// # Arguments
-/// * `url` - The URL to validate
-/// 
-/// # Returns
-/// * `Ok(())` if the URL is valid
-/// * `Err(IaGetError::UrlFormat)` if the URL format is invalid
-/// 
-/// # Examples
-/// ```
-/// use ia_get::utils::validate_archive_url;
-/// 
-/// assert!(validate_archive_url("https://archive.org/details/valid-item").is_ok());
-/// assert!(validate_archive_url("https://archive.org/details/valid-item/").is_ok());
-/// assert!(validate_archive_url("https://example.com/invalid").is_err());
-/// ```
-pub fn validate_archive_url(url: &str) -> Result<()> {
-    if URL_REGEX.is_match(url) {
-        // Further check: ensure there's an identifier after "details/"
-        // and that the identifier is not empty.
-        if let Some(path_segment) = url.split("/details/").nth(1) {
-            if !path_segment.trim_end_matches('/').is_empty() {
-                return Ok(());
-            }
-        }
-    }
-    Err(IaGetError::UrlFormat(url.to_string()))
-}
 
 /// Create a progress bar with consistent styling
 /// 

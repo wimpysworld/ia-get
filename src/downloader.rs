@@ -7,15 +7,13 @@ use std::sync::Arc;
 
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
-use colored::*; // For colored terminal output
-use chrono::Local; // For timestamp formatting in log files
+use colored::*;
+use chrono::Local;
 use serde::{Serialize, Deserialize};
 use std::collections::HashSet;
 
 use crate::Result;
-use crate::error::IaGetError; // Import IaGetError for explicit error conversion
-// Remove unused import
-// use crate::utils::{create_progress_bar};
+use crate::error::IaGetError;
 
 /// Buffer size for file operations (8KB)
 const BUFFER_SIZE: usize = 8192;

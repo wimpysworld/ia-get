@@ -27,6 +27,14 @@ pub enum IaGetError {
     /// XML parsing errors
     #[error("Failed to parse XML: {0}")]
     XmlParsing(String),
+
+    /// General parsing errors
+    #[error("Parse error: {0}")]
+    Parse(String),
+
+    /// IO errors
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 impl From<reqwest::Error> for IaGetError {
@@ -39,12 +47,6 @@ impl From<reqwest::Error> for IaGetError {
         } else {
             IaGetError::Network(err.to_string())
         }
-    }
-}
-
-impl From<std::io::Error> for IaGetError {
-    fn from(err: std::io::Error) -> Self {
-        IaGetError::FileSystem(err.to_string())
     }
 }
 
