@@ -2,6 +2,10 @@
 
 use indicatif::{ProgressBar, ProgressStyle};
 use colored::*;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use crate::Result;
+use std::io::Read;
 
 /// Spinner tick interval in milliseconds
 pub const SPINNER_TICK_INTERVAL: u64 = 100;
@@ -112,4 +116,21 @@ pub fn format_transfer_rate(bytes_per_sec: f64) -> (f64, &'static str) {
     } else {
         (bytes_per_sec / GB, "GB")
     }
+}
+
+/// Calculate MD5 hash of a file
+pub fn calculate_md5<P: AsRef<std::path::Path>>(file_path: P) -> Result<String> {
+    let mut file = std::fs::File::open(file_path)?;
+    let mut hasher = md5::Context::new();
+    let mut buffer = [0; 8192];
+    
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.consume(&buffer[..bytes_read]);
+    }
+    
+    Ok(format!("{:x}", hasher.finalize()))
 }

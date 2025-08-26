@@ -31,6 +31,10 @@ pub enum IaGetError {
     /// General parsing errors
     #[error("Parse error: {0}")]
     Parse(String),
+    
+    /// JSON parsing errors
+    #[error("JSON parsing error: {0}")]
+    JsonParsing(String),
 
     /// IO errors
     #[error("IO error: {0}")]

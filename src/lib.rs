@@ -15,6 +15,9 @@ pub mod url_processing;
 pub mod cli;
 pub mod metadata;
 pub mod downloads;
+pub mod enhanced_downloader;
+pub mod metadata_storage;
+pub mod filters;
 
 // Re-export the error types for convenience
 pub use error::{IaGetError, Result};
@@ -26,3 +29,8 @@ pub use constants::get_user_agent;
 pub use cli::Cli;
 pub use metadata::{get_xml_url, fetch_xml_metadata};
 pub use downloads::download_files_with_retries;
+
+// Placeholder for fetch_json_metadata until properly implemented
+pub async fn fetch_json_metadata(_url: &str, _client: &reqwest::Client) -> crate::Result<serde_json::Value> {
+    Err(crate::error::IaGetError::Parse("JSON metadata not yet implemented".to_string()))
+}

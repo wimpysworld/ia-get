@@ -339,9 +339,9 @@ impl ArchiveDownloader {
 
         // Download with progress tracking
         let mut downloaded = 0u64;
-        let mut stream = response.bytes_stream();
         
         use futures_util::StreamExt;
+        let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk
                 .map_err(|e| IaGetError::Network(format!("Download stream error: {}", e)))?;
