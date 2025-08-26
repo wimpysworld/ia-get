@@ -35,7 +35,28 @@ So I co-authored `ia-get` to automate the download process.
 - 🔏 Hash checks to confirm file integrity
 - 🌱 Can be run multiple times to update existing downloads
 - 📊 Gets all the metadata for the archive
+- 🗜️ **NEW**: Compression support with automatic decompression
 - 📦️ Available for **Linux** 🐧 **macOS** 🍏 and **Windows** 🪟
+
+### Compression Support 🗜️
+
+ia-get now includes comprehensive compression features:
+
+- **HTTP Compression**: Reduce bandwidth usage during downloads
+- **Auto-Detection**: Automatically detect compressed files from Archive.org metadata
+- **Multiple Formats**: Support for gzip, bzip2, xz, tar, and combined formats (tar.gz, tar.bz2, tar.xz)
+- **Transparent Decompression**: Automatically decompress files after download
+- **Configurable**: Choose which formats to decompress automatically
+
+```bash
+# Enable compression and auto-decompression
+ia-get --compress --decompress https://archive.org/details/your_archive
+
+# Decompress specific formats only
+ia-get --decompress --decompress-formats gzip,bzip2 https://archive.org/details/your_archive
+```
+
+See [docs/COMPRESSION.md](docs/COMPRESSION.md) for detailed compression documentation.
 
 ### Sharing is caring 🤝
 

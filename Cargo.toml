@@ -32,6 +32,9 @@ bzip2 = "0.4"
 xz2 = "0.1"
 tar = "0.4"
 
+[dev-dependencies]
+tempfile = "3.0"
+
 [profile.release]
 strip = true  # Automatically strip symbols from the binary.
 opt-level = "z"  # Optimize for size.
