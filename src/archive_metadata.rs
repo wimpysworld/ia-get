@@ -3,6 +3,12 @@ use serde_xml_rs::from_str;
 use crate::{Result, IaGetError};
 use crate::constants::XML_DEBUG_TRUNCATE_LEN;
 
+/// Trait for file entries that can be filtered
+pub trait FileEntry {
+    fn name(&self) -> &str;
+    fn size(&self) -> Option<u64>;
+}
+
 /// Root structure for parsing the XML files list from archive.org
 /// The actual XML structure has a `files` root element containing multiple `file` elements
 #[derive(Deserialize, Debug)]
@@ -39,6 +45,16 @@ pub struct XmlFile {
     pub btih: Option<String>,
     pub summation: Option<String>,
     pub original: Option<String>,
+}
+
+impl FileEntry for XmlFile {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn size(&self) -> Option<u64> {
+        self.size
+    }
 }
 
 /// Parses XML content into XmlFiles structure with improved error context

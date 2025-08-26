@@ -112,6 +112,12 @@ pub struct DownloadConfig {
     pub preserve_mtime: bool,
     /// User agent string
     pub user_agent: String,
+    /// Whether to enable compression during downloads
+    pub enable_compression: bool,
+    /// Whether to automatically decompress downloaded files
+    pub auto_decompress: bool,
+    /// Compression formats to decompress automatically
+    pub decompress_formats: Vec<String>,
 }
 
 /// Status of an individual file download
@@ -411,10 +417,10 @@ impl ArchiveFile {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                let atime = metadata.atime();
+                let _atime = metadata.atime();
                 use std::process::Command;
                 
-                let mtime_str = mtime.to_string();
+                let _mtime_str = mtime.to_string();
                 Command::new("touch")
                     .args(&["-t", &format!("{}", mtime), file_path.as_ref().to_str().unwrap()])
                     .output()
@@ -428,6 +434,108 @@ impl ArchiveFile {
             }
         }
         Ok(())
+    }
+
+    /// Check if this file is compressed based on its format or extension
+    pub fn is_compressed(&self) -> bool {
+        // Check format field first
+        if let Some(format) = &self.format {
+            let format_lower = format.to_lowercase();
+            if matches!(format_lower.as_str(), 
+                "zip" | "gzip" | "bzip2" | "xz" | "tar" | "7z" | "rar" | "lz4" | "zstd"
+            ) {
+                return true;
+            }
+        }
+
+        // Check file extension as fallback
+        let name_lower = self.name.to_lowercase();
+        name_lower.ends_with(".zip") ||
+        name_lower.ends_with(".gz") ||
+        name_lower.ends_with(".bz2") ||
+        name_lower.ends_with(".xz") ||
+        name_lower.ends_with(".tar") ||
+        name_lower.ends_with(".tar.gz") ||
+        name_lower.ends_with(".tar.bz2") ||
+        name_lower.ends_with(".tar.xz") ||
+        name_lower.ends_with(".7z") ||
+        name_lower.ends_with(".rar") ||
+        name_lower.ends_with(".lz4") ||
+        name_lower.ends_with(".zst")
+    }
+
+    /// Get the compression format of this file
+    pub fn get_compression_format(&self) -> Option<String> {
+        if !self.is_compressed() {
+            return None;
+        }
+
+        // Check format field first
+        if let Some(format) = &self.format {
+            let format_lower = format.to_lowercase();
+            if matches!(format_lower.as_str(), 
+                "zip" | "gzip" | "bzip2" | "xz" | "tar" | "7z" | "rar" | "lz4" | "zstd"
+            ) {
+                return Some(format_lower);
+            }
+        }
+
+        // Determine from file extension
+        let name_lower = self.name.to_lowercase();
+        if name_lower.ends_with(".zip") {
+            Some("zip".to_string())
+        } else if name_lower.ends_with(".gz") || name_lower.ends_with(".tar.gz") {
+            Some("gzip".to_string())
+        } else if name_lower.ends_with(".bz2") || name_lower.ends_with(".tar.bz2") {
+            Some("bzip2".to_string())
+        } else if name_lower.ends_with(".xz") || name_lower.ends_with(".tar.xz") {
+            Some("xz".to_string())
+        } else if name_lower.ends_with(".tar") {
+            Some("tar".to_string())
+        } else if name_lower.ends_with(".7z") {
+            Some("7z".to_string())
+        } else if name_lower.ends_with(".rar") {
+            Some("rar".to_string())
+        } else if name_lower.ends_with(".lz4") {
+            Some("lz4".to_string())
+        } else if name_lower.ends_with(".zst") {
+            Some("zstd".to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Get the expected decompressed file name
+    pub fn get_decompressed_name(&self) -> String {
+        if !self.is_compressed() {
+            return self.name.clone();
+        }
+
+        let name = &self.name;
+        // Remove compression extensions
+        if name.ends_with(".tar.gz") {
+            name.trim_end_matches(".gz").to_string()
+        } else if name.ends_with(".tar.bz2") {
+            name.trim_end_matches(".bz2").to_string()
+        } else if name.ends_with(".tar.xz") {
+            name.trim_end_matches(".xz").to_string()
+        } else if name.ends_with(".gz") {
+            name.trim_end_matches(".gz").to_string()
+        } else if name.ends_with(".bz2") {
+            name.trim_end_matches(".bz2").to_string()
+        } else if name.ends_with(".xz") {
+            name.trim_end_matches(".xz").to_string()
+        } else if name.ends_with(".zip") {
+            // For ZIP files, we'll extract to a directory with the same name
+            name.trim_end_matches(".zip").to_string()
+        } else {
+            // For other formats, remove the extension
+            std::path::Path::new(name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(name)
+                .to_string()
+        }
     }
 }
 
