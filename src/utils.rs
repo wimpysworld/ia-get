@@ -119,18 +119,32 @@ pub fn format_transfer_rate(bytes_per_sec: f64) -> (f64, &'static str) {
 }
 
 /// Calculate MD5 hash of a file
-pub fn calculate_md5<P: AsRef<std::path::Path>>(file_path: P) -> Result<String> {
-    let mut file = std::fs::File::open(file_path)?;
+/// 
+/// # Arguments
+/// * `file_path` - Path to the file
+/// 
+/// # Returns
+/// The MD5 hash as a hexadecimal string
+pub fn calculate_md5<P: AsRef<std::path::Path>>(file_path: P) -> crate::Result<String> {
+    use std::io::Read;
+    
+    let mut file = std::fs::File::open(file_path)
+        .map_err(|e| crate::IaGetError::FileSystem(format!("Failed to open file for MD5 calculation: {}", e)))?;
+    
     let mut hasher = md5::Context::new();
     let mut buffer = [0; 8192];
     
     loop {
-        let bytes_read = file.read(&mut buffer)?;
+        let bytes_read = file.read(&mut buffer)
+            .map_err(|e| crate::IaGetError::FileSystem(format!("Failed to read file for MD5 calculation: {}", e)))?;
+        
         if bytes_read == 0 {
             break;
         }
+        
         hasher.consume(&buffer[..bytes_read]);
     }
     
-    Ok(format!("{:x}", hasher.finalize()))
+    let digest = hasher.finalize();
+    Ok(format!("{:x}", digest))
 }

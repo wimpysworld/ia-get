@@ -2,7 +2,7 @@
 //!
 //! Provides functionality to filter files by extension, size, and other criteria.
 
-use crate::{archive_metadata::FileEntry, cli::{LegacyCli, Commands}, Result, error::IaGetError};
+use crate::{archive_metadata::FileEntry, cli::Commands, Result, error::IaGetError};
 
 #[cfg(test)]
 use crate::archive_metadata::XmlFile;
@@ -14,39 +14,22 @@ pub trait FilterOptions {
     fn max_file_size(&self) -> &Option<String>;
 }
 
-impl FilterOptions for LegacyCli {
-    fn include_ext(&self) -> &Option<String> {
-        &self.include_ext
-    }
-    
-    fn exclude_ext(&self) -> &Option<String> {
-        &self.exclude_ext
-    }
-    
-    fn max_file_size(&self) -> &Option<String> {
-        &self.max_file_size
-    }
-}
-
 impl FilterOptions for Commands {
     fn include_ext(&self) -> &Option<String> {
         match self {
             Commands::Download { include_ext, .. } => include_ext,
-            _ => &None,
         }
     }
     
     fn exclude_ext(&self) -> &Option<String> {
         match self {
             Commands::Download { exclude_ext, .. } => exclude_ext,
-            _ => &None,
         }
     }
     
     fn max_file_size(&self) -> &Option<String> {
         match self {
             Commands::Download { max_file_size, .. } => max_file_size,
-            _ => &None,
         }
     }
 }
@@ -230,18 +213,13 @@ mod tests {
             },
         ];
         
-        let cli = LegacyCli {
-            url: None,
-            output_path: None,
-            log_hash_errors: false,
-            verbose: false,
-            dry_run: false,
-            concurrent_downloads: 1,
-            max_retries: 3,
+        let cli = Commands::Download {
+            url: "test".to_string(),
+            output: None,
             include_ext: Some("txt,jpg".to_string()),
             exclude_ext: None,
             max_file_size: Some("1MB".to_string()),
-            resume: false,
+            compress: false,
         };
         
         let filtered = filter_files(files, &cli);

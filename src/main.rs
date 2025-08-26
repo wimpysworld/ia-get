@@ -284,7 +284,7 @@ async fn fetch_and_display_metadata(
     println!("{} Fetching metadata for: {}", "📡".cyan(), identifier);
 
     // Use the existing fetch_json_metadata function instead of duplicating logic
-    let (metadata, _base_url) = fetch_json_metadata(archive_url, &client).await
+    let (metadata, _base_url) = fetch_json_metadata(archive_url, &client, &progress).await
         .context("Failed to fetch metadata using JSON API")?;
 
     progress.finish_and_clear();

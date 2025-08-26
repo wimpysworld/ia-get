@@ -6,17 +6,27 @@ use crate::{Result, error::IaGetError, constants::HTTP_TIMEOUT};
 use reqwest::Client;
 use colored::*;
 
-/// Checks if a URL is accessible by sending a HEAD request, with retry logic and dynamic wait reasons
+/// Checks if a URL is accessible by sending appropriate request method, with retry logic and dynamic wait reasons
 pub async fn is_url_accessible(url: &str, client: &Client, spinner: Option<&indicatif::ProgressBar>) -> Result<()> {
     let mut retries = 0;
     let max_retries = 5;
     let mut delay = std::time::Duration::from_secs(60);
     let max_delay = std::time::Duration::from_secs(900); // 15 minutes
+    
     loop {
-        let result = client.head(url)
-            .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT))
-            .send().await
-            .map_err(|e| IaGetError::Network(format!("HEAD request failed: {}", e)));
+        // Use GET for metadata URLs since Archive.org returns 405 for HEAD requests on metadata endpoints
+        let result = if url.contains("/metadata/") {
+            client.get(url)
+                .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT))
+                .send().await
+                .map_err(|e| IaGetError::Network(format!("GET request failed: {}", e)))
+        } else {
+            client.head(url)
+                .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT))
+                .send().await
+                .map_err(|e| IaGetError::Network(format!("HEAD request failed: {}", e)))
+        };
+        
         match result {
             Ok(response) => {
                 // Check for HTTP 429 and Retry-After header BEFORE moving response

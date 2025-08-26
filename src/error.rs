@@ -28,13 +28,21 @@ pub enum IaGetError {
     #[error("Failed to parse XML: {0}")]
     XmlParsing(String),
 
+    /// JSON parsing errors
+    #[error("Failed to parse JSON: {0}")]
+    JsonParsing(String),
+
+    /// Configuration errors
+    #[error("Configuration error: {0}")]
+    Config(String),
+
     /// General parsing errors
     #[error("Parse error: {0}")]
     Parse(String),
-    
-    /// JSON parsing errors
-    #[error("JSON parsing error: {0}")]
-    JsonParsing(String),
+
+    /// Missing files error
+    #[error("No files found: {0}")]
+    NoFilesFound(String),
 
     /// IO errors
     #[error("IO error: {0}")]
