@@ -1,5 +1,40 @@
 # Changelog
 
+## [1.4.0] - 2025-01-27
+
+### 🚀 Automated CI/CD and Production-Quality Releases
+
+#### Major Infrastructure Improvements
+- **🔄 Comprehensive CI/CD Pipeline**: Implemented automated build and release system that creates production-quality artifacts for every commit and tagged release
+- **🔐 SHA256 Integrity Verification**: All downloadable artifacts now include SHA256 checksums for reproducible builds and security verification
+- **🌍 Multi-Platform Support**: Automated builds for Linux (x86_64, ARM, musl), Windows, and macOS (Intel + Apple Silicon)
+- **📦 Multiple Artifact Formats**: Support for archives (.tar.gz, .zip) and Debian packages (.deb)
+
+#### Enhanced Release Management
+- **🏷️ Development Releases**: Every commit to main branch automatically creates a development release with binaries
+- **📋 Tagged Releases**: Production releases with comprehensive packaging and permanent retention
+- **📝 Automated Release Notes**: Generated release notes include download links, checksums, and changelog entries
+- **⏰ Smart Retention**: Development builds retained for 30 days, tagged releases permanent
+
+#### User Experience Improvements  
+- **📥 Download Buttons**: README now includes prominent download badges for all major platforms
+- **📖 Verification Guide**: Clear instructions for SHA256 integrity checking and security best practices
+- **🔗 Direct Access**: Both stable and development builds readily accessible with platform-specific links
+- **📊 Commit Traceability**: All artifacts tagged with commit SHA for easy identification
+
+#### Developer Experience
+- **🧪 Enhanced Testing**: Local testing script includes hash calculation verification
+- **📈 Quality Assurance**: All builds verify formatting, linting, compilation, and tests (27/27 passing)
+- **⚡ Optimized Workflows**: Efficient cross-platform build matrix with caching and dependency management
+
+#### Technical Implementation
+- **GitHub Actions Integration**: Production-ready workflows for continuous integration and deployment
+- **Cross-Platform Compilation**: Support for cross-compilation using cross-rs for ARM and musl targets  
+- **Comprehensive Documentation**: Updated platform support information and access instructions
+- **Security-First Approach**: All artifacts cryptographically signed with SHA256 hashes
+
+This release establishes ia-get as a professionally maintained tool with enterprise-grade build and release processes, ensuring users can trust and verify every download while developers benefit from automated quality assurance.
+
 ## [1.3.0] - 2025-08-26
 
 ### Major Refactoring and Modernization

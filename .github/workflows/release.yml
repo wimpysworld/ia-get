@@ -81,6 +81,19 @@ jobs:
           OS_NAME: ${{ matrix.job.os }}
         run: ./.github/workflows/before_deploy.sh
 
+      - name: Generate release notes with hashes
+        shell: bash
+        run: |
+          echo "## 📦 Artifact Checksums (SHA256)" > HASHES_${{ matrix.job.target }}.md
+          echo "" >> HASHES_${{ matrix.job.target }}.md
+          for file in *.sha256; do
+            if [ -f "$file" ]; then
+              basename="${file%.sha256}"
+              hash=$(cat "$file" | cut -d' ' -f1)
+              echo "- **${basename}**: \`${hash}\`" >> HASHES_${{ matrix.job.target }}.md
+            fi
+          done
+
       - name: Releasing assets
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
@@ -88,5 +101,69 @@ jobs:
           files: |
             ia-get-*-${{ matrix.job.target }}.*
             ia-get*.deb
+            *.sha256
+            HASHES_${{ matrix.job.target }}.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update_release_notes:
+    name: Update Release Notes
+    runs-on: ubuntu-latest
+    needs: publish
+    if: github.ref_type == 'tag'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download release assets to collect hashes
+        shell: bash
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          
+          # Get all release assets and their info
+          gh release view $TAG_NAME --json assets --jq '.assets[] | select(.name | endswith(".sha256")) | .downloadUrl' | while read url; do
+            curl -sL "$url" >> ALL_HASHES.txt
+          done
+          
+          # Generate comprehensive release notes
+          cat > FINAL_RELEASE_NOTES.md << 'EOF'
+          # 🚀 Release ${TAG_NAME}
+          
+          ## 📥 Downloads
+          
+          ### Quick Downloads
+          - **Linux (x86_64)**: [ia-get-${TAG_NAME}-x86_64-unknown-linux-gnu.tar.gz](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-x86_64-unknown-linux-gnu.tar.gz)
+          - **Windows (x86_64)**: [ia-get-${TAG_NAME}-x86_64-pc-windows-msvc.zip](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-x86_64-pc-windows-msvc.zip)
+          - **macOS (x86_64)**: [ia-get-${TAG_NAME}-x86_64-apple-darwin.tar.gz](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-x86_64-apple-darwin.tar.gz)
+          - **macOS (ARM64)**: [ia-get-${TAG_NAME}-aarch64-apple-darwin.tar.gz](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-aarch64-apple-darwin.tar.gz)
+          
+          ### All Platforms
+          See the **Assets** section below for all supported platforms including Linux ARM, musl variants, and .deb packages.
+          
+          ## 🔐 Integrity Verification
+          
+          All artifacts include SHA256 checksums for integrity verification:
+          
+          \`\`\`
+          $(cat ALL_HASHES.txt 2>/dev/null || echo "Checksums will be available shortly...")
+          \`\`\`
+          
+          **Usage**: \`sha256sum -c <filename>.sha256\`
+          
+          ## 📋 Changelog
+          
+          $(head -n 100 CHANGELOG.md | tail -n +3)
+          
+          ---
+          
+          For development builds and latest changes, see the [development release](https://github.com/Gameaday/ia-get-cli/releases/tag/development).
+          EOF
+
+      - name: Update release with comprehensive notes
+        shell: bash
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          gh release edit $TAG_NAME --notes-file FINAL_RELEASE_NOTES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

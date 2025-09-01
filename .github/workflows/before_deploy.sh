@@ -38,8 +38,14 @@ pack() {
     pushd "$tempdir"
     if [ "$OS_NAME" = windows-latest ]; then
         7z a "$out_dir/$package_name.zip" "$package_name"/*
+        cd "$out_dir"
+        sha256sum "$package_name.zip" > "$package_name.zip.sha256"
+        echo "✅ Archive created: $package_name.zip (SHA256: $(cat "$package_name.zip.sha256" | cut -d' ' -f1))"
     else
         tar czf "$out_dir/$package_name.tar.gz" "$package_name"/*
+        cd "$out_dir"
+        sha256sum "$package_name.tar.gz" > "$package_name.tar.gz.sha256"
+        echo "✅ Archive created: $package_name.tar.gz (SHA256: $(cat "$package_name.tar.gz.sha256" | cut -d' ' -f1))"
     fi
     popd
     rm -r "$tempdir"
@@ -165,6 +171,10 @@ Description: High-performance file downloader for archive.org (heavily modified 
 EOF
 
     fakeroot dpkg-deb -Zgzip --build "$tempdir" "${dpkgname}_${version}_${architecture}.deb"
+    
+    # Calculate SHA256 for .deb file
+    sha256sum "${dpkgname}_${version}_${architecture}.deb" > "${dpkgname}_${version}_${architecture}.deb.sha256"
+    echo "✅ .deb package created: ${dpkgname}_${version}_${architecture}.deb (SHA256: $(cat "${dpkgname}_${version}_${architecture}.deb.sha256" | cut -d' ' -f1))"
 }
 
 

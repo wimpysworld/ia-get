@@ -59,9 +59,109 @@ jobs:
           cd artifacts && tar czf ia-get-${{ runner.os }}.tar.gz ia-get
         fi
 
+    - name: Calculate SHA256 hashes
+      shell: bash
+      run: |
+        cd artifacts
+        for file in *; do
+          if [ -f "$file" ]; then
+            sha256sum "$file" > "$file.sha256"
+            echo "SHA256 for $file: $(cat "$file.sha256")"
+          fi
+        done
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: ia-get-${{ runner.os }}
         path: artifacts/*
-        retention-days: 7
+        retention-days: 30
+
+  release:
+    name: Create Development Release
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: release-artifacts
+
+    - name: Prepare release artifacts
+      run: |
+        mkdir -p final-artifacts
+        # Flatten artifact directory structure and calculate combined hashes
+        find release-artifacts -type f -name "*.tar.gz" -o -name "*.zip" | while read file; do
+          cp "$file" final-artifacts/
+        done
+        find release-artifacts -type f -name "*.sha256" | while read file; do
+          cp "$file" final-artifacts/
+        done
+        
+        cd final-artifacts
+        echo "## 📦 Artifact Checksums (SHA256)" > ../HASHES.md
+        echo "" >> ../HASHES.md
+        for file in *.sha256; do
+          if [ -f "$file" ]; then
+            basename="${file%.sha256}"
+            hash=$(cat "$file" | cut -d' ' -f1)
+            echo "- **${basename}**: \`${hash}\`" >> ../HASHES.md
+          fi
+        done
+
+    - name: Generate release notes
+      run: |
+        COMMIT_SHA=$(git rev-parse --short HEAD)
+        COMMIT_MSG=$(git log -1 --pretty=format:'%s')
+        DATE=$(date '+%Y-%m-%d %H:%M:%S UTC')
+        
+        cat > RELEASE_NOTES.md << EOF
+        # 🚀 Development Build - ${COMMIT_SHA}
+        
+        **Build Date**: ${DATE}  
+        **Commit**: ${COMMIT_SHA}  
+        **Message**: ${COMMIT_MSG}
+        
+        ## 📥 Downloads
+        
+        Choose your platform:
+        - **Linux**: \`ia-get-Linux.tar.gz\`
+        - **Windows**: \`ia-get-Windows.zip\` 
+        - **macOS**: \`ia-get-macOS.tar.gz\`
+        
+        $(cat HASHES.md)
+        
+        ## 📋 Recent Changes
+        
+        $(head -n 50 CHANGELOG.md | tail -n +3)
+        
+        ---
+        *This is an automated development build. For stable releases, see [tagged releases](https://github.com/Gameaday/ia-get-cli/releases).*
+        EOF
+
+    - name: Delete previous development release
+      continue-on-error: true
+      run: |
+        gh release delete development --yes || true
+        git push origin :refs/tags/development || true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create development release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: development
+        name: "🔧 Latest Development Build"
+        body_path: RELEASE_NOTES.md
+        files: final-artifacts/*
+        prerelease: true
+        make_latest: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -22,6 +22,44 @@ Simply pass the URL of an [archive.org](https://archive.org) details page you wa
 ia-get https://archive.org/details/<identifier>
 ```
 
+## 📥 Download ia-get
+
+Get the latest version for your platform:
+
+<div align="center">
+
+[![Download for Linux](https://img.shields.io/badge/Download-Linux-0078d4?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/Gameaday/ia-get-cli/releases/latest)
+[![Download for Windows](https://img.shields.io/badge/Download-Windows-0078d4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Gameaday/ia-get-cli/releases/latest)
+[![Download for macOS](https://img.shields.io/badge/Download-macOS-0078d4?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/Gameaday/ia-get-cli/releases/latest)
+
+</div>
+
+### 🔧 Development Builds
+
+For the latest features and fixes, try our [development builds](https://github.com/Gameaday/ia-get-cli/releases/tag/development) which are automatically updated with every commit to the main branch.
+
+### 📦 All Platforms & Packages
+
+Visit our [releases page](https://github.com/Gameaday/ia-get-cli/releases) for:
+- **All supported platforms**: Linux (x86_64, ARM, musl), Windows, macOS (Intel + Apple Silicon)
+- **Package formats**: Archives (.tar.gz, .zip) and Debian packages (.deb)
+- **Checksums**: SHA256 hashes for integrity verification
+- **Changelog**: Full release notes with all changes
+
+### 🛡️ Integrity Verification
+
+All releases include SHA256 checksums. To verify your download:
+
+```bash
+# Download both the archive and checksum file from the releases page
+# Example for Linux x86_64:
+curl -LO https://github.com/Gameaday/ia-get-cli/releases/latest/download/ia-get-v1.3.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/Gameaday/ia-get-cli/releases/latest/download/ia-get-v1.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+# Verify the download
+sha256sum -c ia-get-v1.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+```
+
 ## Advanced Usage 🚀
 
 ```shell
@@ -185,15 +223,17 @@ The project now includes comprehensive CI/CD processes:
 - **Standard toolchain**: Uses Rust's standard toolchain for reliable, reproducible builds
 
 ### Automated Artifacts
-- **Every commit**: Binary artifacts uploaded for all supported platforms
-- **Release builds**: Optimized binaries with full packaging (archives, .deb packages)
-- **30-day retention**: Development artifacts available for testing and debugging
-- **Commit traceability**: Artifacts tagged with commit SHA for easy identification
+- **Every commit**: Binary artifacts automatically published as [development releases](https://github.com/Gameaday/ia-get-cli/releases/tag/development)
+- **Tagged releases**: Production-quality binaries with comprehensive packaging (archives, .deb packages)
+- **Permanent retention**: All artifacts available permanently via GitHub releases
+- **Integrity verification**: SHA256 checksums for all downloads ensuring reproducible builds
+- **Commit traceability**: Development builds tagged with commit SHA for easy identification
+- **Multi-platform**: Automated builds for all supported architectures and operating systems
 
 ### Supported Platforms
-- x86_64-unknown-linux-gnu
-- x86_64-pc-windows-msvc
-- x86_64-apple-darwin
+- **Linux**: x86_64-unknown-linux-gnu, x86_64-unknown-linux-musl, i686-unknown-linux-gnu, arm-unknown-linux-gnueabihf, aarch64-unknown-linux-gnu
+- **Windows**: x86_64-pc-windows-msvc  
+- **macOS**: x86_64-apple-darwin, aarch64-apple-darwin
 
 The CI runs on every push and pull request, ensuring code quality and platform compatibility.
 
