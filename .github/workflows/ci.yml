@@ -59,14 +59,16 @@ jobs:
           cd artifacts && tar czf ia-get-${{ runner.os }}.tar.gz ia-get
         fi
 
-    - name: Calculate SHA256 hashes
+    - name: Calculate and display SHA256 hashes
       shell: bash
       run: |
         cd artifacts
+        echo "# Calculated SHA256 hashes:" > ../hashes_${{ runner.os }}.txt
         for file in *; do
           if [ -f "$file" ]; then
-            sha256sum "$file" > "$file.sha256"
-            echo "SHA256 for $file: $(cat "$file.sha256")"
+            hash=$(sha256sum "$file" | cut -d' ' -f1)
+            echo "SHA256 for $file: $hash"
+            echo "$hash  $file" >> ../hashes_${{ runner.os }}.txt
           fi
         done
 
@@ -74,7 +76,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: ia-get-${{ runner.os }}
-        path: artifacts/*
+        path: |
+          artifacts/*
+          hashes_${{ runner.os }}.txt
         retention-days: 30
 
   release:
@@ -97,22 +101,32 @@ jobs:
     - name: Prepare release artifacts
       run: |
         mkdir -p final-artifacts
-        # Flatten artifact directory structure and calculate combined hashes
+        # Flatten artifact directory structure and gather hash information
         find release-artifacts -type f -name "*.tar.gz" -o -name "*.zip" | while read file; do
           cp "$file" final-artifacts/
         done
-        find release-artifacts -type f -name "*.sha256" | while read file; do
+        # Copy binaries
+        find release-artifacts -type f -name "ia-get" -o -name "ia-get.exe" | while read file; do
           cp "$file" final-artifacts/
         done
         
         cd final-artifacts
         echo "## 📦 Artifact Checksums (SHA256)" > ../HASHES.md
         echo "" >> ../HASHES.md
-        for file in *.sha256; do
-          if [ -f "$file" ]; then
-            basename="${file%.sha256}"
-            hash=$(cat "$file" | cut -d' ' -f1)
-            echo "- **${basename}**: \`${hash}\`" >> ../HASHES.md
+        
+        # Collect hashes from all hash files
+        for hash_file in ../release-artifacts/*/hashes_*.txt; do
+          if [ -f "$hash_file" ]; then
+            # Read each line from the hash file and match with files in final-artifacts
+            while IFS= read -r line; do
+              if [[ "$line" =~ ^[a-f0-9]{64}[[:space:]]+(.+)$ ]]; then
+                hash=$(echo "$line" | cut -d' ' -f1)
+                filename=$(echo "$line" | cut -d' ' -f3-)
+                if [ -f "$filename" ]; then
+                  echo "- **${filename}**: \`${hash}\`" >> ../HASHES.md
+                fi
+              fi
+            done < "$hash_file"
           fi
         done
 

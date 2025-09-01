@@ -86,13 +86,17 @@ jobs:
         run: |
           echo "## 📦 Artifact Checksums (SHA256)" > HASHES_${{ matrix.job.target }}.md
           echo "" >> HASHES_${{ matrix.job.target }}.md
-          for file in *.sha256; do
-            if [ -f "$file" ]; then
-              basename="${file%.sha256}"
-              hash=$(cat "$file" | cut -d' ' -f1)
-              echo "- **${basename}**: \`${hash}\`" >> HASHES_${{ matrix.job.target }}.md
-            fi
-          done
+          if [ -f "RELEASE_HASHES.txt" ]; then
+            while IFS= read -r line; do
+              if [[ "$line" =~ ^[a-f0-9]{64}[[:space:]]+(.+)$ ]]; then
+                hash=$(echo "$line" | cut -d' ' -f1)
+                filename=$(echo "$line" | cut -d' ' -f3-)
+                echo "- **${filename}**: \`${hash}\`" >> HASHES_${{ matrix.job.target }}.md
+              fi
+            done < RELEASE_HASHES.txt
+          else
+            echo "- Hash information will be available shortly" >> HASHES_${{ matrix.job.target }}.md
+          fi
 
       - name: Releasing assets
         uses: softprops/action-gh-release@v2
@@ -101,7 +105,7 @@ jobs:
           files: |
             ia-get-*-${{ matrix.job.target }}.*
             ia-get*.deb
-            *.sha256
+            RELEASE_HASHES.txt
             HASHES_${{ matrix.job.target }}.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -121,10 +125,12 @@ jobs:
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
           
-          # Get all release assets and their info
-          gh release view $TAG_NAME --json assets --jq '.assets[] | select(.name | endswith(".sha256")) | .downloadUrl' | while read url; do
-            curl -sL "$url" >> ALL_HASHES.txt
-          done
+          # Get all release hash files and combine them
+          gh release view $TAG_NAME --json assets --jq '.assets[] | select(.name | test("RELEASE_HASHES.txt|HASHES_.*\\.md")) | .downloadUrl' | while read url; do
+            if [[ "$url" == *"RELEASE_HASHES.txt"* ]]; then
+              curl -sL "$url" >> ALL_HASHES.txt
+            fi
+          done || true
           
           # Generate comprehensive release notes
           cat > FINAL_RELEASE_NOTES.md << 'EOF'
@@ -149,7 +155,7 @@ jobs:
           $(cat ALL_HASHES.txt 2>/dev/null || echo "Checksums will be available shortly...")
           \`\`\`
           
-          **Usage**: \`sha256sum -c <filename>.sha256\`
+          **Usage**: Download the RELEASE_HASHES.txt file and run \`sha256sum -c RELEASE_HASHES.txt\`
           
           ## 📋 Changelog
           
