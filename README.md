@@ -6,11 +6,13 @@
 
 <p align="center"><b>High-performance file downloader for archive.org</b></p>
 <p align="center">
-<img alt="GitHub all releases" src="https://img.shields.io/github/downloads/wimpysworld/ia-get/total?logo=github&label=Downloads">
+<img alt="GitHub Downloads" src="https://img.shields.io/github/downloads/Gameaday/ia-get-cli/total?logo=github&label=Downloads">
 <img alt="CI Status" src="https://img.shields.io/github/actions/workflow/status/Gameaday/ia-get-cli/ci.yml?branch=main&logo=github&label=CI">
 </p>
 
 <p align="center">Made with 💝 by 🤖</p>
+
+> **🍴 Fork Notice**: This is a heavily modified fork of the original [`wimpysworld/ia-get`](https://github.com/wimpysworld/ia-get) project. Due to extensive architectural changes and different development directions, changes from this fork will not be pushed back to the upstream repository.
 
 # Usage 📖
 
@@ -36,13 +38,27 @@ ia-get --max-file-size 100MB https://archive.org/details/data_archive
 ia-get --output ./downloads https://archive.org/details/software_archive
 ```
 
+## Fork Information 🍴
+
+This repository is a **heavily modified fork** of the original [`wimpysworld/ia-get`](https://github.com/wimpysworld/ia-get) project, developed by Martin Wimpress. Due to extensive architectural changes and different development directions, this fork has diverged significantly from the upstream project.
+
+### Key Differences from Upstream
+
+- **🔄 Complete API Migration**: Migrated entirely from legacy XML to modern JSON APIs
+- **⚡ Enhanced Architecture**: Rebuilt concurrent downloader with session tracking and progress reporting  
+- **🧹 Modern Codebase**: Comprehensive refactoring with extensive documentation and modern Rust practices
+- **🧪 Extensive Testing**: Full test suite with 27+ unit tests (all passing)
+- **📦 CI/CD Pipeline**: Automated builds and artifact generation for multiple platforms
+- **🎯 Advanced Filtering**: Smart file filtering system with size and extension-based controls
+- **🗜️ Compression Support**: HTTP compression and automatic decompression capabilities
+
+### Code Comparison
+
+Based on the extensive refactoring documented in the changelog, **approximately 80-90% of the codebase has been rewritten** from the original. The core concept and some utility functions remain, but the architecture, API usage, error handling, and feature set have been fundamentally rebuilt.
+
 ## Why? 🤔💭
 
-I wanted to download high-quality scans of [ZZap!64 magazine](https://en.wikipedia.org/wiki/Zzap!64) and some read-only memory from archive.org.
-Archives of this type often include many large files, torrents are not always provided and when they are available they do not index all the available files in the archive.
-
-Archive.org provides comprehensive JSON APIs for every collection that indexes every file available.
-So I co-authored `ia-get` to automate the download process with maximum efficiency and reliability.
+Archive.org provides comprehensive JSON APIs for every collection that indexes every file available. This tool automates the download process with maximum efficiency and reliability, making it ideal for downloading large archives like high-quality magazine scans, software collections, and other digital preservation content.
 
 ## ✨ Features
 
@@ -199,34 +215,41 @@ The script creates test artifacts in `artifacts/` directory which is gitignored.
 
 ## Manual Tests 🤞
 
-I used these commands to test `ia-get` during development.
+During development, we test `ia-get` with various archive types:
 
 ```shell
-ia-get https://archive.org/details/deftributetozzap64
-ia-get https://archive.org/details/zzapp_64_issue_001_600dpi
+# Test with magazine archives
+ia-get https://archive.org/details/your_magazine_archive
+
+# Test with software collections  
+ia-get https://archive.org/details/your_software_archive
+
+# Test with document collections
+ia-get https://archive.org/details/your_document_archive
 ```
 
 # A.I. Driven Development 🤖
 
-This program is an ongoing experiment 🧪 in AI-assisted development. The project has evolved through multiple phases:
+This program represents an ongoing experiment 🧪 in AI-assisted development, building upon the foundation of the original [`wimpysworld/ia-get`](https://github.com/wimpysworld/ia-get) project. This fork has evolved through multiple phases of development:
 
 ## Development History
 
-**Phase 1 (Late 2023)**: Initially co-authored using [Chatty Jeeps](https://ubuntu.social/@popey/111527182881051626) (ChatGPT-4). I had no Rust experience and wanted to see if AI could help me build a program in an unfamiliar language.
+**Original Project (2023)**: The upstream [`wimpysworld/ia-get`](https://github.com/wimpysworld/ia-get) was initially co-authored by Martin Wimpress using [Chatty Jeeps](https://ubuntu.social/@popey/111527182881051626) (ChatGPT-4), with subsequent improvements through [Unfold.ai](https://unfoldai.io/) and community input.
 
-**Phase 2 (Oct-Dec 2023)**: Used [Unfold.ai](https://unfoldai.io/) to add features and improve the code. All AI-assisted commits from this period have full details in the commit messages.
+**Fork Development (2025)**: This fork represents a major departure from the original, featuring:
+- **🗑️ Complete Architectural Rewrite**: Migration from XML to JSON-first APIs
+- **⚡ Enhanced Performance**: Rebuilt concurrent downloading with session management
+- **🧹 Modern Codebase**: Comprehensive cleanup with extensive documentation
+- **🧪 Robust Testing**: Full test suite with 27+ unit tests
+- **📦 Professional CI/CD**: Multi-platform builds and automated artifact generation
 
-**Phase 3 (Jan 2024)**: Community input from Linux Matters listener [Daniel Dewberry](https://github.com/DanielDewberry) who submitted a [comprehensive peer review](https://github.com/wimpysworld/ia-get/issues/7).
+## Divergence from Upstream
 
-**Phase 4 (May 2025)**: Major refactoring and modernization using GitHub Copilot with Claude Sonnet 3.5, including:
-- Complete migration from XML to JSON APIs
-- Enhanced concurrent downloading with session management
-- Comprehensive code cleanup and documentation
-- Modern Rust practices and error handling
+Due to the extensive changes in architecture, coding style, and project direction, **this fork will not contribute changes back to the upstream repository**. The projects have evolved to serve different use cases and development philosophies.
 
 ## Featured Coverage
 
-**As featured on [Linux Matters](https://linuxmatters.sh) podcast!** 🎙️ The [initial version](https://github.com/wimpysworld/ia-get/tree/5f2b356e7d841f2756780e2a101cf8be4041a7f6) was discussed in [Episode 16 - Blogging to the Fediverse](https://linuxmatters.sh/16/), covering the AI development process, successes, and challenges.
+**As featured on [Linux Matters](https://linuxmatters.sh) podcast!** 🎙️ The [original version](https://github.com/wimpysworld/ia-get/tree/5f2b356e7d841f2756780e2a101cf8be4041a7f6) was discussed in [Episode 16 - Blogging to the Fediverse](https://linuxmatters.sh/16/), covering the AI development process, successes, and challenges.
 
 <div align="center">
   <a href="https://linuxmatters.sh" target="_blank"><img src="https://raw.githubusercontent.com/wimpysworld/nix-config/main/.github/screenshots/linuxmatters.png" alt="Linux Matters Podcast"/></a>
@@ -234,4 +257,4 @@ This program is an ongoing experiment 🧪 in AI-assisted development. The proje
   <em>Linux Matters Podcast</em>
 </div>
 
-Through this journey, I've learned Rust fundamentals and modern development practices, with each phase building on the previous work to create a robust, well-documented tool.
+This fork continues the AI-assisted development journey, demonstrating how modern tools can be used to completely transform and modernize an existing codebase while maintaining respect for the original work.

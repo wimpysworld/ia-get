@@ -55,8 +55,8 @@ make_deb() {
     local homepage
     local maintainer
 
-    homepage="https://github.com/wimpysworld/ia-get"
-    maintainer="Martin Wimpress <code@wimpress.io>"
+    homepage="https://github.com/Gameaday/ia-get-cli"
+    maintainer="Fork Maintainer <gameaday@users.noreply.github.com>"
     copyright_years="2023 - "$(date "+%Y")
 
     case $TARGET in
@@ -153,14 +153,15 @@ Package: $dpkgname
 Version: $version
 Section: utils
 Priority: optional
-Maintainer: Martin Wimpress <code@wimpress.io>
+Maintainer: Fork Maintainer <gameaday@users.noreply.github.com>
 Architecture: $architecture
 Depends: $depends
 Conflicts: $conflictname
-Description: File downloader for archive.org
+Description: High-performance file downloader for archive.org (heavily modified fork)
  Pass the URL of an archive.org details page you want to download and ia-get
- will automatically get the XML metadata and download all files to the current
- working directory.
+ will automatically get the JSON metadata and download all files to the current
+ working directory. This is a heavily modified fork with modern JSON APIs and
+ enhanced features.
 EOF
 
     fakeroot dpkg-deb -Zgzip --build "$tempdir" "${dpkgname}_${version}_${architecture}.deb"

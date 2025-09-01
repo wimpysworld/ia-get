@@ -1,10 +1,10 @@
 [package]
 name = "ia-get"
 categories = ["command-line-utilities"]
-description = "File downloader for archive.org"
-keywords = ["cli", "archive", "internet-archive", "download"]
-authors = ["Martin Wimpress <code@wimpress.io>"]
-repository = "https://github.com/wimpysworld/ia-get"
+description = "High-performance file downloader for archive.org (heavily modified fork)"
+keywords = ["cli", "archive", "internet-archive", "download", "json-api"]
+authors = ["Fork Maintainer <gameaday@users.noreply.github.com>", "Original Author: Martin Wimpress <code@wimpress.io>"]
+repository = "https://github.com/Gameaday/ia-get-cli"
 readme = "README.md"
 version = "1.3.0"
 edition = "2021"
