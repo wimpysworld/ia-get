@@ -215,7 +215,7 @@ The script creates test artifacts in `artifacts/` directory which is gitignored.
 
 ## Manual Tests 🤞
 
-During development, we test `ia-get` with various archive types:
+You can test `ia-get` with various archive types:
 
 ```shell
 # Test with magazine archives
