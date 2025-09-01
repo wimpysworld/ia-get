@@ -57,10 +57,12 @@ pub mod downloads;
 pub mod enhanced_downloader;
 pub mod error;
 pub mod filters;
+pub mod http_client;
 pub mod interactive_menu;
 pub mod metadata;
 pub mod metadata_storage;
 pub mod network;
+pub mod performance;
 pub mod url_processing;
 pub mod utils;
 
@@ -73,8 +75,10 @@ pub use concurrent_simple::{DownloadStats, FileDownloadResult, SimpleConcurrentD
 pub use constants::get_user_agent;
 pub use downloads::download_files_with_retries;
 pub use filters::{filter_files, format_size, parse_size_string};
+pub use http_client::{ClientConfig, EnhancedHttpClient, HttpClientFactory};
 pub use metadata::{fetch_json_metadata, get_json_url, parse_archive_metadata};
 pub use network::{is_transient_error, is_transient_reqwest_error, is_url_accessible};
+pub use performance::{AdaptiveBufferManager, PerformanceMetrics, PerformanceMonitor};
 pub use url_processing::{
     construct_download_url, construct_metadata_url, extract_identifier_from_url, is_archive_url,
     validate_and_process_url,
