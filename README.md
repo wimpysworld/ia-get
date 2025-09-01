@@ -7,6 +7,7 @@
 <p align="center"><b>High-performance file downloader for archive.org</b></p>
 <p align="center">
 <img alt="GitHub all releases" src="https://img.shields.io/github/downloads/wimpysworld/ia-get/total?logo=github&label=Downloads">
+<img alt="CI Status" src="https://img.shields.io/github/actions/workflow/status/Gameaday/ia-get-cli/ci.yml?branch=main&logo=github&label=CI">
 </p>
 
 <p align="center">Made with 💝 by 🤖</p>
@@ -156,6 +157,45 @@ The codebase has undergone major improvements:
 - ✅ **Comprehensive Documentation**: Added extensive inline documentation and examples
 - ✅ **Code Cleanup**: Removed orphaned files and improved error handling
 - ✅ **Test Coverage**: Updated tests to work with new JSON-only architecture
+- ✅ **CI/CD Pipeline**: Automated builds and artifact generation for every commit
+
+## CI/CD & Quality Assurance 🔄
+
+The project now includes comprehensive CI/CD processes:
+
+### Continuous Integration
+- **Multi-platform builds**: Automatic builds for Linux, Windows, and macOS
+- **Code quality checks**: Formatting (`cargo fmt`), linting (`cargo clippy`), and compilation verification
+- **Standard toolchain**: Uses Rust's standard toolchain for reliable, reproducible builds
+
+### Automated Artifacts
+- **Every commit**: Binary artifacts uploaded for all supported platforms
+- **Release builds**: Optimized binaries with full packaging (archives, .deb packages)
+- **30-day retention**: Development artifacts available for testing and debugging
+- **Commit traceability**: Artifacts tagged with commit SHA for easy identification
+
+### Supported Platforms
+- x86_64-unknown-linux-gnu
+- x86_64-pc-windows-msvc
+- x86_64-apple-darwin
+
+The CI runs on every push and pull request, ensuring code quality and platform compatibility.
+
+### Testing CI Locally
+You can simulate the CI process locally using the provided script:
+
+```bash
+./scripts/test-ci.sh
+```
+
+This script runs all the same checks as the CI workflow:
+- Code formatting verification
+- Clippy linting 
+- Build verification
+- Release binary creation
+- Artifact packaging
+
+The script creates test artifacts in `artifacts/` directory which is gitignored.
 
 ## Manual Tests 🤞
 

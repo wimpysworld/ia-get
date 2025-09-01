@@ -1,6 +1,6 @@
 //! Integration tests for compression functionality
 
-use ia_get::compression::{CompressionFormat, decompress_file, should_decompress};
+use ia_get::compression::{decompress_file, should_decompress, CompressionFormat};
 use ia_get::metadata_storage::ArchiveFile;
 use std::fs::File;
 use std::io::Write;
@@ -25,10 +25,7 @@ fn test_compression_format_detection() {
         CompressionFormat::from_filename("document.zip"),
         Some(CompressionFormat::Zip)
     );
-    assert_eq!(
-        CompressionFormat::from_filename("plain.txt"),
-        None
-    );
+    assert_eq!(CompressionFormat::from_filename("plain.txt"), None);
 }
 
 #[test]
@@ -50,7 +47,10 @@ fn test_archive_file_compression_detection() {
     };
 
     assert!(compressed_file.is_compressed());
-    assert_eq!(compressed_file.get_compression_format(), Some("gzip".to_string()));
+    assert_eq!(
+        compressed_file.get_compression_format(),
+        Some("gzip".to_string())
+    );
     assert_eq!(compressed_file.get_decompressed_name(), "data.tar");
 
     // Test file without explicit format (extension-based detection)
@@ -70,7 +70,10 @@ fn test_archive_file_compression_detection() {
     };
 
     assert!(extension_based.is_compressed());
-    assert_eq!(extension_based.get_compression_format(), Some("bzip2".to_string()));
+    assert_eq!(
+        extension_based.get_compression_format(),
+        Some("bzip2".to_string())
+    );
     assert_eq!(extension_based.get_decompressed_name(), "archive.tar");
 
     // Test non-compressed file
@@ -119,17 +122,17 @@ fn test_gzip_decompression() {
     use std::io::Read;
 
     let temp_dir = TempDir::new().unwrap();
-    
+
     // Create test data
     let test_data = b"Hello, World! This is a test of gzip compression.";
-    
+
     // Create compressed file
     let compressed_path = temp_dir.path().join("test.txt.gz");
     let compressed_file = File::create(&compressed_path).unwrap();
     let mut encoder = GzEncoder::new(compressed_file, Compression::default());
     encoder.write_all(test_data).unwrap();
     encoder.finish().unwrap();
-    
+
     // Decompress using our function
     let decompressed_path = temp_dir.path().join("test.txt");
     decompress_file(
@@ -137,13 +140,16 @@ fn test_gzip_decompression() {
         &decompressed_path,
         CompressionFormat::Gzip,
         None,
-    ).unwrap();
-    
+    )
+    .unwrap();
+
     // Verify decompressed content
     let mut decompressed_file = File::open(&decompressed_path).unwrap();
     let mut decompressed_content = Vec::new();
-    decompressed_file.read_to_end(&mut decompressed_content).unwrap();
-    
+    decompressed_file
+        .read_to_end(&mut decompressed_content)
+        .unwrap();
+
     assert_eq!(decompressed_content, test_data);
 }
 

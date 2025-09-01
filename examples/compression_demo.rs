@@ -3,7 +3,7 @@
 //! This example shows how the compression features work without requiring
 //! a full working main.rs binary.
 
-use ia_get::compression::{CompressionFormat, decompress_file, should_decompress};
+use ia_get::compression::{should_decompress, CompressionFormat};
 use ia_get::metadata_storage::ArchiveFile;
 
 fn main() {
@@ -13,7 +13,7 @@ fn main() {
     println!("1. Compression Format Detection:");
     let test_files = vec![
         "archive.tar.gz",
-        "data.bz2", 
+        "data.bz2",
         "document.xz",
         "backup.zip",
         "readme.txt",
@@ -26,7 +26,7 @@ fn main() {
 
     // 2. Demonstrate Archive.org file compression detection
     println!("\n2. Archive.org File Compression Detection:");
-    
+
     let archive_files = vec![
         ArchiveFile {
             name: "zzap64_issue_001.zip".to_string(),
@@ -84,8 +84,8 @@ fn main() {
 
     // 3. Demonstrate compression configuration
     println!("3. Compression Configuration:");
-    
-    let compression_configs = vec![
+
+    let compression_configs = [
         vec![], // Default configuration
         vec!["gzip".to_string()],
         vec!["zip".to_string(), "bzip2".to_string()],
@@ -114,7 +114,7 @@ fn main() {
     println!("  - Compressed backups (data.tar.gz): Multi-file archives with gzip compression");
     println!("  - Individual compressed files (document.bz2): Single files with bzip2 compression");
     println!("  - Metadata files (usually uncompressed XML/JSON)");
-    
+
     println!("\n=== Features Summary ===");
     println!("✓ HTTP compression headers (Accept-Encoding: gzip, deflate, br)");
     println!("✓ Automatic compression detection from Archive.org metadata");
@@ -122,7 +122,7 @@ fn main() {
     println!("✓ Configurable auto-decompression with format filters");
     println!("✓ Transparent decompression after download verification");
     println!("✓ Preservation of original compressed files alongside decompressed versions");
-    
+
     println!("\n=== Command Line Usage ===");
     println!("ia-get --compress --decompress <archive_url>");
     println!("ia-get --compress --decompress --decompress-formats gzip,bzip2 <archive_url>");

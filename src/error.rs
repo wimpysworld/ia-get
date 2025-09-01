@@ -14,15 +14,18 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use ia_get::{Result, IaGetError};
 //!
 //! fn download_file() -> Result<()> {
 //!     // Operations that might fail
+//!     let invalid_url = false; // example
 //!     if invalid_url {
 //!         return Err(IaGetError::UrlFormat("Invalid identifier".to_string()));
 //!     }
 //!     Ok(())
+//! }
+//! ```
 //! }
 //! ```
 
@@ -89,4 +92,3 @@ impl From<url::ParseError> for IaGetError {
         IaGetError::UrlFormat(err.to_string())
     }
 }
-

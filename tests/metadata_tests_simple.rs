@@ -4,7 +4,7 @@
 
 use ia_get::{
     metadata::{get_json_url, parse_archive_metadata},
-    url_processing::{extract_identifier_from_url, construct_metadata_url}
+    url_processing::{construct_metadata_url, extract_identifier_from_url},
 };
 
 /// Test JSON URL generation from different input formats
@@ -14,12 +14,12 @@ fn test_json_url_generation_basic() {
     let details_url = "https://archive.org/details/example";
     let json_url = get_json_url(details_url);
     assert_eq!(json_url, "https://archive.org/metadata/example");
-    
+
     // Test with already metadata URL
     let metadata_url = "https://archive.org/metadata/example";
     let json_url = get_json_url(metadata_url);
     assert_eq!(json_url, metadata_url);
-    
+
     // Test with identifier only
     let identifier = "example-identifier";
     let json_url = get_json_url(identifier);
@@ -43,12 +43,12 @@ fn test_identifier_extraction_basic() {
     let details_url = "https://archive.org/details/example-archive";
     let identifier = extract_identifier_from_url(details_url).unwrap();
     assert_eq!(identifier, "example-archive");
-    
+
     // Test metadata URL
     let metadata_url = "https://archive.org/metadata/example-archive";
     let identifier = extract_identifier_from_url(metadata_url).unwrap();
     assert_eq!(identifier, "example-archive");
-    
+
     // Test invalid URL
     let invalid_url = "https://example.com/not-archive";
     let result = extract_identifier_from_url(invalid_url);
@@ -59,19 +59,29 @@ fn test_identifier_extraction_basic() {
 #[test]
 fn test_json_metadata_parsing_minimal() {
     let minimal_json = r#"{
+        "created": 1234567890,
+        "d1": "ia801234.us.archive.org",
+        "d2": "ia801235.us.archive.org",
+        "dir": "/test",
         "files": [
             {
                 "name": "file.txt",
                 "source": "original"
             }
         ],
+        "files_count": 1,
+        "item_last_updated": 1234567890,
+        "item_size": 1024,
+        "metadata": {},
         "server": "test-server",
-        "dir": "/test"
+        "uniq": 1234567890,
+        "workable_servers": ["test-server"],
+        "reviews": []
     }"#;
-    
+
     let result = parse_archive_metadata(minimal_json);
     assert!(result.is_ok());
-    
+
     let metadata = result.unwrap();
     assert_eq!(metadata.files.len(), 1);
     assert_eq!(metadata.files[0].name, "file.txt");
@@ -87,8 +97,8 @@ fn test_json_metadata_parsing_errors() {
     let invalid_json = r#"{ "files": [ incomplete"#;
     let result = parse_archive_metadata(invalid_json);
     assert!(result.is_err());
-    
-    // Test with missing required fields
+
+    // Test with missing required fields - this should fail since we need all required fields
     let missing_files = r#"{ "server": "test" }"#;
     let result = parse_archive_metadata(missing_files);
     assert!(result.is_err());
@@ -98,21 +108,31 @@ fn test_json_metadata_parsing_errors() {
 #[test]
 fn test_parse_archive_metadata_function() {
     let json_data = r#"{
+        "created": 1234567890,
+        "d1": "ia801234.us.archive.org",
+        "d2": "ia801235.us.archive.org",
+        "dir": "/test-dir",
         "files": [
             { "name": "test.txt", "source": "original", "size": "1024" }
         ],
+        "files_count": 1,
+        "item_last_updated": 1234567890,
+        "item_size": 1024,
+        "metadata": {},
         "server": "test-server.archive.org",
-        "dir": "/test-dir"
+        "uniq": 1234567890,
+        "workable_servers": ["test-server.archive.org"],
+        "reviews": []
     }"#;
-    
+
     let result = parse_archive_metadata(json_data);
     assert!(result.is_ok());
-    
+
     let metadata = result.unwrap();
     assert_eq!(metadata.files.len(), 1);
     assert_eq!(metadata.files[0].name, "test.txt");
     assert_eq!(metadata.server, "test-server.archive.org");
-    
+
     // Test with invalid JSON
     let invalid_data = "not valid json";
     let result = parse_archive_metadata(invalid_data);
@@ -127,13 +147,13 @@ fn test_url_edge_cases() {
     let json_url = get_json_url(url_with_params);
     assert!(json_url.contains("metadata"));
     assert!(json_url.contains("example"));
-    
+
     // Test with fragments
     let url_with_fragment = "https://archive.org/details/example#section";
     let json_url = get_json_url(url_with_fragment);
     assert!(json_url.contains("metadata"));
     assert!(json_url.contains("example"));
-    
+
     // Test with trailing slash
     let url_with_slash = "https://archive.org/details/example/";
     let json_url = get_json_url(url_with_slash);
@@ -147,12 +167,12 @@ fn test_identifier_extraction_edge_cases() {
     let complex_url = "https://archive.org/details/complex_identifier-with-many_parts.123";
     let identifier = extract_identifier_from_url(complex_url).unwrap();
     assert_eq!(identifier, "complex_identifier-with-many_parts.123");
-    
+
     // Test with numeric identifier
     let numeric_url = "https://archive.org/details/123456789";
     let identifier = extract_identifier_from_url(numeric_url).unwrap();
     assert_eq!(identifier, "123456789");
-    
+
     // Test with special characters in path (but valid identifier)
     let special_url = "https://archive.org/details/test-archive_v1.0";
     let identifier = extract_identifier_from_url(special_url).unwrap();

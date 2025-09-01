@@ -2,19 +2,22 @@
 //!
 //! Comprehensive tests for command-line interface functionality including:
 //! - Argument parsing validation
-//! - CLI option combinations 
+//! - CLI option combinations
 //! - Interactive mode detection
 //! - Help text and error messages
 //! - Configuration validation
 
-use ia_get::cli::{Cli, Commands};
 use clap::Parser;
+use ia_get::cli::{Cli, Commands};
 
 /// Test basic CLI parsing with URL arguments
 #[test]
 fn test_cli_basic_url_parsing() {
     let cli = Cli::parse_from(["ia-get", "https://archive.org/details/test"]);
-    assert_eq!(cli.url, Some("https://archive.org/details/test".to_string()));
+    assert_eq!(
+        cli.url,
+        Some("https://archive.org/details/test".to_string())
+    );
     assert!(cli.command.is_none());
 }
 
@@ -34,44 +37,49 @@ fn test_cli_download_subcommand() {
 #[test]
 fn test_cli_flags_parsing() {
     let cli = Cli::parse_from([
-        "ia-get", 
-        "--verbose", 
-        "--dry-run", 
-        "--concurrent-downloads", "5",
-        "--include-ext", "pdf,txt",
-        "https://archive.org/details/test"
+        "ia-get",
+        "--verbose",
+        "--dry-run",
+        "--concurrent-downloads",
+        "5",
+        "--include-ext",
+        "pdf,txt",
+        "https://archive.org/details/test",
     ]);
-    
+
     assert!(cli.verbose);
     assert!(cli.dry_run);
     assert_eq!(cli.concurrent_downloads, 5);
     assert_eq!(cli.include_ext, Some("pdf,txt".to_string()));
-    assert_eq!(cli.url, Some("https://archive.org/details/test".to_string()));
+    assert_eq!(
+        cli.url,
+        Some("https://archive.org/details/test".to_string())
+    );
 }
 
 /// Test CLI validation logic for concurrent downloads
 #[test]
 fn test_cli_validation_concurrent_downloads() {
     let mut cli = Cli::default();
-    
+
     // Valid configuration
     cli.concurrent_downloads = 3;
     assert!(cli.validate().is_ok());
-    
+
     // Invalid: too low
     cli.concurrent_downloads = 0;
     assert!(cli.validate().is_err());
     assert!(cli.validate().unwrap_err().contains("between 1 and 10"));
-    
+
     // Invalid: too high
     cli.concurrent_downloads = 15;
     assert!(cli.validate().is_err());
     assert!(cli.validate().unwrap_err().contains("between 1 and 10"));
-    
+
     // Valid: boundary values
     cli.concurrent_downloads = 1;
     assert!(cli.validate().is_ok());
-    
+
     cli.concurrent_downloads = 10;
     assert!(cli.validate().is_ok());
 }
@@ -80,15 +88,15 @@ fn test_cli_validation_concurrent_downloads() {
 #[test]
 fn test_cli_validation_max_retries() {
     let mut cli = Cli::default();
-    
+
     // Valid configuration
     cli.max_retries = 3;
     assert!(cli.validate().is_ok());
-    
+
     // Valid: boundary case
     cli.max_retries = 20;
     assert!(cli.validate().is_ok());
-    
+
     // Invalid: too high
     cli.max_retries = 25;
     assert!(cli.validate().is_err());
@@ -124,7 +132,7 @@ fn test_interactive_mode_detection() {
         ..Default::default()
     };
     assert!(!cli.is_interactive_mode());
-    
+
     // Command provided = not interactive
     let cli = Cli {
         command: Some(Commands::Download {
@@ -149,7 +157,7 @@ fn test_url_extraction() {
         ..Default::default()
     };
     assert_eq!(cli.get_url(), Some("https://archive.org/details/test"));
-    
+
     // From download subcommand
     let cli = Cli {
         command: Some(Commands::Download {
@@ -163,7 +171,7 @@ fn test_url_extraction() {
         ..Default::default()
     };
     assert_eq!(cli.get_url(), Some("test-identifier"));
-    
+
     // URL in direct argument takes precedence
     let cli = Cli {
         url: Some("direct-url".to_string()),
@@ -178,7 +186,7 @@ fn test_url_extraction() {
         ..Default::default()
     };
     assert_eq!(cli.get_url(), Some("direct-url"));
-    
+
     // No URL provided
     let cli = Cli::default();
     assert_eq!(cli.get_url(), None);
@@ -193,7 +201,7 @@ fn test_output_directory_extraction() {
         ..Default::default()
     };
     assert_eq!(cli.get_output_dir(), Some("output-dir"));
-    
+
     // From download subcommand
     let cli = Cli {
         command: Some(Commands::Download {
@@ -207,7 +215,7 @@ fn test_output_directory_extraction() {
         ..Default::default()
     };
     assert_eq!(cli.get_output_dir(), Some("subcommand-output"));
-    
+
     // Direct argument takes precedence
     let cli = Cli {
         output_path: Some("direct-output".to_string()),
@@ -222,7 +230,7 @@ fn test_output_directory_extraction() {
         ..Default::default()
     };
     assert_eq!(cli.get_output_dir(), Some("direct-output"));
-    
+
     // No output provided
     let cli = Cli::default();
     assert_eq!(cli.get_output_dir(), None);
@@ -232,22 +240,22 @@ fn test_output_directory_extraction() {
 #[test]
 fn test_max_file_size_parsing() {
     use ia_get::filters::parse_size_string;
-    
+
     let cli = Cli {
         max_file_size: Some("100MB".to_string()),
         ..Default::default()
     };
-    
+
     let size = cli.max_file_size_bytes();
     assert_eq!(size, parse_size_string("100MB").ok());
-    
+
     // Test with invalid size
     let cli = Cli {
         max_file_size: Some("invalid".to_string()),
         ..Default::default()
     };
     assert_eq!(cli.max_file_size_bytes(), None);
-    
+
     // Test with no size
     let cli = Cli::default();
     assert_eq!(cli.max_file_size_bytes(), None);
@@ -259,7 +267,7 @@ fn test_cli_parsing_edge_cases() {
     // Test with empty strings
     let cli = Cli::parse_from(["ia-get", ""]);
     assert_eq!(cli.url, Some("".to_string()));
-    
+
     // Test with special characters in URLs
     let url_with_special = "https://archive.org/details/test?special=chars&more=params";
     let cli = Cli::parse_from(["ia-get", url_with_special]);
@@ -270,7 +278,7 @@ fn test_cli_parsing_edge_cases() {
 #[test]
 fn test_cli_defaults() {
     let cli = Cli::default();
-    
+
     assert_eq!(cli.url, None);
     assert_eq!(cli.output_path, None);
     assert!(!cli.log_hash_errors);
@@ -293,7 +301,7 @@ fn test_cli_defaults() {
 fn test_cli_help_generation() {
     let result = Cli::try_parse_from(["ia-get", "--help"]);
     assert!(result.is_err()); // --help causes clap to exit early with help text
-    
+
     // Verify that the error is due to help display, not parsing failure
     if let Err(err) = result {
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
@@ -305,7 +313,7 @@ fn test_cli_help_generation() {
 fn test_cli_version_generation() {
     let result = Cli::try_parse_from(["ia-get", "--version"]);
     assert!(result.is_err()); // --version causes clap to exit early
-    
+
     if let Err(err) = result {
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
     }

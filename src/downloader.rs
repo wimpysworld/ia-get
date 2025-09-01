@@ -1,19 +1,18 @@
-
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Write, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use chrono::Local;
+use colored::*;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
-use colored::*;
-use chrono::Local;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::Result;
 use crate::error::IaGetError;
+use crate::Result;
 
 /// Buffer size for file operations (8KB)
 const BUFFER_SIZE: usize = 8192;
@@ -24,36 +23,41 @@ fn calculate_md5(file_path: &str, running: &Arc<AtomicBool>) -> Result<String> {
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
     let mut context = md5::Context::new();
     let mut buffer = [0; BUFFER_SIZE];
-    
+
     loop {
         let bytes_read = reader.read(&mut buffer)?;
         if bytes_read == 0 {
             break;
         }
-        
+
         if !running.load(Ordering::SeqCst) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "Hash calculation interrupted by signal",
-            ).into());
+            )
+            .into());
         }
-        
+
         context.consume(&buffer[..bytes_read]);
     }
-    
+
     let hash = context.finalize();
     Ok(format!("{:x}", hash))
 }
 
 /// Check if an existing file has the correct hash
 /// For XML files, uses alternative validation due to frequent hash mismatches
-fn check_existing_file(file_path: &str, expected_md5: Option<&str>, running: &Arc<AtomicBool>) -> Result<Option<bool>> {
+fn check_existing_file(
+    file_path: &str,
+    expected_md5: Option<&str>,
+    running: &Arc<AtomicBool>,
+) -> Result<Option<bool>> {
     if !Path::new(file_path).exists() {
         return Ok(None);
     }
 
     if expected_md5.is_none() {
-        return Ok(Some(true)); 
+        return Ok(Some(true));
     }
 
     // Special handling for XML files
@@ -93,18 +97,18 @@ fn prepare_file_for_download(file_path: &str) -> Result<File> {
         .create(true)
         .truncate(false)
         .open(file_path)?;
-    
+
     // Seek to the end of the file for resume capability
     file.seek(SeekFrom::End(0))?;
-    
+
     Ok(file)
 }
 
 /// Download file content with progress updates on the main progress bar
 async fn download_file_content_simple(
-    client: &Client, 
-    url: &str, 
-    file_size: u64, 
+    client: &Client,
+    url: &str,
+    file_size: u64,
     file: &mut File,
     running: &Arc<AtomicBool>,
     progress_bar: &indicatif::ProgressBar,
@@ -112,46 +116,71 @@ async fn download_file_content_simple(
 ) -> Result<u64> {
     let mut headers = HeaderMap::new();
     if file_size > 0 {
-        headers.insert(reqwest::header::RANGE, HeaderValue::from_str(&format!("bytes={}-", file_size)).map_err(|e| IaGetError::Network(format!("Invalid range header value: {}", e)))?);
+        headers.insert(
+            reqwest::header::RANGE,
+            HeaderValue::from_str(&format!("bytes={}-", file_size))
+                .map_err(|e| IaGetError::Network(format!("Invalid range header value: {}", e)))?,
+        );
     }
 
     let mut response = if file_size > 0 {
-        client.get(url).headers(headers).send().await.map_err(|e| IaGetError::Network(format!("Download failed: {}", e)))?
+        client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| IaGetError::Network(format!("Download failed: {}", e)))?
     } else {
-        client.get(url).send().await.map_err(|e| IaGetError::Network(format!("Download failed: {}", e)))?
+        client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| IaGetError::Network(format!("Download failed: {}", e)))?
     };
 
     let content_length = response.content_length().unwrap_or(0);
-    let total_expected_size = if file_size > 0 { content_length + file_size } else { content_length };
+    let total_expected_size = if file_size > 0 {
+        content_length + file_size
+    } else {
+        content_length
+    };
     let mut total_bytes: u64 = file_size;
     let mut downloaded_bytes: u64 = 0;
-    
+
     let start_time = std::time::Instant::now();
-    
+
     while let Some(chunk) = response.chunk().await? {
         if !running.load(Ordering::SeqCst) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "Download interrupted during file transfer",
-            ).into());
+            )
+            .into());
         }
-        
+
         file.write_all(&chunk)?;
         downloaded_bytes += chunk.len() as u64;
         total_bytes += chunk.len() as u64;
-        
+
         // Update progress bar with download percentage and speed
         if total_expected_size > 0 {
             let percentage = (total_bytes * 100) / total_expected_size;
             let elapsed = start_time.elapsed().as_secs_f64();
-            if elapsed > 1.0 { // Only show speed after 1 second
+            if elapsed > 1.0 {
+                // Only show speed after 1 second
                 let speed_bytes_per_sec = downloaded_bytes as f64 / elapsed;
                 let speed_mb_per_sec = speed_bytes_per_sec / (1024.0 * 1024.0);
                 if speed_mb_per_sec >= 1.0 {
-                    progress_bar.set_prefix(format!("{} ({}% @ {:.1}MB/s)", file_name, percentage, speed_mb_per_sec));
+                    progress_bar.set_prefix(format!(
+                        "{} ({}% @ {:.1}MB/s)",
+                        file_name, percentage, speed_mb_per_sec
+                    ));
                 } else {
                     let speed_kb_per_sec = speed_bytes_per_sec / 1024.0;
-                    progress_bar.set_prefix(format!("{} ({}% @ {:.0}KB/s)", file_name, percentage, speed_kb_per_sec));
+                    progress_bar.set_prefix(format!(
+                        "{} ({}% @ {:.0}KB/s)",
+                        file_name, percentage, speed_kb_per_sec
+                    ));
                 }
             } else {
                 progress_bar.set_prefix(format!("{} ({}%)", file_name, percentage));
@@ -160,39 +189,41 @@ async fn download_file_content_simple(
             // If we don't know the total size, just show downloaded amount
             let mb_downloaded = downloaded_bytes as f64 / (1024.0 * 1024.0);
             if mb_downloaded >= 1.0 {
-                progress_bar.set_prefix(format!("{} ({:.1}MB downloaded)", file_name, mb_downloaded));
+                progress_bar
+                    .set_prefix(format!("{} ({:.1}MB downloaded)", file_name, mb_downloaded));
             } else {
                 let kb_downloaded = downloaded_bytes as f64 / 1024.0;
-                progress_bar.set_prefix(format!("{} ({:.0}KB downloaded)", file_name, kb_downloaded));
+                progress_bar
+                    .set_prefix(format!("{} ({:.0}KB downloaded)", file_name, kb_downloaded));
             }
         }
     }
 
     // Ensure data is written to disk
     file.flush()?;
-    
+
     Ok(total_bytes)
 }
 
 /// Verify a downloaded file's hash against an expected value (no separate progress output)
 /// For XML files, performs alternative validation (size + structure) due to frequent hash mismatches
 fn verify_downloaded_file_simple(
-    file_path: &str, 
-    expected_md5: Option<&str>, 
+    file_path: &str,
+    expected_md5: Option<&str>,
     running: &Arc<AtomicBool>,
 ) -> Result<bool> {
     if expected_md5.is_none() {
         return Ok(true); // No hash to check against, consider it verified
     }
-    
+
     // Special handling for XML files due to frequent hash mismatches at Internet Archive
     if file_path.to_lowercase().ends_with(".xml") {
         return verify_xml_file_alternative(file_path, running);
     }
-    
+
     let expected_md5_str = expected_md5.unwrap();
     let local_md5 = calculate_md5(file_path, running)?;
-    
+
     Ok(local_md5 == expected_md5_str)
 }
 
@@ -200,61 +231,62 @@ fn verify_downloaded_file_simple(
 /// Returns true if the file appears to be a valid XML file
 fn verify_xml_file_alternative(file_path: &str, running: &Arc<AtomicBool>) -> Result<bool> {
     use std::fs;
-    
+
     // Check if we should stop due to signal
     if !running.load(std::sync::atomic::Ordering::SeqCst) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "XML verification interrupted by signal",
-        ).into());
+        )
+        .into());
     }
-    
+
     // Check if file exists and has reasonable size (not empty, not too small)
     let metadata = match fs::metadata(file_path) {
         Ok(meta) => meta,
         Err(_) => return Ok(false), // File doesn't exist or can't be read
     };
-    
+
     let file_size = metadata.len();
     if file_size < 10 {
         return Ok(false); // File too small to be valid XML
     }
-    
+
     // Read the file content for structure validation
     let content = match fs::read_to_string(file_path) {
         Ok(content) => content,
         Err(_) => return Ok(false), // Can't read file as UTF-8
     };
-    
+
     // Basic XML structure validation
     let content = content.trim();
-    
+
     // Check for XML declaration or root element
     let has_xml_declaration = content.starts_with("<?xml");
     let has_root_element = content.contains('<') && content.contains('>');
-    
+
     // Check for basic XML structure (matching angle brackets)
     let open_brackets = content.chars().filter(|&c| c == '<').count();
     let close_brackets = content.chars().filter(|&c| c == '>').count();
     let balanced_brackets = open_brackets == close_brackets;
-    
+
     // Check for common Internet Archive XML patterns
-    let has_ia_patterns = content.contains("<files>") || 
-                          content.contains("<file ") || 
-                          content.contains("name=") ||
-                          content.contains("size=");
-    
+    let has_ia_patterns = content.contains("<files>")
+        || content.contains("<file ")
+        || content.contains("name=")
+        || content.contains("size=");
+
     // File is considered valid if it has basic XML structure and reasonable size
-    let is_valid = (has_xml_declaration || has_root_element) && 
-                   balanced_brackets && 
-                   has_ia_patterns &&
-                   file_size > 50; // Minimum reasonable size for IA XML files
-    
+    let is_valid = (has_xml_declaration || has_root_element)
+        && balanced_brackets
+        && has_ia_patterns
+        && file_size > 50; // Minimum reasonable size for IA XML files
+
     Ok(is_valid)
 }
 
 /// Download multiple files with shared signal handling and single-line progress display
-/// 
+///
 /// This function provides a clean, single-line progress display that updates in-place
 /// showing current file, progress, overall progress, hash matches, fails, and remaining files.
 pub async fn download_files<I>(
@@ -282,9 +314,9 @@ where
     );
 
     // Statistics tracking - these should be mutually exclusive
-    let mut downloaded_count = 0;  // Successfully downloaded new files
-    let mut skipped_count = 0;     // Files already existed with correct hash
-    let mut failed_count = 0;      // Files that failed to download or verify
+    let mut downloaded_count = 0; // Successfully downloaded new files
+    let mut skipped_count = 0; // Files already existed with correct hash
+    let mut failed_count = 0; // Files that failed to download or verify
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
     struct BatchLogEntry {
@@ -320,13 +352,14 @@ where
             .unwrap_or("Unknown file");
 
         // Update progress bar with current statistics and file info
-        let stats_msg = format!("OK:{} ERR:{} SKIP:{} LEFT:{}",
-            downloaded_count + skipped_count,  // Total successful files
+        let stats_msg = format!(
+            "OK:{} ERR:{} SKIP:{} LEFT:{}",
+            downloaded_count + skipped_count, // Total successful files
             failed_count,
             skipped_count,
             remaining
         );
-        
+
         progress_bar.set_message(stats_msg);
         progress_bar.set_prefix(file_name.to_string());
 
@@ -335,17 +368,19 @@ where
         let max_attempts = 2;
         let mut success = false;
         let mut delay = std::time::Duration::from_secs(60);
-        
+
         while attempt < max_attempts {
             // Update progress to show we're checking existing file
             if Path::new(&file_path).exists() {
                 progress_bar.set_prefix(format!("{} (checking hash)", file_name));
             }
-            
+
             // Check existing file
-            if let Some(is_valid) = check_existing_file(&file_path, expected_md5.as_deref(), &running)? {
+            if let Some(is_valid) =
+                check_existing_file(&file_path, expected_md5.as_deref(), &running)?
+            {
                 if is_valid {
-                    skipped_count += 1;  // Only count as skipped, not as hash match
+                    skipped_count += 1; // Only count as skipped, not as hash match
                     success = true;
                     break;
                 }
@@ -364,27 +399,32 @@ where
 
             let mut file = prepare_file_for_download(&file_path)?;
             let file_size = file.metadata()?.len();
-            
+
             let download_result = download_file_content_simple(
-                client, 
-                &url, 
-                file_size, 
-                &mut file, 
-                &running, 
+                client,
+                &url,
+                file_size,
+                &mut file,
+                &running,
                 &progress_bar,
-                file_name
-            ).await;
-            
+                file_name,
+            )
+            .await;
+
             match download_result {
                 Ok(_) => {
                     // Update progress to show we're verifying hash
                     progress_bar.set_prefix(format!("{} (verifying)", file_name));
-                    let verified = verify_downloaded_file_simple(&file_path, expected_md5.as_deref(), &running)?;
+                    let verified = verify_downloaded_file_simple(
+                        &file_path,
+                        expected_md5.as_deref(),
+                        &running,
+                    )?;
                     // Reset prefix
                     progress_bar.set_prefix(file_name.to_string());
-                    
+
                     if verified {
-                        downloaded_count += 1;  // Successfully downloaded and verified
+                        downloaded_count += 1; // Successfully downloaded and verified
                         success = true;
                         break;
                     } else {
@@ -406,7 +446,7 @@ where
             }
             attempt += 1;
         }
-        
+
         if !success {
             failed_count += 1;
             if log_hash_errors {
@@ -428,25 +468,26 @@ where
 
         // Update progress
         progress_bar.inc(1);
-        
+
         // Update final message for this file
-        let stats_msg = format!("OK:{} ERR:{} SKIP:{} LEFT:{}",
-            downloaded_count + skipped_count,  // Total successful files
+        let stats_msg = format!(
+            "OK:{} ERR:{} SKIP:{} LEFT:{}",
+            downloaded_count + skipped_count, // Total successful files
             failed_count,
             skipped_count,
             total_files - index - 1
         );
         progress_bar.set_message(stats_msg);
     }
-    
+
     // Finish with summary
     progress_bar.finish_with_message(format!(
         "Complete: OK:{} ERR:{} SKIP:{}",
-        downloaded_count + skipped_count,  // Total successful files
+        downloaded_count + skipped_count, // Total successful files
         failed_count,
         skipped_count
     ));
-    
+
     // Write batchlog to file if logging is enabled
     if log_hash_errors {
         match serde_json::to_string_pretty(&batchlog) {
@@ -454,7 +495,7 @@ where
                 if let Err(e) = std::fs::write(batchlog_path, json) {
                     eprintln!("{} Failed to write batchlog.json: {}", "▲".yellow(), e);
                 }
-            },
+            }
             Err(e) => {
                 eprintln!("{} Failed to serialize batch log: {}", "▲".yellow(), e);
             }
@@ -462,7 +503,11 @@ where
         // Ensure the file exists even if there are no errors
         if batchlog.is_empty() && !std::path::Path::new(batchlog_path).exists() {
             if let Err(e) = std::fs::write(batchlog_path, "[]") {
-                eprintln!("{} Failed to create empty batchlog.json: {}", "▲".yellow(), e);
+                eprintln!(
+                    "{} Failed to create empty batchlog.json: {}",
+                    "▲".yellow(),
+                    e
+                );
             }
         }
     }

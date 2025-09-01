@@ -1,7 +1,7 @@
 //! Enhanced concurrent downloader for Internet Archive files
 //!
-//! This module provides an improved concurrent downloader that integrates with the 
-//! existing metadata structures and includes session tracking, progress reporting, 
+//! This module provides an improved concurrent downloader that integrates with the
+//! existing metadata structures and includes session tracking, progress reporting,
 //! and comprehensive statistics.
 //!
 //! ## Features
@@ -14,26 +14,17 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use ia_get::concurrent_simple::SimpleConcurrentDownloader;
 //!
-//! // Create downloader with max 4 concurrent downloads
-//! let downloader = SimpleConcurrentDownloader::new(4)?;
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Create downloader with max 4 concurrent downloads
+//!     let downloader = SimpleConcurrentDownloader::new(4)?;
 //!
-//! // Download files concurrently
-//! let results = downloader.download_files(
-//!     &metadata,
-//!     vec!["file1.pdf".to_string(), "file2.txt".to_string()],
-//!     "output_directory".to_string()
-//! ).await?;
-//!
-//! // Check results
-//! for result in results {
-//!     if result.success {
-//!         println!("✅ Downloaded {} ({} bytes)", result.file_name, result.bytes_downloaded);
-//!     } else {
-//!         println!("❌ Failed to download {}: {:?}", result.file_name, result.error);
-//!     }
+//!     // Download files concurrently (example - would need actual metadata)
+//!     // let results = downloader.download_files(&metadata, files, "output").await?;
+//!     Ok(())
 //! }
 //! ```
 //!
@@ -42,15 +33,15 @@
 //! The downloader uses tokio's semaphore system to limit concurrent downloads and
 //! integrates with the metadata storage system for session tracking and resume functionality.
 
+use crate::{
+    constants::get_user_agent,
+    metadata_storage::{ArchiveFile, ArchiveMetadata, DownloadSession, DownloadState},
+    IaGetError, Result,
+};
+use reqwest::Client;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Semaphore, Mutex};
-use reqwest::Client;
-use crate::{
-    Result, IaGetError,
-    metadata_storage::{ArchiveFile, ArchiveMetadata, DownloadSession, DownloadState},
-    constants::get_user_agent,
-};
+use tokio::sync::{Mutex, Semaphore};
 
 /// Download statistics for tracking progress
 #[derive(Debug, Clone)]
@@ -88,7 +79,11 @@ impl DownloadStats {
     }
 
     pub fn completion_percentage(&self) -> f64 {
-        if self.total_files == 0 { 0.0 } else { (self.completed_files as f64 / self.total_files as f64) * 100.0 }
+        if self.total_files == 0 {
+            0.0
+        } else {
+            (self.completed_files as f64 / self.total_files as f64) * 100.0
+        }
     }
 
     pub fn eta_seconds(&self) -> Option<u64> {
@@ -156,14 +151,14 @@ impl SimpleConcurrentDownloader {
             file_status.status = status.clone();
             file_status.bytes_downloaded = bytes_downloaded;
             file_status.error_message = error_message;
-            
+
             match status {
                 DownloadState::InProgress => {
                     file_status.started_at = Some(
                         std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
-                            .as_secs()
+                            .as_secs(),
                     );
                 }
                 DownloadState::Completed | DownloadState::Failed => {
@@ -171,13 +166,13 @@ impl SimpleConcurrentDownloader {
                         std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
-                            .as_secs()
+                            .as_secs(),
                     );
                 }
                 _ => {}
             }
         }
-        
+
         // Update session timestamp
         session.last_updated = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -193,12 +188,16 @@ impl SimpleConcurrentDownloader {
         output_dir: &str,
     ) -> Result<Vec<FileDownloadResult>> {
         // Filter files based on request
-        let files: Vec<&ArchiveFile> = metadata.files.iter()
+        let files: Vec<&ArchiveFile> = metadata
+            .files
+            .iter()
             .filter(|f| files_to_download.contains(&f.name))
             .collect();
 
         if files.is_empty() {
-            return Err(IaGetError::NoFilesFound("No matching files found".to_string()));
+            return Err(IaGetError::NoFilesFound(
+                "No matching files found".to_string(),
+            ));
         }
 
         println!("🚀 Starting download of {} files", files.len());
@@ -253,7 +252,10 @@ impl SimpleConcurrentDownloader {
         println!("✅ Download completed in {:.1}s", duration.as_secs_f64());
         println!("📊 Success: {}, Failed: {}", successful, failed);
         if total_downloaded > 0 {
-            println!("📦 Total downloaded: {}", crate::filters::format_size(total_downloaded));
+            println!(
+                "📦 Total downloaded: {}",
+                crate::filters::format_size(total_downloaded)
+            );
         }
 
         Ok(download_results)
@@ -304,15 +306,20 @@ impl SimpleConcurrentDownloader {
     }
 
     /// Download file content to disk
-    async fn download_file_content(
-        &self,
-        url: &str,
-        file_path: &std::path::Path,
-    ) -> Result<u64> {
-        let response = self.client.get(url).send().await.map_err(IaGetError::from)?;
-        
+    async fn download_file_content(&self, url: &str, file_path: &std::path::Path) -> Result<u64> {
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(IaGetError::from)?;
+
         if !response.status().is_success() {
-            return Err(IaGetError::Network(format!("HTTP {} error for {}", response.status(), url)));
+            return Err(IaGetError::Network(format!(
+                "HTTP {} error for {}",
+                response.status(),
+                url
+            )));
         }
 
         let mut file = std::fs::File::create(file_path).map_err(IaGetError::Io)?;

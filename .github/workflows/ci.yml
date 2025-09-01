@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test and Build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+
+    - name: Cache Cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Run clippy
+      run: cargo clippy --all-targets -- -D warnings
+
+    - name: Build
+      run: cargo build --release
+
+    - name: Run tests
+      run: cargo test
+
+    - name: Create artifact
+      shell: bash
+      run: |
+        mkdir -p artifacts
+        if [[ "${{ runner.os }}" == "Windows" ]]; then
+          cp target/release/ia-get.exe artifacts/
+          cd artifacts && 7z a ia-get-${{ runner.os }}.zip ia-get.exe
+        else
+          cp target/release/ia-get artifacts/
+          cd artifacts && tar czf ia-get-${{ runner.os }}.tar.gz ia-get
+        fi
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ia-get-${{ runner.os }}
+        path: artifacts/*
+        retention-days: 7

@@ -1,7 +1,7 @@
 # GitHub Copilot Instructions for ia-get
 
 ## Project Overview
-This is a Rust CLI tool for downloading files from the Internet Archive, built with Nix flakes for reproducible builds.
+This is a Rust CLI tool for downloading files from the Internet Archive, built with standard Cargo toolchain for simplicity and reliability.
 
 ## Development Guidelines
 
@@ -11,16 +11,16 @@ This is a Rust CLI tool for downloading files from the Internet Archive, built w
 - Prefer explicit error handling with `Result<T, E>` types
 - Use `anyhow` or `thiserror` for error handling consistency
 
-### Nix Integration
-- This project uses Nix flakes for development environment and packaging
-- When suggesting build commands, prefer `nix develop` for entering the dev shell
-- Build with `nix build` rather than direct cargo commands when possible
-- Maintain compatibility with the supported systems: x86_64-linux, aarch64-darwin, x86_64-darwin, aarch64-linux
+### Build System
+- This project uses standard Cargo toolchain for all operations
+- Use `cargo build` for development builds and `cargo build --release` for optimized builds
+- Run tests with `cargo test` and linting with `cargo clippy`
+- Maintain compatibility with standard Rust compilation targets
 
 ### Dependencies
 - Keep dependencies minimal and well-justified
 - Update Cargo.lock when adding new dependencies
-- Prefer crates that are well-maintained and have good Nix support
+- Prefer crates that are well-maintained and have good ecosystem support
 
 ### Code Structure
 - Follow CLI best practices with clear subcommands and help text

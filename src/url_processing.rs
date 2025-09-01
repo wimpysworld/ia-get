@@ -1,8 +1,8 @@
 //! URL processing and validation module for ia-get
-//! 
+//!
 //! Handles Internet Archive URL parsing, validation, and format conversions.
 
-use crate::{Result, error::IaGetError};
+use crate::{error::IaGetError, Result};
 use url::Url;
 
 /// Validates and processes Internet Archive URLs
@@ -16,7 +16,9 @@ pub fn validate_and_process_url(url_input: &str) -> Result<String> {
                     return Ok(url.to_string());
                 }
             }
-            Err(IaGetError::UrlFormat("URL must be from archive.org".to_string()))
+            Err(IaGetError::UrlFormat(
+                "URL must be from archive.org".to_string(),
+            ))
         }
         Err(_) => {
             // If it's not a valid URL, try to construct it as an identifier
@@ -42,25 +44,40 @@ pub fn is_archive_url(input: &str) -> bool {
 
 /// Extracts identifier from archive.org URL
 pub fn extract_identifier_from_url(url: &str) -> Result<String> {
-    let parsed_url = Url::parse(url)
-        .map_err(|_| IaGetError::UrlFormat("Invalid URL format".to_string()))?;
-    
+    let parsed_url =
+        Url::parse(url).map_err(|_| IaGetError::UrlFormat("Invalid URL format".to_string()))?;
+
     if let Some(host) = parsed_url.host_str() {
         if !host.ends_with("archive.org") {
-            return Err(IaGetError::UrlFormat("URL must be from archive.org".to_string()));
+            return Err(IaGetError::UrlFormat(
+                "URL must be from archive.org".to_string(),
+            ));
         }
     } else {
         return Err(IaGetError::UrlFormat("Invalid URL format".to_string()));
     }
-    
+
     let path = parsed_url.path();
+
+    // Handle both /details/ and /metadata/ paths
     if let Some(identifier) = path.strip_prefix("/details/") {
         if identifier.is_empty() {
-            return Err(IaGetError::UrlFormat("No identifier found in URL".to_string()));
+            return Err(IaGetError::UrlFormat(
+                "No identifier found in URL".to_string(),
+            ));
+        }
+        Ok(identifier.to_string())
+    } else if let Some(identifier) = path.strip_prefix("/metadata/") {
+        if identifier.is_empty() {
+            return Err(IaGetError::UrlFormat(
+                "No identifier found in URL".to_string(),
+            ));
         }
         Ok(identifier.to_string())
     } else {
-        Err(IaGetError::UrlFormat("URL must contain /details/ path".to_string()))
+        Err(IaGetError::UrlFormat(
+            "URL must contain /details/ or /metadata/ path".to_string(),
+        ))
     }
 }
 

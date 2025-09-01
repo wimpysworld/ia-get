@@ -3,10 +3,10 @@
 //! Handles storing and retrieving complete Internet Archive JSON metadata
 //! for download resumption and comprehensive file management.
 
+use crate::{IaGetError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use crate::{Result, IaGetError};
 
 /// Complete Internet Archive metadata response structure
 /// Based on https://archive.org/developers/md-read.html
@@ -161,7 +161,9 @@ pub enum DownloadState {
 }
 
 /// Custom deserializer for string numbers to u64 Option with default support
-fn deserialize_string_to_u64_option<'de, D>(deserializer: D) -> std::result::Result<Option<u64>, D::Error>
+fn deserialize_string_to_u64_option<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -202,7 +204,9 @@ where
             if value >= 0 {
                 Ok(Some(value as u64))
             } else {
-                Err(de::Error::custom("negative number cannot be converted to u64"))
+                Err(de::Error::custom(
+                    "negative number cannot be converted to u64",
+                ))
             }
         }
 
@@ -242,17 +246,20 @@ impl DownloadSession {
         for file_name in &requested_files {
             if let Some(file_info) = archive_metadata.files.iter().find(|f| f.name == *file_name) {
                 let local_path = format!("{}/{}", download_config.output_dir, file_name);
-                file_status.insert(file_name.clone(), FileDownloadStatus {
-                    file_info: file_info.clone(),
-                    status: DownloadState::Pending,
-                    bytes_downloaded: 0,
-                    started_at: None,
-                    completed_at: None,
-                    error_message: None,
-                    retry_count: 0,
-                    server_used: None,
-                    local_path,
-                });
+                file_status.insert(
+                    file_name.clone(),
+                    FileDownloadStatus {
+                        file_info: file_info.clone(),
+                        status: DownloadState::Pending,
+                        bytes_downloaded: 0,
+                        started_at: None,
+                        completed_at: None,
+                        error_message: None,
+                        retry_count: 0,
+                        server_used: None,
+                        local_path,
+                    },
+                );
             }
         }
 
@@ -272,10 +279,10 @@ impl DownloadSession {
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| IaGetError::JsonParsing(format!("Failed to serialize session: {}", e)))?;
-        
+
         std::fs::write(path, json)
             .map_err(|e| IaGetError::FileSystem(format!("Failed to write session file: {}", e)))?;
-        
+
         Ok(())
     }
 
@@ -283,7 +290,7 @@ impl DownloadSession {
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| IaGetError::FileSystem(format!("Failed to read session file: {}", e)))?;
-        
+
         serde_json::from_str(&content)
             .map_err(|e| IaGetError::JsonParsing(format!("Failed to parse session file: {}", e)))
     }
@@ -303,7 +310,12 @@ impl DownloadSession {
     pub fn get_pending_files(&self) -> Vec<&str> {
         self.file_status
             .iter()
-            .filter(|(_, status)| matches!(status.status, DownloadState::Pending | DownloadState::Failed))
+            .filter(|(_, status)| {
+                matches!(
+                    status.status,
+                    DownloadState::Pending | DownloadState::Failed
+                )
+            })
             .map(|(name, _)| name.as_str())
             .collect()
     }
@@ -323,7 +335,7 @@ impl DownloadSession {
                 DownloadState::InProgress => in_progress += 1,
                 _ => {}
             }
-            
+
             if let Some(size) = status.file_info.size {
                 total_bytes += size;
             }
@@ -365,9 +377,9 @@ impl ArchiveFile {
         }
 
         if let Some(format) = &self.format {
-            filters.iter().any(|filter| {
-                format.to_lowercase().contains(&filter.to_lowercase())
-            })
+            filters
+                .iter()
+                .any(|filter| format.to_lowercase().contains(&filter.to_lowercase()))
         } else {
             false
         }
@@ -404,29 +416,34 @@ impl ArchiveFile {
     pub fn set_file_mtime<P: AsRef<Path>>(&self, file_path: P) -> Result<()> {
         if let Some(mtime) = self.mtime {
             use std::time::UNIX_EPOCH;
-            
+
             let _modified_time = UNIX_EPOCH + std::time::Duration::from_secs(mtime);
-            let metadata = std::fs::metadata(&file_path)
-                .map_err(|e| IaGetError::FileSystem(format!("Failed to get file metadata: {}", e)))?;
-            
+            let metadata = std::fs::metadata(&file_path).map_err(|e| {
+                IaGetError::FileSystem(format!("Failed to get file metadata: {}", e))
+            })?;
+
             let permissions = metadata.permissions();
             std::fs::set_permissions(&file_path, permissions)
                 .map_err(|e| IaGetError::FileSystem(format!("Failed to set permissions: {}", e)))?;
-            
+
             // Note: Setting file times on Windows requires additional handling
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
                 let _atime = metadata.atime();
                 use std::process::Command;
-                
+
                 let _mtime_str = mtime.to_string();
                 Command::new("touch")
-                    .args(&["-t", &format!("{}", mtime), file_path.as_ref().to_str().unwrap()])
+                    .args([
+                        "-t",
+                        &format!("{}", mtime),
+                        file_path.as_ref().to_str().unwrap(),
+                    ])
                     .output()
                     .map_err(|e| IaGetError::FileSystem(format!("Failed to set mtime: {}", e)))?;
             }
-            
+
             #[cfg(windows)]
             {
                 // On Windows, we'll use the filetime crate if available, or skip mtime setting
@@ -441,7 +458,8 @@ impl ArchiveFile {
         // Check format field first
         if let Some(format) = &self.format {
             let format_lower = format.to_lowercase();
-            if matches!(format_lower.as_str(), 
+            if matches!(
+                format_lower.as_str(),
                 "zip" | "gzip" | "bzip2" | "xz" | "tar" | "7z" | "rar" | "lz4" | "zstd"
             ) {
                 return true;
@@ -450,18 +468,18 @@ impl ArchiveFile {
 
         // Check file extension as fallback
         let name_lower = self.name.to_lowercase();
-        name_lower.ends_with(".zip") ||
-        name_lower.ends_with(".gz") ||
-        name_lower.ends_with(".bz2") ||
-        name_lower.ends_with(".xz") ||
-        name_lower.ends_with(".tar") ||
-        name_lower.ends_with(".tar.gz") ||
-        name_lower.ends_with(".tar.bz2") ||
-        name_lower.ends_with(".tar.xz") ||
-        name_lower.ends_with(".7z") ||
-        name_lower.ends_with(".rar") ||
-        name_lower.ends_with(".lz4") ||
-        name_lower.ends_with(".zst")
+        name_lower.ends_with(".zip")
+            || name_lower.ends_with(".gz")
+            || name_lower.ends_with(".bz2")
+            || name_lower.ends_with(".xz")
+            || name_lower.ends_with(".tar")
+            || name_lower.ends_with(".tar.gz")
+            || name_lower.ends_with(".tar.bz2")
+            || name_lower.ends_with(".tar.xz")
+            || name_lower.ends_with(".7z")
+            || name_lower.ends_with(".rar")
+            || name_lower.ends_with(".lz4")
+            || name_lower.ends_with(".zst")
     }
 
     /// Get the compression format of this file
@@ -473,7 +491,8 @@ impl ArchiveFile {
         // Check format field first
         if let Some(format) = &self.format {
             let format_lower = format.to_lowercase();
-            if matches!(format_lower.as_str(), 
+            if matches!(
+                format_lower.as_str(),
                 "zip" | "gzip" | "bzip2" | "xz" | "tar" | "7z" | "rar" | "lz4" | "zstd"
             ) {
                 return Some(format_lower);
@@ -551,27 +570,31 @@ pub fn generate_session_filename(identifier: &str) -> String {
 /// Find the most recent session file for an identifier
 pub fn find_latest_session_file(identifier: &str, session_dir: &str) -> Result<Option<String>> {
     let session_pattern = format!("ia-get-session-{}-", identifier);
-    
+
     let entries = std::fs::read_dir(session_dir)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to read session directory: {}", e)))?;
-    
+
     let mut session_files = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|e| IaGetError::FileSystem(format!("Failed to read directory entry: {}", e)))?;
+        let entry = entry.map_err(|e| {
+            IaGetError::FileSystem(format!("Failed to read directory entry: {}", e))
+        })?;
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
-        
+
         if file_name_str.starts_with(&session_pattern) && file_name_str.ends_with(".json") {
             session_files.push(entry.path());
         }
     }
-    
+
     // Sort by modification time, newest first
     session_files.sort_by_key(|path| {
         std::fs::metadata(path)
             .and_then(|m| m.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
     });
-    
-    Ok(session_files.last().map(|p| p.to_string_lossy().to_string()))
+
+    Ok(session_files
+        .last()
+        .map(|p| p.to_string_lossy().to_string()))
 }

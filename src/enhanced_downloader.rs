@@ -15,40 +15,35 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use ia_get::{
-//!     enhanced_downloader::EnhancedDownloader,
+//!     enhanced_downloader::ArchiveDownloader,
 //!     metadata_storage::DownloadConfig,
 //! };
+//! use reqwest::Client;
+//! use std::path::PathBuf;
 //!
 //! // Create downloader with 4 concurrent connections
-//! let downloader = EnhancedDownloader::new(4)?;
-//!
-//! // Configure download settings
-//! let config = DownloadConfig {
-//!     output_dir: "downloads".to_string(),
-//!     max_concurrent: 4,
-//!     verify_md5: true,
-//!     auto_decompress: true,
-//!     // ... other settings
-//! };
-//!
-//! // Download entire archive
-//! downloader.download_archive(&metadata, "output", &config).await?;
+//! let client = Client::new();
+//! let downloader = ArchiveDownloader::new(
+//!     client, 4, true, true, PathBuf::from(".sessions"), false, false
+//! );
 //! ```
 
 use crate::{
-    Result, 
-    IaGetError,
-    metadata_storage::{ArchiveMetadata, ArchiveFile, DownloadSession, DownloadConfig, DownloadState, FileDownloadStatus},
+    metadata_storage::{
+        ArchiveFile, ArchiveMetadata, DownloadConfig, DownloadSession, DownloadState,
+        FileDownloadStatus,
+    },
+    IaGetError, Result,
 };
+use colored::*;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::Client;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
-use colored::*;
-use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
-use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 /// Enhanced downloader that uses full Archive.org metadata
@@ -95,27 +90,40 @@ impl ArchiveDownloader {
         progress_bar: &ProgressBar,
     ) -> Result<DownloadSession> {
         // Create or resume download session
-        let mut session = self.create_or_resume_session(
-            original_url,
-            identifier.clone(),
-            archive_metadata,
-            download_config,
-            requested_files,
-        ).await?;
+        let mut session = self
+            .create_or_resume_session(
+                original_url,
+                identifier.clone(),
+                archive_metadata,
+                download_config,
+                requested_files,
+            )
+            .await?;
 
         // Create session directory if it doesn't exist
-        tokio::fs::create_dir_all(&self.session_dir).await
-            .map_err(|e| IaGetError::FileSystem(format!("Failed to create session directory: {}", e)))?;
+        tokio::fs::create_dir_all(&self.session_dir)
+            .await
+            .map_err(|e| {
+                IaGetError::FileSystem(format!("Failed to create session directory: {}", e))
+            })?;
 
         // Save initial session state
-        let session_file = self.session_dir.join(crate::metadata_storage::generate_session_filename(&identifier));
+        let session_file =
+            self.session_dir
+                .join(crate::metadata_storage::generate_session_filename(
+                    &identifier,
+                ));
         session.save_to_file(&session_file)?;
 
         progress_bar.set_message("Initializing downloads...".to_string());
 
         // Get pending files to download
-        let pending_files: Vec<String> = session.get_pending_files().into_iter().map(|s| s.to_string()).collect();
-        
+        let pending_files: Vec<String> = session
+            .get_pending_files()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+
         if pending_files.is_empty() {
             progress_bar.finish_with_message("All files already downloaded".green().to_string());
             return Ok(session);
@@ -143,7 +151,7 @@ impl ArchiveDownloader {
                 let servers = session.archive_metadata.workable_servers.clone();
                 let dir = session.archive_metadata.dir.clone();
                 let output_path = PathBuf::from(&file_status.local_path);
-                
+
                 let client = self.client.clone();
                 let semaphore_clone = semaphore.clone();
                 let verify_md5 = self.verify_md5;
@@ -151,9 +159,10 @@ impl ArchiveDownloader {
                 let enable_compression = self.enable_compression;
                 let auto_decompress = self.auto_decompress;
                 let decompress_formats = session.download_config.decompress_formats.clone();
-                
+
                 // Create individual progress bar for this file
-                let file_progress = multi_progress.add(ProgressBar::new(file_info.size.unwrap_or(0)));
+                let file_progress =
+                    multi_progress.add(ProgressBar::new(file_info.size.unwrap_or(0)));
                 file_progress.set_style(
                     ProgressStyle::default_bar()
                         .template("{spinner:.green} {msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({eta})")
@@ -164,7 +173,7 @@ impl ArchiveDownloader {
 
                 let handle = tokio::spawn(async move {
                     let _permit = semaphore_clone.acquire().await.unwrap();
-                    
+
                     Self::download_single_file(
                         client,
                         file_info,
@@ -177,9 +186,10 @@ impl ArchiveDownloader {
                         auto_decompress,
                         decompress_formats,
                         file_progress,
-                    ).await
+                    )
+                    .await
                 });
-                
+
                 handles.push((file_name, handle));
             }
         }
@@ -194,7 +204,8 @@ impl ArchiveDownloader {
                     session.update_file_status(&file_name, DownloadState::Completed);
                     completed += 1;
                     main_progress.inc(1);
-                    main_progress.set_message(format!("Completed: {}, Failed: {}", completed, failed));
+                    main_progress
+                        .set_message(format!("Completed: {}, Failed: {}", completed, failed));
                 }
                 Ok(Err(e)) => {
                     session.update_file_status(&file_name, DownloadState::Failed);
@@ -203,7 +214,8 @@ impl ArchiveDownloader {
                     }
                     failed += 1;
                     main_progress.inc(1);
-                    main_progress.set_message(format!("Completed: {}, Failed: {}", completed, failed));
+                    main_progress
+                        .set_message(format!("Completed: {}, Failed: {}", completed, failed));
                     eprintln!("{} Failed to download {}: {}", "✘".red(), file_name, e);
                 }
                 Err(e) => {
@@ -213,7 +225,8 @@ impl ArchiveDownloader {
                     }
                     failed += 1;
                     main_progress.inc(1);
-                    main_progress.set_message(format!("Completed: {}, Failed: {}", completed, failed));
+                    main_progress
+                        .set_message(format!("Completed: {}, Failed: {}", completed, failed));
                     eprintln!("{} Task failed for {}: {}", "✘".red(), file_name, e);
                 }
             }
@@ -223,9 +236,17 @@ impl ArchiveDownloader {
         session.save_to_file(&session_file)?;
 
         if failed == 0 {
-            main_progress.finish_with_message(format!("✓ Successfully downloaded {} files", completed).green().to_string());
+            main_progress.finish_with_message(
+                format!("✓ Successfully downloaded {} files", completed)
+                    .green()
+                    .to_string(),
+            );
         } else {
-            main_progress.finish_with_message(format!("⚠ Completed {} files, {} failed", completed, failed).yellow().to_string());
+            main_progress.finish_with_message(
+                format!("⚠ Completed {} files, {} failed", completed, failed)
+                    .yellow()
+                    .to_string(),
+            );
         }
 
         Ok(session)
@@ -248,31 +269,46 @@ impl ArchiveDownloader {
     ) -> Result<()> {
         // Create output directory if it doesn't exist
         if let Some(parent) = output_path.parent() {
-            tokio::fs::create_dir_all(parent).await
-                .map_err(|e| IaGetError::FileSystem(format!("Failed to create output directory: {}", e)))?;
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                IaGetError::FileSystem(format!("Failed to create output directory: {}", e))
+            })?;
         }
 
         // Check if file already exists and is valid
         if output_path.exists() {
             if verify_md5 && file_info.md5.is_some() {
                 progress_bar.set_message(format!("Verifying existing {}", file_info.name));
-                
+
                 // Convert async path to sync for MD5 calculation
                 let path_str = output_path.to_string_lossy().to_string();
                 let file_info_clone = file_info.clone();
-                let validation_result = tokio::task::spawn_blocking(move || {
-                    file_info_clone.validate_md5(&path_str)
-                }).await
-                .map_err(|e| IaGetError::Network(format!("MD5 validation task failed: {}", e)))??;
-                
+                let validation_result =
+                    tokio::task::spawn_blocking(move || file_info_clone.validate_md5(&path_str))
+                        .await
+                        .map_err(|e| {
+                            IaGetError::Network(format!("MD5 validation task failed: {}", e))
+                        })??;
+
                 if validation_result {
-                    progress_bar.finish_with_message(format!("✓ {} already exists and is valid", file_info.name).green().to_string());
+                    progress_bar.finish_with_message(
+                        format!("✓ {} already exists and is valid", file_info.name)
+                            .green()
+                            .to_string(),
+                    );
                     return Ok(());
                 } else {
-                    progress_bar.set_message(format!("MD5 mismatch, re-downloading {}", file_info.name));
+                    progress_bar
+                        .set_message(format!("MD5 mismatch, re-downloading {}", file_info.name));
                 }
             } else {
-                progress_bar.finish_with_message(format!("✓ {} already exists (skipping verification)", file_info.name).yellow().to_string());
+                progress_bar.finish_with_message(
+                    format!(
+                        "✓ {} already exists (skipping verification)",
+                        file_info.name
+                    )
+                    .yellow()
+                    .to_string(),
+                );
                 return Ok(());
             }
         }
@@ -296,23 +332,30 @@ impl ArchiveDownloader {
                 &file_info,
                 &progress_bar,
                 enable_compression,
-            ).await {
+            )
+            .await
+            {
                 Ok(_) => {
                     // Verify MD5 if required and available
                     if verify_md5 && file_info.md5.is_some() {
                         progress_bar.set_message(format!("Verifying {}", file_info.name));
-                        
+
                         let path_str = output_path.to_string_lossy().to_string();
                         let file_info_clone = file_info.clone();
                         let validation_result = tokio::task::spawn_blocking(move || {
                             file_info_clone.validate_md5(&path_str)
-                        }).await
-                        .map_err(|e| IaGetError::Network(format!("MD5 validation task failed: {}", e)))??;
-                        
+                        })
+                        .await
+                        .map_err(|e| {
+                            IaGetError::Network(format!("MD5 validation task failed: {}", e))
+                        })??;
+
                         if !validation_result {
-                            let error_msg = format!("MD5 verification failed for {}", file_info.name);
-                            progress_bar.finish_with_message(format!("✘ {}", error_msg).red().to_string());
-                            
+                            let error_msg =
+                                format!("MD5 verification failed for {}", file_info.name);
+                            progress_bar
+                                .finish_with_message(format!("✘ {}", error_msg).red().to_string());
+
                             // Remove invalid file
                             let _ = tokio::fs::remove_file(&output_path).await;
                             last_error = Some(IaGetError::HashMismatch(error_msg));
@@ -326,51 +369,72 @@ impl ArchiveDownloader {
                         let file_info_clone = file_info.clone();
                         let _ = tokio::task::spawn_blocking(move || {
                             file_info_clone.set_file_mtime(&path_str)
-                        }).await;
+                        })
+                        .await;
                     }
 
                     // Handle automatic decompression if enabled
                     if auto_decompress && file_info.is_compressed() {
                         if let Some(_compression_format) = file_info.get_compression_format() {
-                            if let Some(format) = crate::compression::CompressionFormat::from_filename(&file_info.name) {
-                                if crate::compression::should_decompress(&format, &decompress_formats) {
-                                    progress_bar.set_message(format!("Decompressing {}", file_info.name));
-                                    
+                            if let Some(format) =
+                                crate::compression::CompressionFormat::from_filename(
+                                    &file_info.name,
+                                )
+                            {
+                                if crate::compression::should_decompress(
+                                    &format,
+                                    &decompress_formats,
+                                ) {
+                                    progress_bar
+                                        .set_message(format!("Decompressing {}", file_info.name));
+
                                     // Determine output path for decompressed file(s)
                                     let decompressed_name = file_info.get_decompressed_name();
-                                    let decompressed_path = if let Some(parent) = output_path.parent() {
-                                        parent.join(&decompressed_name)
-                                    } else {
-                                        PathBuf::from(&decompressed_name)
-                                    };
+                                    let decompressed_path =
+                                        if let Some(parent) = output_path.parent() {
+                                            parent.join(&decompressed_name)
+                                        } else {
+                                            PathBuf::from(&decompressed_name)
+                                        };
 
                                     // Perform decompression
                                     let output_path_clone = output_path.clone();
                                     let decompressed_path_clone = decompressed_path.clone();
                                     let progress_clone = progress_bar.clone();
-                                    
-                                    let decompress_result = tokio::task::spawn_blocking(move || {
-                                        crate::compression::decompress_file(
-                                            &output_path_clone,
-                                            &decompressed_path_clone,
-                                            format,
-                                            Some(&progress_clone),
-                                        )
-                                    }).await;
+
+                                    let decompress_result =
+                                        tokio::task::spawn_blocking(move || {
+                                            crate::compression::decompress_file(
+                                                &output_path_clone,
+                                                &decompressed_path_clone,
+                                                format,
+                                                Some(&progress_clone),
+                                            )
+                                        })
+                                        .await;
 
                                     match decompress_result {
                                         Ok(Ok(())) => {
-                                            progress_bar.set_message(format!("Decompressed {} → {}", file_info.name, decompressed_name));
-                                            
+                                            progress_bar.set_message(format!(
+                                                "Decompressed {} → {}",
+                                                file_info.name, decompressed_name
+                                            ));
+
                                             // Optionally remove the compressed file after successful decompression
                                             // For now, we'll keep both to be safe
                                         }
                                         Ok(Err(e)) => {
-                                            progress_bar.set_message(format!("Decompression failed for {}: {}", file_info.name, e));
+                                            progress_bar.set_message(format!(
+                                                "Decompression failed for {}: {}",
+                                                file_info.name, e
+                                            ));
                                             // Continue without failing the download
                                         }
                                         Err(e) => {
-                                            progress_bar.set_message(format!("Decompression task failed for {}: {}", file_info.name, e));
+                                            progress_bar.set_message(format!(
+                                                "Decompression task failed for {}: {}",
+                                                file_info.name, e
+                                            ));
                                             // Continue without failing the download
                                         }
                                     }
@@ -379,13 +443,18 @@ impl ArchiveDownloader {
                         }
                     }
 
-                    progress_bar.finish_with_message(format!("✓ Downloaded {}", file_info.name).green().to_string());
+                    progress_bar.finish_with_message(
+                        format!("✓ Downloaded {}", file_info.name)
+                            .green()
+                            .to_string(),
+                    );
                     return Ok(());
                 }
                 Err(e) => {
-                    progress_bar.set_message(format!("Failed from {}, trying next server...", server));
+                    progress_bar
+                        .set_message(format!("Failed from {}, trying next server...", server));
                     last_error = Some(e);
-                    
+
                     // Add delay before trying next server
                     if retry_count < servers.len() - 1 {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -399,9 +468,12 @@ impl ArchiveDownloader {
             "Failed to download {} from all {} servers. Last error: {}",
             file_info.name,
             servers.len(),
-            last_error.as_ref().map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string())
+            last_error
+                .as_ref()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "Unknown error".to_string())
         );
-        
+
         progress_bar.finish_with_message(format!("✘ {}", error_msg).red().to_string());
         Err(last_error.unwrap_or(IaGetError::Network(error_msg)))
     }
@@ -416,12 +488,12 @@ impl ArchiveDownloader {
         enable_compression: bool,
     ) -> Result<()> {
         let mut request = client.get(url);
-        
+
         // Enable HTTP compression if requested
         if enable_compression {
             request = request.header("Accept-Encoding", "gzip, deflate, br");
         }
-        
+
         let response = request
             .send()
             .await
@@ -431,7 +503,10 @@ impl ArchiveDownloader {
             return Err(IaGetError::Network(format!(
                 "HTTP error {}: {}",
                 response.status(),
-                response.status().canonical_reason().unwrap_or("Unknown error")
+                response
+                    .status()
+                    .canonical_reason()
+                    .unwrap_or("Unknown error")
             )));
         }
 
@@ -442,32 +517,36 @@ impl ArchiveDownloader {
 
         // Create temporary file
         let temp_path = output_path.with_extension("tmp");
-        let mut file = File::create(&temp_path).await
-            .map_err(|e| IaGetError::FileSystem(format!("Failed to create temporary file: {}", e)))?;
+        let mut file = File::create(&temp_path).await.map_err(|e| {
+            IaGetError::FileSystem(format!("Failed to create temporary file: {}", e))
+        })?;
 
         // Download with progress tracking
         let mut downloaded = 0u64;
-        
+
         use futures_util::StreamExt;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk
-                .map_err(|e| IaGetError::Network(format!("Download stream error: {}", e)))?;
-            
-            file.write_all(&chunk).await
+            let chunk =
+                chunk.map_err(|e| IaGetError::Network(format!("Download stream error: {}", e)))?;
+
+            file.write_all(&chunk)
+                .await
                 .map_err(|e| IaGetError::FileSystem(format!("Failed to write to file: {}", e)))?;
-            
+
             downloaded += chunk.len() as u64;
             progress_bar.set_position(downloaded);
         }
 
         // Ensure all data is written
-        file.flush().await
+        file.flush()
+            .await
             .map_err(|e| IaGetError::FileSystem(format!("Failed to flush file: {}", e)))?;
         drop(file);
 
         // Move temporary file to final location
-        tokio::fs::rename(&temp_path, output_path).await
+        tokio::fs::rename(&temp_path, output_path)
+            .await
             .map_err(|e| IaGetError::FileSystem(format!("Failed to finalize file: {}", e)))?;
 
         Ok(())
@@ -483,28 +562,37 @@ impl ArchiveDownloader {
         requested_files: Vec<String>,
     ) -> Result<DownloadSession> {
         // Try to find existing session
-        if let Ok(Some(session_file)) = crate::metadata_storage::find_latest_session_file(&identifier, &self.session_dir.to_string_lossy()) {
+        if let Ok(Some(session_file)) = crate::metadata_storage::find_latest_session_file(
+            &identifier,
+            &self.session_dir.to_string_lossy(),
+        ) {
             if let Ok(mut existing_session) = DownloadSession::load_from_file(&session_file) {
                 // Update with any new files that weren't in the original session
                 for file_name in &requested_files {
                     if !existing_session.file_status.contains_key(file_name) {
-                        if let Some(file_info) = archive_metadata.files.iter().find(|f| f.name == *file_name) {
-                            let local_path = format!("{}/{}", download_config.output_dir, file_name);
-                            existing_session.file_status.insert(file_name.clone(), FileDownloadStatus {
-                                file_info: file_info.clone(),
-                                status: DownloadState::Pending,
-                                bytes_downloaded: 0,
-                                started_at: None,
-                                completed_at: None,
-                                error_message: None,
-                                retry_count: 0,
-                                server_used: None,
-                                local_path,
-                            });
+                        if let Some(file_info) =
+                            archive_metadata.files.iter().find(|f| f.name == *file_name)
+                        {
+                            let local_path =
+                                format!("{}/{}", download_config.output_dir, file_name);
+                            existing_session.file_status.insert(
+                                file_name.clone(),
+                                FileDownloadStatus {
+                                    file_info: file_info.clone(),
+                                    status: DownloadState::Pending,
+                                    bytes_downloaded: 0,
+                                    started_at: None,
+                                    completed_at: None,
+                                    error_message: None,
+                                    retry_count: 0,
+                                    server_used: None,
+                                    local_path,
+                                },
+                            );
                         }
                     }
                 }
-                
+
                 return Ok(existing_session);
             }
         }

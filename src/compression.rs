@@ -3,11 +3,11 @@
 //! Handles automatic decompression of common archive formats
 //! downloaded from Internet Archive following their compression guidelines.
 
-use crate::{Result, IaGetError};
-use std::path::Path;
+use crate::{IaGetError, Result};
+use indicatif::ProgressBar;
 use std::fs::File;
 use std::io::BufReader;
-use indicatif::ProgressBar;
+use std::path::Path;
 
 /// Supported compression formats for automatic decompression
 #[derive(Debug, Clone, PartialEq)]
@@ -26,7 +26,7 @@ impl CompressionFormat {
     /// Detect compression format from file extension
     pub fn from_filename(filename: &str) -> Option<Self> {
         let name_lower = filename.to_lowercase();
-        
+
         if name_lower.ends_with(".tar.gz") {
             Some(CompressionFormat::TarGz)
         } else if name_lower.ends_with(".tar.bz2") {
@@ -144,7 +144,7 @@ fn decompress_gzip<P: AsRef<Path>>(input_path: P, output_path: P) -> Result<()> 
 
     let input_file = File::open(input_path)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to open compressed file: {}", e)))?;
-    
+
     let mut decoder = GzDecoder::new(BufReader::new(input_file));
     let mut output_file = File::create(output_path)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to create output file: {}", e)))?;
@@ -162,7 +162,7 @@ fn decompress_bzip2<P: AsRef<Path>>(input_path: P, output_path: P) -> Result<()>
 
     let input_file = File::open(input_path)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to open compressed file: {}", e)))?;
-    
+
     let mut decoder = BzDecoder::new(BufReader::new(input_file));
     let mut output_file = File::create(output_path)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to create output file: {}", e)))?;
@@ -175,12 +175,12 @@ fn decompress_bzip2<P: AsRef<Path>>(input_path: P, output_path: P) -> Result<()>
 
 /// Decompress an xz file
 fn decompress_xz<P: AsRef<Path>>(input_path: P, output_path: P) -> Result<()> {
-    use xz2::read::XzDecoder;
     use std::io::copy;
+    use xz2::read::XzDecoder;
 
     let input_file = File::open(input_path)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to open compressed file: {}", e)))?;
-    
+
     let mut decoder = XzDecoder::new(BufReader::new(input_file));
     let mut output_file = File::create(output_path)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to create output file: {}", e)))?;
@@ -198,15 +198,16 @@ fn decompress_tar_gz<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()>
 
     let input_file = File::open(input_path)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to open compressed file: {}", e)))?;
-    
+
     let decoder = GzDecoder::new(BufReader::new(input_file));
     let mut archive = Archive::new(decoder);
-    
+
     // Create output directory if it doesn't exist
     std::fs::create_dir_all(&output_dir)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to create output directory: {}", e)))?;
 
-    archive.unpack(&output_dir)
+    archive
+        .unpack(&output_dir)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to extract tar.gz: {}", e)))?;
 
     Ok(())
@@ -219,15 +220,16 @@ fn decompress_tar_bz2<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()
 
     let input_file = File::open(input_path)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to open compressed file: {}", e)))?;
-    
+
     let decoder = BzDecoder::new(BufReader::new(input_file));
     let mut archive = Archive::new(decoder);
-    
+
     // Create output directory if it doesn't exist
     std::fs::create_dir_all(&output_dir)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to create output directory: {}", e)))?;
 
-    archive.unpack(&output_dir)
+    archive
+        .unpack(&output_dir)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to extract tar.bz2: {}", e)))?;
 
     Ok(())
@@ -235,20 +237,21 @@ fn decompress_tar_bz2<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()
 
 /// Decompress a tar.xz file
 fn decompress_tar_xz<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()> {
-    use xz2::read::XzDecoder;
     use tar::Archive;
+    use xz2::read::XzDecoder;
 
     let input_file = File::open(input_path)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to open compressed file: {}", e)))?;
-    
+
     let decoder = XzDecoder::new(BufReader::new(input_file));
     let mut archive = Archive::new(decoder);
-    
+
     // Create output directory if it doesn't exist
     std::fs::create_dir_all(&output_dir)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to create output directory: {}", e)))?;
 
-    archive.unpack(&output_dir)
+    archive
+        .unpack(&output_dir)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to extract tar.xz: {}", e)))?;
 
     Ok(())
@@ -259,7 +262,7 @@ fn decompress_zip<P: AsRef<Path>>(_input_path: P, _output_dir: P) -> Result<()> 
     // For now, we'll return an error for ZIP files as we don't have zip dependency
     // TODO: Add zip dependency and implement ZIP decompression
     Err(IaGetError::Parse(
-        "ZIP decompression not yet implemented. Please add 'zip' dependency.".to_string()
+        "ZIP decompression not yet implemented. Please add 'zip' dependency.".to_string(),
     ))
 }
 
@@ -269,14 +272,15 @@ fn decompress_tar<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()> {
 
     let input_file = File::open(input_path)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to open tar file: {}", e)))?;
-    
+
     let mut archive = Archive::new(BufReader::new(input_file));
-    
+
     // Create output directory if it doesn't exist
     std::fs::create_dir_all(&output_dir)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to create output directory: {}", e)))?;
 
-    archive.unpack(&output_dir)
+    archive
+        .unpack(&output_dir)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to extract tar: {}", e)))?;
 
     Ok(())
@@ -286,16 +290,17 @@ fn decompress_tar<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()> {
 pub fn should_decompress(format: &CompressionFormat, enabled_formats: &[String]) -> bool {
     if enabled_formats.is_empty() {
         // If no specific formats are configured, enable for common text-based compressions
-        matches!(format, 
-            CompressionFormat::Gzip | 
-            CompressionFormat::Bzip2 | 
-            CompressionFormat::Xz |
-            CompressionFormat::TarGz  // Include tar.gz in default decompression
+        matches!(
+            format,
+            CompressionFormat::Gzip
+                | CompressionFormat::Bzip2
+                | CompressionFormat::Xz
+                | CompressionFormat::TarGz // Include tar.gz in default decompression
         )
     } else {
         let format_str = match format {
             CompressionFormat::Gzip => "gzip",
-            CompressionFormat::Bzip2 => "bzip2", 
+            CompressionFormat::Bzip2 => "bzip2",
             CompressionFormat::Xz => "xz",
             CompressionFormat::Zip => "zip",
             CompressionFormat::Tar => "tar",
@@ -303,8 +308,10 @@ pub fn should_decompress(format: &CompressionFormat, enabled_formats: &[String])
             CompressionFormat::TarBz2 => "tar.bz2",
             CompressionFormat::TarXz => "tar.xz",
         };
-        
-        enabled_formats.iter().any(|f| f.to_lowercase() == format_str)
+
+        enabled_formats
+            .iter()
+            .any(|f| f.to_lowercase() == format_str)
     }
 }
 
@@ -314,14 +321,38 @@ mod tests {
 
     #[test]
     fn test_compression_format_detection() {
-        assert_eq!(CompressionFormat::from_filename("test.tar.gz"), Some(CompressionFormat::TarGz));
-        assert_eq!(CompressionFormat::from_filename("test.tar.bz2"), Some(CompressionFormat::TarBz2));
-        assert_eq!(CompressionFormat::from_filename("test.tar.xz"), Some(CompressionFormat::TarXz));
-        assert_eq!(CompressionFormat::from_filename("test.gz"), Some(CompressionFormat::Gzip));
-        assert_eq!(CompressionFormat::from_filename("test.bz2"), Some(CompressionFormat::Bzip2));
-        assert_eq!(CompressionFormat::from_filename("test.xz"), Some(CompressionFormat::Xz));
-        assert_eq!(CompressionFormat::from_filename("test.zip"), Some(CompressionFormat::Zip));
-        assert_eq!(CompressionFormat::from_filename("test.tar"), Some(CompressionFormat::Tar));
+        assert_eq!(
+            CompressionFormat::from_filename("test.tar.gz"),
+            Some(CompressionFormat::TarGz)
+        );
+        assert_eq!(
+            CompressionFormat::from_filename("test.tar.bz2"),
+            Some(CompressionFormat::TarBz2)
+        );
+        assert_eq!(
+            CompressionFormat::from_filename("test.tar.xz"),
+            Some(CompressionFormat::TarXz)
+        );
+        assert_eq!(
+            CompressionFormat::from_filename("test.gz"),
+            Some(CompressionFormat::Gzip)
+        );
+        assert_eq!(
+            CompressionFormat::from_filename("test.bz2"),
+            Some(CompressionFormat::Bzip2)
+        );
+        assert_eq!(
+            CompressionFormat::from_filename("test.xz"),
+            Some(CompressionFormat::Xz)
+        );
+        assert_eq!(
+            CompressionFormat::from_filename("test.zip"),
+            Some(CompressionFormat::Zip)
+        );
+        assert_eq!(
+            CompressionFormat::from_filename("test.tar"),
+            Some(CompressionFormat::Tar)
+        );
         assert_eq!(CompressionFormat::from_filename("test.txt"), None);
     }
 
@@ -329,10 +360,13 @@ mod tests {
     fn test_decompressed_name_generation() {
         let gzip = CompressionFormat::Gzip;
         assert_eq!(gzip.get_decompressed_name("test.txt.gz"), "test.txt");
-        
+
         let tar_gz = CompressionFormat::TarGz;
-        assert_eq!(tar_gz.get_decompressed_name("archive.tar.gz"), "archive.tar");
-        
+        assert_eq!(
+            tar_gz.get_decompressed_name("archive.tar.gz"),
+            "archive.tar"
+        );
+
         let zip = CompressionFormat::Zip;
         assert_eq!(zip.get_decompressed_name("archive.zip"), "archive");
     }
@@ -341,11 +375,11 @@ mod tests {
     fn test_should_decompress() {
         let gzip = CompressionFormat::Gzip;
         let zip = CompressionFormat::Zip;
-        
+
         // Empty config enables common formats
         assert!(should_decompress(&gzip, &[]));
         assert!(!should_decompress(&zip, &[]));
-        
+
         // Explicit config
         let formats = vec!["zip".to_string()];
         assert!(!should_decompress(&gzip, &formats));

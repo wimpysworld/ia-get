@@ -11,23 +11,23 @@ pub enum Commands {
     Download {
         /// URL to archive.org details page
         url: String,
-        
+
         /// Output directory
         #[arg(short, long)]
         output: Option<String>,
-        
+
         /// Include only files with these extensions (comma-separated)
         #[arg(long)]
         include_ext: Option<String>,
-        
+
         /// Exclude files with these extensions (comma-separated)
         #[arg(long)]
         exclude_ext: Option<String>,
-        
+
         /// Maximum file size to download
         #[arg(long)]
         max_file_size: Option<String>,
-        
+
         /// Enable compression for downloads
         #[arg(long)]
         compress: bool,
@@ -96,7 +96,7 @@ pub struct Cli {
     /// Comma-separated list of formats to auto-decompress (e.g., gzip,bzip2,xz)
     #[arg(long, value_delimiter = ',')]
     pub decompress_formats: Vec<String>,
-    
+
     /// Subcommands
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -120,21 +120,24 @@ impl Cli {
 
     /// Get parsed extensions for inclusion filter
     pub fn include_extensions(&self) -> Vec<String> {
-        self.include_ext.as_ref()
+        self.include_ext
+            .as_ref()
             .map(|ext| ext.split(',').map(|s| s.trim().to_lowercase()).collect())
             .unwrap_or_default()
     }
 
     /// Get parsed extensions for exclusion filter  
     pub fn exclude_extensions(&self) -> Vec<String> {
-        self.exclude_ext.as_ref()
+        self.exclude_ext
+            .as_ref()
             .map(|ext| ext.split(',').map(|s| s.trim().to_lowercase()).collect())
             .unwrap_or_default()
     }
 
     /// Parse max file size into bytes
     pub fn max_file_size_bytes(&self) -> Option<u64> {
-        self.max_file_size.as_ref()
+        self.max_file_size
+            .as_ref()
             .and_then(|size| crate::filters::parse_size_string(size).ok())
     }
 
@@ -158,7 +161,11 @@ impl Cli {
     pub fn get_output_dir(&self) -> Option<&str> {
         if let Some(ref output) = self.output_path {
             Some(output)
-        } else if let Some(Commands::Download { output: Some(ref output), .. }) = &self.command {
+        } else if let Some(Commands::Download {
+            output: Some(ref output),
+            ..
+        }) = &self.command
+        {
             Some(output)
         } else {
             None
@@ -196,17 +203,17 @@ mod tests {
     #[test]
     fn test_cli_validation() {
         let mut cli = Cli::default();
-        
+
         // Valid configuration
         assert!(cli.validate().is_ok());
-        
+
         // Invalid concurrent downloads
         cli.concurrent_downloads = 0;
         assert!(cli.validate().is_err());
-        
+
         cli.concurrent_downloads = 15;
         assert!(cli.validate().is_err());
-        
+
         // Invalid max retries
         cli.concurrent_downloads = 3;
         cli.max_retries = 25;
@@ -246,13 +253,18 @@ mod tests {
             "ia-get",
             "https://archive.org/details/test",
             "--verbose",
-            "--concurrent-downloads", "5",
-            "--include-ext", "pdf,txt",
-            "--compress"
+            "--concurrent-downloads",
+            "5",
+            "--include-ext",
+            "pdf,txt",
+            "--compress",
         ];
 
         let cli = Cli::try_parse_from(args).unwrap();
-        assert_eq!(cli.url, Some("https://archive.org/details/test".to_string()));
+        assert_eq!(
+            cli.url,
+            Some("https://archive.org/details/test".to_string())
+        );
         assert!(cli.verbose);
         assert_eq!(cli.concurrent_downloads, 5);
         assert_eq!(cli.include_ext, Some("pdf,txt".to_string()));

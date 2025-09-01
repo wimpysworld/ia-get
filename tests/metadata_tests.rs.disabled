@@ -8,8 +8,8 @@
 
 use ia_get::{
     metadata::{get_json_url, parse_archive_metadata},
-    metadata_storage::{ArchiveMetadata, ArchiveFile},
-    url_processing::{extract_identifier_from_url, construct_metadata_url}
+    metadata_storage::{ArchiveFile, ArchiveMetadata},
+    url_processing::{construct_metadata_url, extract_identifier_from_url},
 };
 use serde_json;
 
@@ -20,21 +20,24 @@ fn test_json_url_generation() {
     let details_url = "https://archive.org/details/example";
     let json_url = get_json_url(details_url);
     assert_eq!(json_url, "https://archive.org/metadata/example");
-    
+
     // Test with already metadata URL
     let metadata_url = "https://archive.org/metadata/example";
     let json_url = get_json_url(metadata_url);
     assert_eq!(json_url, metadata_url);
-    
+
     // Test with identifier only
     let identifier = "example-identifier";
     let json_url = get_json_url(identifier);
     assert_eq!(json_url, "https://archive.org/metadata/example-identifier");
-    
+
     // Test with complex identifier
     let complex_id = "complex_identifier-with-dashes_123";
     let json_url = get_json_url(complex_id);
-    assert_eq!(json_url, "https://archive.org/metadata/complex_identifier-with-dashes_123");
+    assert_eq!(
+        json_url,
+        "https://archive.org/metadata/complex_identifier-with-dashes_123"
+    );
 }
 
 /// Test metadata URL construction
@@ -54,17 +57,17 @@ fn test_identifier_extraction() {
     let details_url = "https://archive.org/details/example-archive";
     let identifier = extract_identifier_from_url(details_url).unwrap();
     assert_eq!(identifier, "example-archive");
-    
+
     // Test metadata URL
     let metadata_url = "https://archive.org/metadata/example-archive";
     let identifier = extract_identifier_from_url(metadata_url).unwrap();
     assert_eq!(identifier, "example-archive");
-    
+
     // Test download URL
     let download_url = "https://archive.org/download/example-archive/file.pdf";
     let identifier = extract_identifier_from_url(download_url).unwrap();
     assert_eq!(identifier, "example-archive");
-    
+
     // Test invalid URL
     let invalid_url = "https://example.com/not-archive";
     let result = extract_identifier_from_url(invalid_url);
@@ -109,21 +112,24 @@ fn test_json_metadata_parsing_valid() {
         "uniq": 1234567890,
         "workable_servers": ["ia801234.us.archive.org"]
     }"#;
-    
+
     let metadata: ArchiveMetadata = serde_json::from_str(json_data).unwrap();
-    
+
     // Verify basic structure
     assert_eq!(metadata.files.len(), 2);
     assert_eq!(metadata.server, "ia801234.us.archive.org");
     assert_eq!(metadata.dir, "/example");
-    
+
     // Verify file details
     let pdf_file = &metadata.files[0];
     assert_eq!(pdf_file.name, "example.pdf");
     assert_eq!(pdf_file.size, Some("1024000".to_string()));
     assert_eq!(pdf_file.format, Some("PDF".to_string()));
-    assert_eq!(pdf_file.md5, Some("d41d8cd98f00b204e9800998ecf8427e".to_string()));
-    
+    assert_eq!(
+        pdf_file.md5,
+        Some("d41d8cd98f00b204e9800998ecf8427e".to_string())
+    );
+
     let txt_file = &metadata.files[1];
     assert_eq!(txt_file.name, "example.txt");
     assert_eq!(txt_file.size, Some("2048".to_string()));
@@ -142,14 +148,14 @@ fn test_json_metadata_parsing_minimal() {
         "server": "test-server",
         "dir": "/test"
     }"#;
-    
+
     let metadata: ArchiveMetadata = serde_json::from_str(minimal_json).unwrap();
-    
+
     assert_eq!(metadata.files.len(), 1);
     assert_eq!(metadata.files[0].name, "file.txt");
     assert_eq!(metadata.server, "test-server");
     assert_eq!(metadata.dir, "/test");
-    
+
     // Verify optional fields are None/default
     assert_eq!(metadata.files[0].size, None);
     assert_eq!(metadata.files[0].md5, None);
@@ -163,12 +169,12 @@ fn test_json_metadata_parsing_errors() {
     let invalid_json = r#"{ "files": [ incomplete"#;
     let result: Result<ArchiveMetadata, _> = serde_json::from_str(invalid_json);
     assert!(result.is_err());
-    
+
     // Test with missing required fields
     let missing_files = r#"{ "server": "test" }"#;
     let result: Result<ArchiveMetadata, _> = serde_json::from_str(missing_files);
     assert!(result.is_err());
-    
+
     // Test with wrong data types
     let wrong_types = r#"{ "files": "not-an-array", "server": "test", "dir": "/test" }"#;
     let result: Result<ArchiveMetadata, _> = serde_json::from_str(wrong_types);
@@ -190,14 +196,17 @@ fn test_archive_file_structure() {
         "width": "612",
         "height": "792"
     }"#;
-    
+
     let file: ArchiveFile = serde_json::from_str(file_json).unwrap();
-    
+
     assert_eq!(file.name, "test.pdf");
     assert_eq!(file.source, Some("original".to_string()));
     assert_eq!(file.mtime, Some("1234567890".to_string()));
     assert_eq!(file.size, Some("1048576".to_string()));
-    assert_eq!(file.md5, Some("d41d8cd98f00b204e9800998ecf8427e".to_string()));
+    assert_eq!(
+        file.md5,
+        Some("d41d8cd98f00b204e9800998ecf8427e".to_string())
+    );
     assert_eq!(file.format, Some("PDF".to_string()));
     assert_eq!(file.width, Some("612".to_string()));
     assert_eq!(file.height, Some("792".to_string()));
@@ -208,7 +217,7 @@ fn test_archive_file_structure() {
 fn test_archive_file_minimal() {
     let minimal_file_json = r#"{ "name": "minimal.txt" }"#;
     let file: ArchiveFile = serde_json::from_str(minimal_file_json).unwrap();
-    
+
     assert_eq!(file.name, "minimal.txt");
     assert_eq!(file.source, None);
     assert_eq!(file.size, None);
@@ -226,15 +235,15 @@ fn test_parse_archive_metadata_function() {
         "server": "test-server.archive.org",
         "dir": "/test-dir"
     }"#;
-    
+
     let result = parse_archive_metadata(json_data);
     assert!(result.is_ok());
-    
+
     let metadata = result.unwrap();
     assert_eq!(metadata.files.len(), 1);
     assert_eq!(metadata.files[0].name, "test.txt");
     assert_eq!(metadata.server, "test-server.archive.org");
-    
+
     // Test with invalid JSON
     let invalid_data = "not valid json";
     let result = parse_archive_metadata(invalid_data);
@@ -249,13 +258,13 @@ fn test_url_edge_cases() {
     let json_url = get_json_url(url_with_params);
     assert!(json_url.contains("metadata"));
     assert!(json_url.contains("example"));
-    
+
     // Test with fragments
     let url_with_fragment = "https://archive.org/details/example#section";
     let json_url = get_json_url(url_with_fragment);
     assert!(json_url.contains("metadata"));
     assert!(json_url.contains("example"));
-    
+
     // Test with trailing slash
     let url_with_slash = "https://archive.org/details/example/";
     let json_url = get_json_url(url_with_slash);
@@ -304,25 +313,41 @@ fn test_complex_archive_metadata() {
             "date": "2023-01-01"
         }
     }"#;
-    
+
     let metadata: ArchiveMetadata = serde_json::from_str(complex_json).unwrap();
-    
+
     assert_eq!(metadata.files.len(), 4);
-    
+
     // Verify different file types
-    let pdf_file = metadata.files.iter().find(|f| f.name == "document.pdf").unwrap();
+    let pdf_file = metadata
+        .files
+        .iter()
+        .find(|f| f.name == "document.pdf")
+        .unwrap();
     assert_eq!(pdf_file.format, Some("PDF".to_string()));
     assert_eq!(pdf_file.source, Some("original".to_string()));
-    
-    let image_file = metadata.files.iter().find(|f| f.name == "image.jpg").unwrap();
+
+    let image_file = metadata
+        .files
+        .iter()
+        .find(|f| f.name == "image.jpg")
+        .unwrap();
     assert_eq!(image_file.format, Some("JPEG".to_string()));
     assert_eq!(image_file.width, Some("1920".to_string()));
     assert_eq!(image_file.height, Some("1080".to_string()));
-    
-    let metadata_file = metadata.files.iter().find(|f| f.name == "metadata.xml").unwrap();
+
+    let metadata_file = metadata
+        .files
+        .iter()
+        .find(|f| f.name == "metadata.xml")
+        .unwrap();
     assert_eq!(metadata_file.source, Some("metadata".to_string()));
-    
-    let zip_file = metadata.files.iter().find(|f| f.name == "archive.zip").unwrap();
+
+    let zip_file = metadata
+        .files
+        .iter()
+        .find(|f| f.name == "archive.zip")
+        .unwrap();
     assert_eq!(zip_file.format, Some("ZIP".to_string()));
     assert_eq!(zip_file.size, Some("10485760".to_string()));
 }
@@ -334,12 +359,12 @@ fn test_identifier_extraction_edge_cases() {
     let complex_url = "https://archive.org/details/complex_identifier-with-many_parts.123";
     let identifier = extract_identifier_from_url(complex_url).unwrap();
     assert_eq!(identifier, "complex_identifier-with-many_parts.123");
-    
+
     // Test with numeric identifier
     let numeric_url = "https://archive.org/details/123456789";
     let identifier = extract_identifier_from_url(numeric_url).unwrap();
     assert_eq!(identifier, "123456789");
-    
+
     // Test with special characters in path (but valid identifier)
     let special_url = "https://archive.org/details/test-archive_v1.0";
     let identifier = extract_identifier_from_url(special_url).unwrap();
