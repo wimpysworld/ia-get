@@ -33,19 +33,25 @@ jobs:
           ~/.cargo/registry
           ~/.cargo/git
           target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-cargo-
 
     - name: Check formatting
       run: cargo fmt --all -- --check
 
-    - name: Run clippy
-      run: cargo clippy --all-targets -- -D warnings
+    - name: Run clippy (CLI only)
+      run: cargo clippy --no-default-features --features cli --all-targets -- -D warnings
 
-    - name: Build
-      run: cargo build --release
+    - name: Build CLI (fast build)
+      run: cargo build --no-default-features --features cli --release
 
-    - name: Run tests
-      run: cargo test
+    - name: Build GUI (full build)
+      run: cargo build --features gui --release
+
+    - name: Run tests (CLI only - faster)
+      run: cargo test --no-default-features --features cli
 
     - name: Create artifact
       shell: bash

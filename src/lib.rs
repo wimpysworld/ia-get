@@ -61,6 +61,7 @@ pub mod downloads;
 pub mod enhanced_downloader;
 pub mod error;
 pub mod filters;
+#[cfg(feature = "gui")]
 pub mod gui;
 pub mod http_client;
 pub mod interactive_menu;

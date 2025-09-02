@@ -87,19 +87,15 @@ impl ArchiveHealthPanel {
             self.test_in_progress = true;
             self.connection_status = ConnectionStatus::Testing;
 
+            // Schedule test completion after a short delay without blocking
+            // This simulates async operation without making tests slow or flaky
             let ctx_clone = ctx.clone();
-
-            // Spawn async task (in real implementation, use proper async runtime)
             std::thread::spawn(move || {
-                // In a real async implementation, we would use tokio::spawn here
-                // For now, simulate the test with a delay
-                std::thread::sleep(Duration::from_millis(1000));
-
-                // Simulate test result (since we can't do real HTTP in this context)
-                // In real implementation, this would be an actual API call
-                let _test_result = ConnectionStatus::Success("200 OK".to_string());
-
-                // Request repaint to update UI
+                // Use a much shorter delay and request immediate repaint
+                // In real implementation, this would be replaced with actual async HTTP calls
+                std::thread::sleep(Duration::from_millis(10));
+                
+                // Request repaint to update UI immediately
                 ctx_clone.request_repaint();
             });
         }
