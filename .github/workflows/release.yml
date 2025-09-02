@@ -80,7 +80,31 @@ jobs:
           PROJECT_NAME: ia-get
           PACKAGE_NAME: ia-get
           OS_NAME: ${{ matrix.job.os }}
-        run: ./.github/workflows/before_deploy.sh
+        run: |
+          # Use the build script for packaging (it will run automatically on release builds)
+          # Just ensure artifacts are created and calculate hashes
+          mkdir -p artifacts
+          cp "target/${{ matrix.job.target }}/release/$PROJECT_NAME" "artifacts/" 2>/dev/null || cp "target/release/$PROJECT_NAME" "artifacts/" 2>/dev/null || echo "Binary not found in expected location"
+
+          # Copy documentation
+          cp README.md artifacts/ 2>/dev/null || true
+          cp LICENSE artifacts/ 2>/dev/null || true
+
+          # Create archive
+          cd artifacts
+          if [[ "$OS_NAME" == "windows-latest" ]]; then
+            7z a "${PACKAGE_NAME}-${GITHUB_REF/refs\/tags\//}-${TARGET}.zip" * || zip -r "${PACKAGE_NAME}-${GITHUB_REF/refs\/tags\//}-${TARGET}.zip" *
+          else
+            tar czf "${PACKAGE_NAME}-${GITHUB_REF/refs\/tags\//}-${TARGET}.tar.gz" *
+          fi
+
+          # Calculate hashes
+          for file in *; do
+            if [ -f "$file" ]; then
+              hash=$(sha256sum "$file" | cut -d' ' -f1)
+              echo "$hash  $file" >> ../RELEASE_HASHES.txt
+            fi
+          done
 
       - name: Generate release notes with hashes
         shell: bash

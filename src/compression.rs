@@ -175,8 +175,8 @@ fn decompress_bzip2<P: AsRef<Path>>(input_path: P, output_path: P) -> Result<()>
 
 /// Decompress an xz file
 fn decompress_xz<P: AsRef<Path>>(input_path: P, output_path: P) -> Result<()> {
+    use liblzma::read::XzDecoder;
     use std::io::copy;
-    use xz2::read::XzDecoder;
 
     let input_file = File::open(input_path)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to open compressed file: {}", e)))?;
@@ -237,8 +237,8 @@ fn decompress_tar_bz2<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()
 
 /// Decompress a tar.xz file
 fn decompress_tar_xz<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()> {
+    use liblzma::read::XzDecoder;
     use tar::Archive;
-    use xz2::read::XzDecoder;
 
     let input_file = File::open(input_path)
         .map_err(|e| IaGetError::FileSystem(format!("Failed to open compressed file: {}", e)))?;

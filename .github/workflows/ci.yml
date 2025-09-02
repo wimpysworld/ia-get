@@ -49,6 +49,9 @@ jobs:
     - name: Run clippy (CLI only)
       run: cargo clippy --no-default-features --features cli --all-targets -- -D warnings
 
+    - name: Run clippy (GUI features)
+      run: cargo clippy --features gui --all-targets -- -D warnings
+
     - name: Build CLI (fast build)
       run: cargo build --no-default-features --features cli --release
 
@@ -58,30 +61,37 @@ jobs:
     - name: Run tests (CLI only - faster)
       run: cargo test --no-default-features --features cli
 
-    - name: Create artifact
-      shell: bash
-      run: |
-        mkdir -p artifacts
-        if [[ "${{ runner.os }}" == "Windows" ]]; then
-          cp target/release/ia-get.exe artifacts/
-          cd artifacts && 7z a ia-get-${{ runner.os }}.zip ia-get.exe
-        else
-          cp target/release/ia-get artifacts/
-          cd artifacts && tar czf ia-get-${{ runner.os }}.tar.gz ia-get
-        fi
+    - name: Run tests (GUI features)
+      run: cargo test --features gui
 
-    - name: Calculate and display SHA256 hashes
+    - name: Run build validation script
+      run: .\scripts\validate-build.ps1
+      shell: pwsh
+
+    - name: Create artifact (using build script)
       shell: bash
       run: |
-        cd artifacts
-        echo "# Calculated SHA256 hashes:" > ../hashes_${{ runner.os }}.txt
-        for file in *; do
-          if [ -f "$file" ]; then
-            hash=$(sha256sum "$file" | cut -d' ' -f1)
-            echo "SHA256 for $file: $hash"
-            echo "$hash  $file" >> ../hashes_${{ runner.os }}.txt
+        # The build script already creates artifacts in the artifacts/ directory
+        # Just verify they exist and calculate hashes
+        if [ -d "artifacts" ]; then
+          cd artifacts
+          echo "# Calculated SHA256 hashes:" > ../hashes_${{ runner.os }}.txt
+          for file in *; do
+            if [ -f "$file" ]; then
+              hash=$(sha256sum "$file" | cut -d' ' -f1)
+              echo "SHA256 for $file: $hash"
+              echo "$hash  $file" >> ../hashes_${{ runner.os }}.txt
+            fi
+          done
+        else
+          echo "No artifacts directory found, creating basic artifact..."
+          mkdir -p artifacts
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp target/release/ia-get.exe artifacts/
+          else
+            cp target/release/ia-get artifacts/
           fi
-        done
+        fi
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4

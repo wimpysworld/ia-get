@@ -527,11 +527,7 @@ impl ArchiveFile {
             if file_size != expected_size {
                 // For XML files, we're more lenient due to Archive.org inconsistencies
                 // Allow some variance in size (e.g., due to encoding differences)
-                let size_difference = if file_size > expected_size {
-                    file_size - expected_size
-                } else {
-                    expected_size - file_size
-                };
+                let size_difference = file_size.abs_diff(expected_size);
 
                 // Allow up to 10% size difference or 100 bytes, whichever is larger
                 let tolerance = std::cmp::max(expected_size / 10, 100);

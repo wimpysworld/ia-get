@@ -214,7 +214,7 @@ impl IaGetApp {
     fn render_main_ui(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         // Top menu bar
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open Archive...").clicked() {
                         self.show_open_dialog = true;
