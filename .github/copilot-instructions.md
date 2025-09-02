@@ -16,6 +16,7 @@ This is a Rust CLI tool for downloading files from the Internet Archive, built w
 - Use `cargo build` for development builds and `cargo build --release` for optimized builds
 - Run tests with `cargo test` and linting with `cargo clippy`
 - Maintain compatibility with standard Rust compilation targets
+- **Always run `cargo fmt --check` and `cargo fmt` at the end of every PR to ensure consistent code formatting**
 
 ### Dependencies
 - Keep dependencies minimal and well-justified
