@@ -50,12 +50,12 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            max_idle_per_host: 8, // Allow more concurrent connections to archive.org
-            base_timeout: Duration::from_secs(30),
-            max_timeout: Duration::from_secs(300), // 5 minutes for large files
-            pool_idle_timeout: Duration::from_secs(90),
+            max_idle_per_host: 5, // Conservative limit following Internet Archive recommendations
+            base_timeout: Duration::from_secs(60),
+            max_timeout: Duration::from_secs(600), // 10 minutes for very large files
+            pool_idle_timeout: Duration::from_secs(120),
             http2_prior_knowledge: true, // Archive.org supports HTTP/2
-            tcp_keepalive: Some(Duration::from_secs(60)),
+            tcp_keepalive: Some(Duration::from_secs(75)),
             gzip: true,
             deflate: true,
         }
@@ -282,12 +282,12 @@ impl HttpClientFactory {
     /// Create a client optimized for Internet Archive downloads
     pub fn for_archive_downloads() -> Result<EnhancedHttpClient> {
         let config = ClientConfig {
-            max_idle_per_host: 16, // Internet Archive can handle many connections
+            max_idle_per_host: 5, // Conservative limit per IA recommendations
             base_timeout: Duration::from_secs(60),
             max_timeout: Duration::from_secs(600), // 10 minutes for very large files
             pool_idle_timeout: Duration::from_secs(120),
-            http2_prior_knowledge: false, // Remove unsupported option
-            tcp_keepalive: Some(Duration::from_secs(75)), // Slightly longer than default
+            http2_prior_knowledge: false, // Let reqwest negotiate automatically
+            tcp_keepalive: Some(Duration::from_secs(75)),
             gzip: true,
             deflate: true,
         };
@@ -335,8 +335,8 @@ mod tests {
     #[test]
     fn test_client_config_defaults() {
         let config = ClientConfig::default();
-        assert_eq!(config.max_idle_per_host, 8);
-        assert_eq!(config.base_timeout, Duration::from_secs(30));
+        assert_eq!(config.max_idle_per_host, 5); // Updated for Archive.org compliance
+        assert_eq!(config.base_timeout, Duration::from_secs(60)); // Updated for longer timeout
         assert!(config.http2_prior_knowledge);
         assert!(config.gzip);
     }

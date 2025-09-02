@@ -14,8 +14,8 @@ pub async fn is_url_accessible(
 ) -> Result<()> {
     let mut retries = 0;
     let max_retries = 5;
-    let mut delay = std::time::Duration::from_secs(60);
-    let max_delay = std::time::Duration::from_secs(900); // 15 minutes
+    let mut delay = std::time::Duration::from_secs(30); // More conservative initial delay
+    let max_delay = std::time::Duration::from_secs(600); // 10 minutes max (reduced from 15)
 
     loop {
         // Use GET for metadata URLs since Archive.org returns 405 for HEAD requests on metadata endpoints

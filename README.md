@@ -16,11 +16,32 @@
 
 # Usage 📖
 
+ia-get provides both a command-line interface (CLI) and a graphical user interface (GUI) for downloading files from [archive.org](https://archive.org).
+
+## Command Line Interface
+
 Simply pass the URL of an [archive.org](https://archive.org) details page you want to download and `ia-get` will automatically fetch the JSON metadata and download all files with blazing speed.
 
 ```shell
 ia-get https://archive.org/details/<identifier>
 ```
+
+## Graphical User Interface 🖼️
+
+For users who prefer a visual interface, ia-get includes a cross-platform GUI:
+
+```shell
+ia-get-gui
+```
+
+The GUI provides:
+- **Easy archive input**: Enter URLs or identifiers with validation
+- **Visual file filtering**: Configure downloads with intuitive controls  
+- **Real-time progress**: See download status with progress bars and statistics
+- **Settings management**: Configure all options through a user-friendly interface
+- **Download history**: Quick access to previously downloaded archives
+
+See [GUI_README.md](GUI_README.md) for detailed GUI documentation.
 
 ## 📥 Download ia-get
 

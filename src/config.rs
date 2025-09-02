@@ -27,6 +27,9 @@ pub struct Config {
     /// Default file extensions to exclude (comma-separated)
     pub default_exclude_ext: Option<String>,
 
+    /// Default minimum file size filter
+    pub default_min_file_size: Option<String>,
+
     /// Default maximum file size filter
     pub default_max_file_size: Option<String>,
 
@@ -41,6 +44,15 @@ pub struct Config {
 
     /// Whether to enable dry run by default
     pub default_dry_run: bool,
+
+    /// Whether to enable HTTP compression by default
+    pub default_compress: bool,
+
+    /// Whether to enable auto decompression by default
+    pub default_decompress: bool,
+
+    /// Default compression formats to decompress (comma-separated)
+    pub default_decompress_formats: Option<String>,
 
     /// HTTP timeout in seconds
     pub http_timeout: u64,
@@ -72,15 +84,19 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             default_output_path: None,
-            concurrent_downloads: 3,
+            concurrent_downloads: 3, // Conservative default following Archive.org recommendations
             max_retries: 3,
             default_include_ext: None,
             default_exclude_ext: None,
+            default_min_file_size: None,
             default_max_file_size: None,
             default_resume: false,
             default_verbose: false,
             default_log_hash_errors: false,
             default_dry_run: false,
+            default_compress: true, // Enable compression by default as in CLI
+            default_decompress: false,
+            default_decompress_formats: None,
             http_timeout: 30,
             user_agent_override: None,
             recent_urls: Vec::new(),

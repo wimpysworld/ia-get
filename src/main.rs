@@ -3,20 +3,16 @@
 use anyhow::{Context, Result};
 use clap::{Arg, ArgAction, Command};
 use colored::Colorize;
-use reqwest::Client;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::signal;
 
 use ia_get::{
+    DownloadRequest, DownloadResult, DownloadService,
+    filters::format_size,
+    metadata_storage::DownloadState,
+    archive_api::{ArchiveOrgApiClient, get_archive_servers},
     constants::get_user_agent,
-    enhanced_downloader::ArchiveDownloader,
-    fetch_json_metadata,
-    filters::{format_size, parse_size_string},
-    metadata_storage::{ArchiveFile, DownloadConfig, DownloadSession, DownloadState},
-    IaGetError,
 };
-
-use indicatif::{ProgressBar, ProgressStyle};
 
 /// Entry point for the ia-get CLI application
 #[tokio::main]
@@ -30,6 +26,12 @@ async fn main() -> Result<()> {
 
     // Parse command line arguments
     let matches = build_cli().get_matches();
+
+    // Check for API health command first
+    if matches.get_flag("api-health") {
+        display_api_health().await?;
+        return Ok(());
+    }
 
     // Extract arguments
     let identifier = matches
@@ -45,7 +47,7 @@ async fn main() -> Result<()> {
             current
         });
 
-    let _verbose = matches.get_flag("verbose");
+    let verbose = matches.get_flag("verbose");
     let dry_run = matches.get_flag("dry-run");
 
     let concurrent_downloads = matches
@@ -61,7 +63,7 @@ async fn main() -> Result<()> {
 
     let max_file_size = matches
         .get_one::<String>("max-size")
-        .and_then(|s| parse_size_string(s).ok());
+        .map(|s| s.to_string());
 
     // Compression settings - enable by default as requested
     let enable_compression = !matches.get_flag("no-compress"); // Default to true unless --no-compress is specified
@@ -71,41 +73,24 @@ async fn main() -> Result<()> {
         .map(|values| values.map(|s| s.to_string()).collect::<Vec<_>>())
         .unwrap_or_default();
 
-    // Create HTTP client
-    let client = Client::builder()
-        .user_agent(get_user_agent())
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .context("Failed to create HTTP client")?;
-
-    // Create download configuration (for future use)
-    let _config = DownloadConfig {
-        output_dir: output_dir.to_string_lossy().to_string(),
-        max_concurrent: concurrent_downloads as u32,
-        format_filters: include_formats.clone(),
-        min_size: None,
-        max_size: max_file_size,
+    // Create unified download request
+    let request = DownloadRequest {
+        identifier: identifier.clone(),
+        output_dir: output_dir.clone(),
+        include_formats,
+        exclude_formats: Vec::new(), // CLI doesn't support exclude yet, but unified API does
+        min_file_size: String::new(), // CLI doesn't support min size yet, but unified API does
+        max_file_size,
+        concurrent_downloads,
+        enable_compression,
+        auto_decompress,
+        decompress_formats,
+        dry_run,
         verify_md5: true,
         preserve_mtime: true,
-        user_agent: get_user_agent(),
-        enable_compression,
-        auto_decompress,
-        decompress_formats: decompress_formats.clone(),
+        verbose,
+        resume: true,
     };
-
-    // Create session directory
-    let session_dir = output_dir.join(".ia-get-sessions");
-
-    // Initialize the archive downloader
-    let downloader = ArchiveDownloader::new(
-        client,
-        concurrent_downloads,
-        true, // verify_md5
-        true, // preserve_mtime
-        session_dir,
-        enable_compression,
-        auto_decompress,
-    );
 
     println!(
         "{} Initializing download for archive: {}",
@@ -120,363 +105,31 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Construct the archive URL
-    let archive_url = format!("https://archive.org/details/{}", identifier);
+    // Create download service
+    let service = DownloadService::new()
+        .context("Failed to create download service")?;
 
-    // Use our test API function structure but with the enhanced downloader
-    match fetch_and_display_metadata(
-        &archive_url,
-        &downloader,
-        &output_dir,
-        &include_formats,
-        max_file_size,
-        concurrent_downloads,
-        dry_run,
-        enable_compression,
-        auto_decompress,
-        &decompress_formats,
-    )
-    .await
-    {
-        Ok(_) => {
+    // Execute download using unified API
+    match service.download(request.clone(), None).await {
+        Ok(DownloadResult::Success(session, api_stats)) => {
             if !dry_run {
                 println!("\n{} Download completed successfully!", "✅".green().bold());
                 println!(
                     "📁 Output directory: {}",
                     output_dir.display().to_string().bright_green()
                 );
-            }
-        }
-        Err(e) => {
-            eprintln!("{} Error: {}", "✘".red().bold(), e);
-            std::process::exit(1);
-        }
-    }
+                DownloadService::display_download_summary(&session, &request);
 
-    Ok(())
-}
-
-/// Apply file filters based on CLI arguments
-fn apply_file_filters(
-    files: &[ArchiveFile],
-    include_formats: &[String],
-    max_file_size: Option<u64>,
-) -> Vec<ArchiveFile> {
-    files
-        .iter()
-        .filter(|file| {
-            // Apply format filter
-            if !include_formats.is_empty() {
-                let file_format = file.format.as_deref().unwrap_or("");
-
-                // Check both the format field and file extension
-                let file_extension = std::path::Path::new(&file.name)
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .unwrap_or("");
-
-                let matches_format = include_formats.iter().any(|fmt| {
-                    fmt.eq_ignore_ascii_case(file_format)
-                        || fmt.eq_ignore_ascii_case(file_extension)
-                });
-
-                if !matches_format {
-                    return false;
+                // Display Archive.org API statistics
+                if let Some(stats) = api_stats {
+                    println!("\n{} Archive.org API Usage:", "📊".blue().bold());
+                    println!("  {}", stats);
+                    if verbose {
+                        println!("  Session healthy: {}", 
+                            if stats.average_requests_per_minute < 30.0 { "✅ Yes" } else { "⚠️ High rate" }
+                        );
+                    }
                 }
-            }
-
-            // Apply size filter
-            if let Some(max_size) = max_file_size {
-                if file.size.unwrap_or(0) > max_size {
-                    return false;
-                }
-            }
-
-            true
-        })
-        .cloned()
-        .collect()
-}
-
-/// Create download configuration from CLI arguments
-fn create_download_config(
-    output_dir: &Path,
-    concurrent_downloads: usize,
-    include_formats: &[String],
-    max_file_size: Option<u64>,
-    enable_compression: bool,
-    auto_decompress: bool,
-    decompress_formats: &[String],
-) -> Result<DownloadConfig> {
-    Ok(DownloadConfig {
-        output_dir: output_dir.to_string_lossy().to_string(),
-        max_concurrent: concurrent_downloads as u32,
-        format_filters: include_formats.to_vec(),
-        min_size: None,
-        max_size: max_file_size,
-        verify_md5: true,
-        preserve_mtime: true,
-        user_agent: get_user_agent(),
-        enable_compression,
-        auto_decompress,
-        decompress_formats: decompress_formats.to_vec(),
-    })
-}
-
-/// Create a progress bar for download tracking
-fn create_progress_bar(file_count: usize) -> ProgressBar {
-    let pb = ProgressBar::new(file_count as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} files ({msg})")
-            .unwrap()
-            .progress_chars("##-")
-    );
-    pb.set_message("Downloading...");
-    pb
-}
-
-/// Display download summary after completion
-fn display_download_summary(session: &DownloadSession, output_dir: &Path) {
-    let completed_files = session
-        .file_status
-        .values()
-        .filter(|status| {
-            matches!(
-                status.status,
-                ia_get::metadata_storage::DownloadState::Completed
-            )
-        })
-        .count();
-    let total_files = session.file_status.len();
-    let total_bytes: u64 = session
-        .file_status
-        .values()
-        .filter(|status| {
-            matches!(
-                status.status,
-                ia_get::metadata_storage::DownloadState::Completed
-            )
-        })
-        .map(|status| status.file_info.size.unwrap_or(0))
-        .sum();
-
-    println!("\n{} Download Summary:", "📋".blue().bold());
-    println!("  📂 Archive: {}", session.identifier);
-    println!(
-        "  📁 Output directory: {}",
-        output_dir.display().to_string().bright_green()
-    );
-    println!("  📊 Files downloaded: {}/{}", completed_files, total_files);
-    println!(
-        "  💾 Total size: {}",
-        format_size(total_bytes).bright_blue()
-    );
-
-    if completed_files < total_files {
-        println!("\n{} Some files were not downloaded:", "⚠️".yellow());
-        for (filename, status) in &session.file_status {
-            if !matches!(
-                status.status,
-                ia_get::metadata_storage::DownloadState::Completed
-            ) {
-                println!("  • {} - {:?}", filename, status.status);
-            }
-        }
-        println!(
-            "\n💡 Use {} to retry failed downloads",
-            "--resume".bright_blue()
-        );
-    }
-}
-
-/// Fetch metadata and optionally download files
-#[allow(clippy::too_many_arguments)]
-async fn fetch_and_display_metadata(
-    archive_url: &str,
-    downloader: &ArchiveDownloader,
-    output_dir: &Path,
-    include_formats: &[String],
-    max_file_size: Option<u64>,
-    concurrent_downloads: usize,
-    dry_run: bool,
-    enable_compression: bool,
-    auto_decompress: bool,
-    decompress_formats: &[String],
-) -> Result<()> {
-    // Create a client for metadata operations
-    let client = Client::builder()
-        .user_agent(get_user_agent())
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .context("Failed to create HTTP client")?;
-
-    // Create progress spinner for metadata fetching
-    let progress = indicatif::ProgressBar::new_spinner();
-    progress.set_style(
-        indicatif::ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")
-            .unwrap(),
-    );
-
-    let identifier = archive_url
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or("unknown")
-        .to_string();
-
-    println!("{} Fetching metadata for: {}", "📡".cyan(), identifier);
-
-    // Use the existing fetch_json_metadata function instead of duplicating logic
-    let (metadata, _base_url) = fetch_json_metadata(archive_url, &client, &progress)
-        .await
-        .context("Failed to fetch metadata using JSON API")?;
-
-    progress.finish_and_clear();
-
-    // Display metadata information
-    println!("\n{} Archive Information:", "📊".blue().bold());
-    println!("  Identifier: {}", identifier);
-    println!("  Total files: {}", metadata.files.len());
-    println!("  Archive size: {}", format_size(metadata.item_size));
-    println!("  Server: {}", metadata.server);
-    println!(
-        "  Available servers: {}",
-        metadata.workable_servers.join(", ")
-    );
-    println!("  Directory: {}", metadata.dir);
-
-    if dry_run {
-        // Apply filtering for dry-run display too
-        let filtered_files = apply_file_filters(&metadata.files, include_formats, max_file_size);
-
-        println!("\n{} Files in archive:", "📋".cyan().bold());
-
-        // Show filtering info if filters are applied
-        if !include_formats.is_empty() || max_file_size.is_some() {
-            println!(
-                "  {}: {} → {} files",
-                "After filtering".yellow(),
-                metadata.files.len(),
-                filtered_files.len()
-            );
-            if !include_formats.is_empty() {
-                println!(
-                    "  {}: {}",
-                    "Format filter".yellow(),
-                    include_formats.join(", ").cyan()
-                );
-            }
-            if let Some(max_size) = max_file_size {
-                println!(
-                    "  {}: {}",
-                    "Size limit".yellow(),
-                    format_size(max_size).cyan()
-                );
-            }
-            println!();
-        }
-
-        let display_files = if filtered_files.is_empty() {
-            &metadata.files
-        } else {
-            &filtered_files
-        };
-
-        for (i, file) in display_files.iter().enumerate().take(10) {
-            println!(
-                "  {:<3} {} ({})",
-                format!("{}.", i + 1).dimmed(),
-                file.name.green(),
-                format_size(file.size.unwrap_or(0)).cyan()
-            );
-        }
-        if display_files.len() > 10 {
-            println!("  ... and {} more files", display_files.len() - 10);
-        }
-
-        if filtered_files.is_empty() && (!include_formats.is_empty() || max_file_size.is_some()) {
-            println!("\n{} No files match the specified filters", "⚠️".yellow());
-        }
-
-        println!("\n{} Use without --dry-run to download", "💡".yellow());
-    } else {
-        // Implement actual downloading with the enhanced downloader
-        println!("\n{} Starting download...", "🚀".green().bold());
-
-        // Apply filtering based on CLI arguments
-        let filtered_files = apply_file_filters(&metadata.files, include_formats, max_file_size);
-
-        if filtered_files.is_empty() {
-            println!("{} No files match the specified filters", "⚠️".yellow());
-            println!("💡 Try adjusting your --include filters or --max-size limits");
-            return Ok(());
-        }
-
-        println!("📋 {} files selected for download", filtered_files.len());
-
-        // Calculate total download size
-        let total_size: u64 = filtered_files.iter().map(|f| f.size.unwrap_or(0)).sum();
-        println!("📊 Total download size: {}", format_size(total_size));
-
-        // Show download configuration
-        println!("⚙️  Configuration:");
-        println!(
-            "   • Output directory: {}",
-            output_dir.display().to_string().cyan()
-        );
-        println!(
-            "   • Concurrent downloads: {}",
-            concurrent_downloads.to_string().cyan()
-        );
-        if !include_formats.is_empty() {
-            println!("   • Format filters: {}", include_formats.join(", ").cyan());
-        }
-        if let Some(max_size) = max_file_size {
-            println!("   • Max file size: {}", format_size(max_size).cyan());
-        }
-
-        // Create proper download configuration
-        let download_config = create_download_config(
-            output_dir,
-            concurrent_downloads,
-            include_formats,
-            max_file_size,
-            enable_compression,
-            auto_decompress,
-            decompress_formats,
-        )?;
-
-        // Get list of file names to download
-        let requested_files: Vec<String> = filtered_files.iter().map(|f| f.name.clone()).collect();
-
-        // Create progress bar with better styling
-        let progress_bar = create_progress_bar(filtered_files.len());
-        progress_bar.set_message("Initializing download session...".yellow().to_string());
-
-        println!("\n{} Beginning file downloads...", "🔥".green().bold());
-
-        // Execute download with enhanced downloader and detailed error handling
-        match downloader
-            .download_with_metadata(
-                archive_url.to_string(),
-                identifier,
-                metadata,
-                download_config,
-                requested_files,
-                &progress_bar,
-            )
-            .await
-        {
-            Ok(session) => {
-                progress_bar.finish_with_message(
-                    "✅ Download completed successfully!"
-                        .green()
-                        .bold()
-                        .to_string(),
-                );
-                display_download_summary(&session, output_dir);
 
                 // Provide next steps if session has failed files
                 let failed_files: Vec<_> = session
@@ -493,45 +146,125 @@ async fn fetch_and_display_metadata(
                     );
                     println!("💡 You can retry the download with the same command to resume");
                 }
-            }
-            Err(e) => {
-                progress_bar.finish_with_message("❌ Download failed".red().bold().to_string());
+            } else {
+                // Display dry run results
+                println!("\n{} Archive Information:", "📊".blue().bold());
+                println!("  Identifier: {}", session.identifier);
+                println!("  Total files: {}", session.archive_metadata.files.len());
+                println!("  Archive size: {}", format_size(session.archive_metadata.item_size));
+                println!("  Server: {}", session.archive_metadata.server);
+                println!(
+                    "  Available servers: {}",
+                    session.archive_metadata.workable_servers.join(", ")
+                );
+                println!("  Directory: {}", session.archive_metadata.dir);
 
-                // Enhanced error reporting with specific guidance
-                match &e {
-                    IaGetError::Network(msg) => {
-                        eprintln!("\n{} Network Error:", "🌐".red().bold());
-                        eprintln!("   {}", msg);
-                        eprintln!("💡 Suggestions:");
-                        eprintln!("   • Check your internet connection");
-                        eprintln!("   • Try again in a few minutes");
-                        eprintln!("   • Use --concurrent 1 for slower but more reliable downloads");
-                    }
-                    IaGetError::FileSystem(msg) => {
-                        eprintln!("\n{} File System Error:", "📁".red().bold());
-                        eprintln!("   {}", msg);
-                        eprintln!("💡 Suggestions:");
-                        eprintln!("   • Check available disk space");
-                        eprintln!("   • Verify write permissions to output directory");
-                        eprintln!("   • Try a different output directory with --output");
-                    }
-                    IaGetError::HashMismatch(msg) => {
-                        eprintln!("\n{} File Integrity Error:", "🔍".red().bold());
-                        eprintln!("   {}", msg);
-                        eprintln!(
-                            "💡 This usually indicates network issues. Try downloading again."
-                        );
-                    }
-                    _ => {
-                        eprintln!("\n{} Error: {}", "❌".red().bold(), e);
-                        eprintln!("💡 Try running the command again to resume the download");
-                    }
+                println!("\n{} Files selected for download:", "📋".cyan().bold());
+                println!("  Selected: {} files", session.requested_files.len());
+
+                for (i, filename) in session.requested_files.iter().enumerate().take(10) {
+                    println!("  {:<3} {}", format!("{}.", i + 1).dimmed(), filename.green());
+                }
+                if session.requested_files.len() > 10 {
+                    println!("  ... and {} more files", session.requested_files.len() - 10);
                 }
 
-                return Err(anyhow::Error::from(e));
+                println!("\n{} Use without --dry-run to download", "💡".yellow());
+                
+                // Display Archive.org API statistics for dry run too
+                if let Some(stats) = api_stats {
+                    println!("\n{} Archive.org API Usage:", "📊".blue().bold());
+                    println!("  {}", stats);
+                }
+            }
+        }
+        Ok(DownloadResult::Error(error)) => {
+            eprintln!("{} Error: {}", "✘".red().bold(), error);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("{} Error: {}", "✘".red().bold(), e);
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+/// Display Archive.org API health and monitoring information
+async fn display_api_health() -> Result<()> {
+    println!("{} Archive.org API Health Status", "🏥".blue().bold());
+    println!();
+
+    // Create a test API client
+    let client = reqwest::Client::builder()
+        .user_agent(get_user_agent())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("Failed to create HTTP client")?;
+
+    let mut api_client = ArchiveOrgApiClient::new(client);
+
+    // Test basic connectivity
+    println!("{} Testing Archive.org connectivity...", "🔗".cyan());
+    match api_client.make_request("https://archive.org/metadata/nasa").await {
+        Ok(response) => {
+            println!("  ✅ Connection successful (status: {})", response.status());
+        }
+        Err(e) => {
+            println!("  ❌ Connection failed: {}", e);
+        }
+    }
+
+    // Display server list
+    println!("\n{} Available Archive.org Servers:", "🌐".green().bold());
+    let servers = get_archive_servers();
+    for (i, server) in servers.iter().enumerate() {
+        println!("  {:<2} {}", format!("{}.", i + 1).dimmed(), server.bright_blue());
+    }
+
+    // Test multiple requests to show rate limiting
+    println!("\n{} Testing API rate limiting...", "⏱️".yellow());
+    let _start_time = std::time::Instant::now();
+    
+    for i in 0..3 {
+        let test_url = format!("https://archive.org/metadata/test{}", i);
+        match api_client.make_request(&test_url).await {
+            Ok(_) => {
+                let stats = api_client.get_stats();
+                println!("  Request {}: ✅ (Rate: {:.1} req/min)", i + 1, stats.average_requests_per_minute);
+            }
+            Err(e) => {
+                println!("  Request {}: ❌ {}", i + 1, e);
             }
         }
     }
+
+    // Display final statistics
+    println!("\n{} API Session Statistics:", "📊".purple().bold());
+    let final_stats = api_client.get_stats();
+    println!("  {}", final_stats);
+    
+    // Health assessment
+    println!("\n{} Health Assessment:", "🎯".bright_green().bold());
+    if api_client.is_rate_healthy() {
+        println!("  ✅ Request rate is healthy and Archive.org compliant");
+    } else {
+        println!("  ⚠️  Request rate is high - consider slowing down requests");
+    }
+
+    println!("\n{} Archive.org API Guidelines:", "📋".bright_cyan().bold());
+    println!("  • Keep concurrent connections ≤ 5 for respectful usage");
+    println!("  • Include descriptive User-Agent with contact information");
+    println!("  • Implement retry logic for transient failures");
+    println!("  • Honor rate limiting (429) and retry-after headers");
+    println!("  • Use appropriate timeouts for large file downloads");
+
+    println!("\n{} Current Configuration:", "⚙️".bright_magenta().bold());
+    println!("  User Agent: {}", get_user_agent().bright_green());
+    println!("  Default Timeout: 30 seconds");
+    println!("  Min Request Delay: 100ms");
+    println!("  Max Concurrent: 5 connections");
 
     Ok(())
 }
@@ -545,7 +278,7 @@ fn build_cli() -> Command {
         .arg(
             Arg::new("identifier")
                 .help("Internet Archive identifier")
-                .required(true)
+                .required_unless_present("api-health")
                 .value_name("IDENTIFIER")
                 .index(1)
         )
@@ -610,6 +343,12 @@ fn build_cli() -> Command {
                 .value_name("FORMATS")
                 .value_delimiter(',')
                 .action(ArgAction::Append)
+        )
+        .arg(
+            Arg::new("api-health")
+                .long("api-health")
+                .help("Display Archive.org API health and monitoring information")
+                .action(ArgAction::SetTrue)
         )
 }
 

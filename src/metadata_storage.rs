@@ -69,6 +69,7 @@ pub struct ArchiveFile {
     /// Original file reference
     pub original: Option<String>,
     /// Rotation angle for images
+    #[serde(default, deserialize_with = "deserialize_string_to_u32_option")]
     pub rotation: Option<u32>,
 }
 
@@ -226,6 +227,74 @@ where
     }
 
     deserializer.deserialize_any(StringToU64Visitor)
+}
+
+/// Custom deserializer for string numbers to u32 Option with default support
+fn deserialize_string_to_u32_option<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    struct StringToU32Visitor;
+
+    impl<'de> Visitor<'de> for StringToU32Visitor {
+        type Value = Option<u32>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string, number, or null that can be converted to u32")
+        }
+
+        fn visit_str<E>(self, value: &str) -> std::result::Result<Option<u32>, E>
+        where
+            E: de::Error,
+        {
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                value.parse::<u32>().map(Some).map_err(de::Error::custom)
+            }
+        }
+
+        fn visit_u32<E>(self, value: u32) -> std::result::Result<Option<u32>, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(value))
+        }
+
+        fn visit_i32<E>(self, value: i32) -> std::result::Result<Option<u32>, E>
+        where
+            E: de::Error,
+        {
+            if value >= 0 {
+                Ok(Some(value as u32))
+            } else {
+                Err(de::Error::custom(
+                    "negative number cannot be converted to u32",
+                ))
+            }
+        }
+
+        fn visit_none<E>(self) -> std::result::Result<Option<u32>, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> std::result::Result<Option<u32>, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(StringToU32Visitor)
 }
 
 impl DownloadSession {

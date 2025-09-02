@@ -6,7 +6,7 @@ keywords = ["cli", "archive", "internet-archive", "download", "json-api"]
 authors = ["Fork Maintainer <gameaday@users.noreply.github.com>", "Original Author: Martin Wimpress <code@wimpress.io>"]
 repository = "https://github.com/Gameaday/ia-get-cli"
 readme = "README.md"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -31,8 +31,15 @@ flate2 = "1.0"
 bzip2 = "0.6.0"
 xz2 = "0.1"
 tar = "0.4"
+zip = "2.2.1"
 futures = "0.3.31"
 bytes = "1.0"
+# GUI dependencies
+eframe = "0.29.0"
+egui = "0.29.0"
+egui_extras = { version = "0.29.0", features = ["default"] }
+rfd = "0.15.0"
+env_logger = "0.11.0"
 
 [dev-dependencies]
 tempfile = "3.0"
@@ -50,3 +57,7 @@ harness = false
 [[bench]]
 name = "performance_benchmarks"
 harness = false
+
+[[bin]]
+name = "ia-get-gui"
+path = "src/bin/ia-get-gui.rs"

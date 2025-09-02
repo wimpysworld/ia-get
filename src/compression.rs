@@ -258,12 +258,58 @@ fn decompress_tar_xz<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()>
 }
 
 /// Decompress a ZIP file
-fn decompress_zip<P: AsRef<Path>>(_input_path: P, _output_dir: P) -> Result<()> {
-    // For now, we'll return an error for ZIP files as we don't have zip dependency
-    // TODO: Add zip dependency and implement ZIP decompression
-    Err(IaGetError::Parse(
-        "ZIP decompression not yet implemented. Please add 'zip' dependency.".to_string(),
-    ))
+fn decompress_zip<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()> {
+    use zip::ZipArchive;
+
+    let input_file = File::open(input_path.as_ref())
+        .map_err(|e| IaGetError::FileSystem(format!("Failed to open ZIP file: {}", e)))?;
+
+    let mut archive = ZipArchive::new(BufReader::new(input_file))
+        .map_err(|e| IaGetError::Parse(format!("Failed to read ZIP archive: {}", e)))?;
+
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| IaGetError::FileSystem(format!("Failed to create output directory: {}", e)))?;
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)
+            .map_err(|e| IaGetError::Parse(format!("Failed to access ZIP entry {}: {}", i, e)))?;
+
+        let outpath = match file.enclosed_name() {
+            Some(path) => output_dir.as_ref().join(path),
+            None => continue, // Skip invalid paths
+        };
+
+        if file.name().ends_with('/') {
+            // Directory
+            std::fs::create_dir_all(&outpath)
+                .map_err(|e| IaGetError::FileSystem(format!("Failed to create directory: {}", e)))?;
+        } else {
+            // File
+            if let Some(p) = outpath.parent() {
+                if !p.exists() {
+                    std::fs::create_dir_all(p)
+                        .map_err(|e| IaGetError::FileSystem(format!("Failed to create parent directory: {}", e)))?;
+                }
+            }
+            let mut outfile = File::create(&outpath)
+                .map_err(|e| IaGetError::FileSystem(format!("Failed to create output file: {}", e)))?;
+            
+            std::io::copy(&mut file, &mut outfile)
+                .map_err(|e| IaGetError::FileSystem(format!("Failed to extract file: {}", e)))?;
+        }
+
+        // Get and set permissions on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Some(mode) = file.unix_mode() {
+                std::fs::set_permissions(&outpath, std::fs::Permissions::from_mode(mode))
+                    .map_err(|e| IaGetError::FileSystem(format!("Failed to set file permissions: {}", e)))?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Extract a TAR file (uncompressed)
@@ -384,5 +430,26 @@ mod tests {
         let formats = vec!["zip".to_string()];
         assert!(!should_decompress(&gzip, &formats));
         assert!(should_decompress(&zip, &formats));
+    }
+
+    #[test]
+    fn test_zip_decompression_error_handling() {
+        // Test that the ZIP decompression function handles invalid input correctly
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create a temporary file that's not a valid ZIP
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(b"not a zip file").unwrap();
+        
+        let temp_dir = tempfile::tempdir().unwrap();
+        
+        // This should fail gracefully with an error
+        let result = super::decompress_zip(temp_file.path(), temp_dir.path());
+        assert!(result.is_err());
+        
+        // Verify the error message indicates it's a ZIP parsing issue
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("Failed to read ZIP archive"));
     }
 }

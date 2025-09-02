@@ -33,6 +33,7 @@ pub struct JsonFile {
     #[serde(deserialize_with = "deserialize_string_to_u64_option")]
     pub size: Option<u64>,
     pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_optional_string_to_u32")]
     pub rotation: Option<u32>,
     pub md5: Option<String>,
     pub crc32: Option<String>,
@@ -46,8 +47,11 @@ pub struct JsonFile {
 #[derive(Deserialize, Debug)]
 pub struct JsonMetadata {
     pub files: Vec<JsonFile>,
+    #[serde(deserialize_with = "deserialize_string_to_u32")]
     pub files_count: u32,
+    #[serde(deserialize_with = "deserialize_string_to_u64")]
     pub item_last_updated: u64,
+    #[serde(deserialize_with = "deserialize_string_to_u64")]
     pub item_size: u64,
 }
 
@@ -186,6 +190,111 @@ where
     deserializer.deserialize_any(StringOrU64Visitor)
 }
 
+/// Custom deserializer for string numbers to u64 (required field)
+fn deserialize_string_to_u64<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    struct StringOrU64Visitor;
+
+    impl<'de> Visitor<'de> for StringOrU64Visitor {
+        type Value = u64;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string or u64 that can be converted to u64")
+        }
+
+        fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            value
+                .parse::<u64>()
+                .map_err(|_| de::Error::custom(format!("could not parse '{}' as u64", value)))
+        }
+
+        fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrU64Visitor)
+}
+
+/// Custom deserializer for optional string numbers to u32
+fn deserialize_optional_string_to_u32<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNumber {
+        String(String),
+        Number(u32),
+    }
+    
+    match Option::<StringOrNumber>::deserialize(deserializer)? {
+        Some(StringOrNumber::String(s)) => {
+            if s.is_empty() {
+                Ok(None)
+            } else {
+                s.parse::<u32>()
+                    .map(Some)
+                    .map_err(|_| serde::de::Error::custom(format!("could not parse '{}' as u32", s)))
+            }
+        }
+        Some(StringOrNumber::Number(n)) => Ok(Some(n)),
+        None => Ok(None),
+    }
+}
+
+/// Custom deserializer for string numbers to u32 (required field)
+fn deserialize_string_to_u32<'de, D>(deserializer: D) -> std::result::Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    struct StringOrU32Visitor;
+
+    impl<'de> Visitor<'de> for StringOrU32Visitor {
+        type Value = u32;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string or u32 that can be converted to u32")
+        }
+
+        fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            value
+                .parse::<u32>()
+                .map_err(|_| de::Error::custom(format!("could not parse '{}' as u32", value)))
+        }
+
+        fn visit_u32<E>(self, value: u32) -> std::result::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrU32Visitor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,9 +312,9 @@ mod tests {
                     "md5": "abcd1234"
                 }
             ],
-            "files_count": 1,
-            "item_last_updated": 1234567890,
-            "item_size": 1024
+            "files_count": "1",
+            "item_last_updated": "1234567890",
+            "item_size": "1024"
         }"#;
 
         let result = parse_json_files(json_data);
@@ -215,6 +324,77 @@ mod tests {
         assert_eq!(metadata.files.len(), 1);
         assert_eq!(metadata.files[0].name(), "test.txt");
         assert_eq!(metadata.files[0].size(), Some(1024));
+        assert_eq!(metadata.files[0].rotation, None); // Should be None when not provided
+    }
+
+    #[test]
+    fn test_json_parsing_with_string_numbers() {
+        // Test case that reproduces the reported error with string numbers for normally u32/u64 fields
+        let json_data = r#"{
+            "files": [
+                {
+                    "name": "luigi_episode.mp3",
+                    "source": "original", 
+                    "mtime": "1756778586",
+                    "size": "12345678",
+                    "format": "VBR MP3",
+                    "rotation": "0",
+                    "md5": "abcd1234"
+                }
+            ],
+            "files_count": "1",
+            "item_last_updated": "1756778586",
+            "item_size": "12345678"
+        }"#;
+
+        let result = parse_json_files(json_data);
+        assert!(result.is_ok());
+
+        let metadata = result.unwrap();
+        assert_eq!(metadata.files.len(), 1);
+        assert_eq!(metadata.files[0].name(), "luigi_episode.mp3");
+        assert_eq!(metadata.files[0].size(), Some(12345678));
+        assert_eq!(metadata.files[0].rotation, Some(0));
+        assert_eq!(metadata.files_count, 1);
+        assert_eq!(metadata.item_last_updated, 1756778586);
+        assert_eq!(metadata.item_size, 12345678);
+    }
+
+    #[test]
+    fn test_json_parsing_real_luigi_error_case() {
+        // This test reproduces the exact case from the GitHub comment error
+        // where Archive.org returns fields as strings that we expect as numbers
+        let luigi_json = r#"{
+            "created": 1756778586,
+            "d1": "ia902806.us.archive.org",
+            "d2": "ia802806.us.archive.org", 
+            "dir": "/17/items/luigi",
+            "files": [
+                {
+                    "name": "Life_with_Luigi_49-02-27_ep024_Luigi_Needs_Drivers_License.mp3",
+                    "source": "original",
+                    "mtime": "1756778586",
+                    "size": "23456789",
+                    "format": "VBR MP3",
+                    "rotation": "0",
+                    "md5": "abcd1234"
+                }
+            ],
+            "files_count": "1",
+            "item_last_updated": "1756778586",
+            "item_size": "23456789"
+        }"#;
+
+        let result = parse_json_files(luigi_json);
+        assert!(result.is_ok(), "Luigi JSON should parse successfully now with string-to-number conversion");
+
+        let metadata = result.unwrap();
+        assert_eq!(metadata.files.len(), 1);
+        assert_eq!(metadata.files[0].name(), "Life_with_Luigi_49-02-27_ep024_Luigi_Needs_Drivers_License.mp3");
+        assert_eq!(metadata.files[0].rotation, Some(0)); // This would have failed before with "invalid type: string "0", expected u32"
+        assert_eq!(metadata.files_count, 1);
+        assert_eq!(metadata.item_last_updated, 1756778586);
+        assert_eq!(metadata.item_size, 23456789);
     }
 
     #[test]

@@ -140,8 +140,8 @@ pub async fn fetch_json_metadata(
         .map_err(|e| IaGetError::Network(format!("URL parse failed: {}", e)))?;
     let mut retries = 0;
     let max_retries = 3;
-    let mut delay = std::time::Duration::from_secs(60);
-    let max_delay = std::time::Duration::from_secs(900); // 15 minutes
+    let mut delay = std::time::Duration::from_secs(30); // Conservative initial delay for metadata
+    let max_delay = std::time::Duration::from_secs(600); // 10 minutes max
 
     let json_content = loop {
         let result = client
