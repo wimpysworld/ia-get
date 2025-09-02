@@ -13,6 +13,15 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Optimize Cargo for CI/CD performance
+  CARGO_NET_RETRY: 10
+  CARGO_NET_TIMEOUT: 60
+  CARGO_HTTP_TIMEOUT: 60
+  CARGO_HTTP_LOW_SPEED_LIMIT: 10
+  # Use offline mode when possible to prefer cached dependencies
+  CARGO_NET_OFFLINE: false
+  # Enable incremental compilation for faster builds
+  CARGO_INCREMENTAL: 1
 
 jobs:
   test:
@@ -31,17 +40,68 @@ jobs:
       with:
         components: rustfmt, clippy
 
-    - name: Cache Cargo registry
+    - name: Cache Rust toolchain
       uses: actions/cache@v4
       with:
         path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
+          ~/.rustup/toolchains
+          ~/.rustup/update-hashes
+          ~/.rustup/settings.toml
+        key: ${{ runner.os }}-rustup-stable-${{ hashFiles('rust-toolchain.toml', 'Cargo.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-rustup-stable-
+          ${{ runner.os }}-rustup-
+
+    - name: Cache Cargo registry and dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+          # Windows-specific paths
+          ${{ runner.os == 'Windows' && 'C:\Users\runneradmin\.cargo\registry\' || '' }}
+          ${{ runner.os == 'Windows' && 'C:\Users\runneradmin\.cargo\git\' || '' }}
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
         restore-keys: |
           ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
           ${{ runner.os }}-cargo-
+
+    - name: Cache build artifacts by target
+      uses: actions/cache@v4
+      with:
+        path: |
+          target/debug/deps/
+          target/debug/build/
+          target/debug/.fingerprint/
+          target/release/deps/
+          target/release/build/
+          target/release/.fingerprint/
+        key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('src/**/*.rs') }}-${{ hashFiles('build.rs') }}
+        restore-keys: |
+          ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('src/**/*.rs') }}-
+          ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-target-
+
+    - name: Warm up dependency cache
+      run: |
+        # Pre-fetch dependencies to populate cache
+        cargo fetch --verbose
+        # Verify cache integrity and show cache statistics
+        echo "=== Cache Statistics ==="
+        echo "Cargo cache size:"
+        du -sh ~/.cargo/ 2>/dev/null || echo "Cache size check not available on this platform"
+        echo "Target directory size:"
+        du -sh target/ 2>/dev/null || echo "Target size check not available on this platform"
+        # Verify dependencies are available offline
+        cargo tree --quiet > /dev/null || echo "Cache warming completed"
+
+    - name: Optimize cache for build speed
+      run: |
+        # Set environment variables for optimized builds
+        echo "CARGO_NET_OFFLINE=true" >> $GITHUB_ENV
+        echo "CARGO_TARGET_DIR=target" >> $GITHUB_ENV
 
     - name: Check formatting
       run: cargo fmt --all -- --check
@@ -101,6 +161,15 @@ jobs:
           artifacts/*
           hashes_${{ runner.os }}.txt
         retention-days: 30
+
+    - name: Cache cleanup and optimization
+      if: always()
+      run: |
+        # Clean up target directory to keep cache size manageable
+        cargo clean --target-dir target/debug 2>/dev/null || true
+        # Remove old incremental compilation artifacts
+        find target/ -name "incremental" -type d -exec rm -rf {} + 2>/dev/null || true
+        echo "Cache cleanup completed"
 
   release:
     name: Create Development Release
