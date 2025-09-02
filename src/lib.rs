@@ -64,6 +64,7 @@ pub mod filters;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod http_client;
+pub mod interactive_cli;
 pub mod interactive_menu;
 pub mod metadata;
 pub mod metadata_storage;
