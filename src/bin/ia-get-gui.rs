@@ -5,11 +5,23 @@
 use ia_get::gui::IaGetApp;
 
 fn main() -> Result<(), eframe::Error> {
-    // Set up logging
-    env_logger::init();
+    // Set up logging with better error handling
+    if let Err(e) = env_logger::try_init() {
+        eprintln!("Warning: Failed to initialize logger: {}", e);
+    }
 
     // Create a tokio runtime for async operations
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Error: Failed to create Tokio runtime: {}", e);
+            eprintln!("This error might occur if the system cannot create threads.");
+            eprintln!("Press Enter to exit...");
+            let mut input = String::new();
+            let _ = std::io::stdin().read_line(&mut input);
+            std::process::exit(1);
+        }
+    };
 
     // Run the GUI application
     let options = eframe::NativeOptions {
@@ -24,11 +36,23 @@ fn main() -> Result<(), eframe::Error> {
     // Enter the async runtime context and run the GUI
     let _guard = rt.enter();
 
-    eframe::run_native(
+    // Run with better error handling
+    let result = eframe::run_native(
         "ia-get GUI",
         options,
         Box::new(|cc| Ok(Box::new(IaGetApp::new(cc)))),
-    )
+    );
+
+    // If we get here and there was an error, show it to the user
+    if let Err(ref e) = result {
+        eprintln!("Error starting GUI: {}", e);
+        eprintln!("This might be due to missing graphics drivers or display issues.");
+        eprintln!("Press Enter to exit...");
+        let mut input = String::new();
+        let _ = std::io::stdin().read_line(&mut input);
+    }
+
+    result
 }
 
 /// Load application icon
