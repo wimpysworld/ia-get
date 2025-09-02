@@ -41,6 +41,9 @@ egui_extras = { version = "0.32.1", features = ["default"], optional = true }
 rfd = { version = "0.15.0", optional = true }
 env_logger = { version = "0.11.0", optional = true }
 
+[build-dependencies]
+winres = "0.1"
+
 [dev-dependencies]
 tempfile = "3.0"
 criterion = { version = "0.7.0", features = ["html_reports"] }

@@ -3,7 +3,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(target_os = "windows")]
+extern crate winres;
+
 fn main() {
+    // Handle Windows-specific manifest for long path support
+    #[cfg(target_os = "windows")]
+    embed_windows_manifest();
+
     // Only run packaging logic when building in release mode
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
     if profile != "release" {
@@ -195,5 +202,17 @@ fn create_tar_archive(artifacts_dir: &Path, package_name: &str) {
                 );
             }
         }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn embed_windows_manifest() {
+    let mut res = winres::WindowsResource::new();
+    res.set_manifest_file("ia-get.exe.manifest");
+
+    if let Err(e) = res.compile() {
+        println!("cargo:warning=Failed to embed Windows manifest: {}", e);
+    } else {
+        println!("cargo:warning=Windows manifest embedded successfully");
     }
 }
