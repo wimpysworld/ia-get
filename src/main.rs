@@ -14,7 +14,158 @@ use ia_get::{
     DownloadRequest, DownloadResult, DownloadService,
 };
 
-/// Entry point for the ia-get CLI application
+/// Detect if GUI mode is available and appropriate
+fn can_use_gui() -> bool {
+    // Check if GUI features are compiled in
+    #[cfg(not(feature = "gui"))]
+    return false;
+
+    #[cfg(feature = "gui")]
+    {
+        // Check if we have a display available
+        if std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err() {
+            // On Windows, we don't need DISPLAY
+            #[cfg(not(target_os = "windows"))]
+            return false;
+        }
+
+        // Check if we're in a TTY (interactive terminal)
+        // For now, just check if we have environment variables that suggest interactivity
+        if std::env::var("TERM").is_err() {
+            return false;
+        }
+
+        true
+    }
+}
+
+/// Launch GUI mode
+#[cfg(feature = "gui")]
+async fn launch_gui() -> Result<()> {
+    use ia_get::gui::IaGetApp;
+
+    // Set up logging for GUI
+    if let Err(e) = env_logger::try_init() {
+        eprintln!("Warning: Failed to initialize logger: {}", e);
+    }
+
+    // Create a tokio runtime for async operations
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Error: Failed to create Tokio runtime: {}", e);
+            eprintln!("This error might occur if the system cannot create threads.");
+            return Err(e.into());
+        }
+    };
+
+    // Configure GUI options
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1000.0, 700.0])
+            .with_min_inner_size([800.0, 600.0])
+            .with_title("ia-get - Internet Archive Downloader")
+            .with_icon(load_icon()),
+        ..Default::default()
+    };
+
+    // Enter the async runtime context and run the GUI
+    let _guard = rt.enter();
+
+    // Run the GUI application
+    eframe::run_native(
+        "ia-get GUI",
+        options,
+        Box::new(|cc| Ok(Box::new(IaGetApp::new(cc)))),
+    )
+    .map_err(|e| {
+        eprintln!("Error starting GUI: {}", e);
+        eprintln!("This might be due to missing graphics drivers or display issues.");
+        anyhow::anyhow!("Failed to start GUI: {}", e)
+    })
+}
+
+#[cfg(feature = "gui")]
+fn load_icon() -> egui::IconData {
+    // Create a simple icon (you can replace this with an actual icon file)
+    let icon_data = vec![
+        255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255,
+    ];
+
+    egui::IconData {
+        rgba: icon_data,
+        width: 4,
+        height: 4,
+    }
+}
+
+/// Show an interactive menu when no arguments are provided
+fn show_interactive_menu() -> Result<()> {
+    println!(
+        "{}",
+        "🚀 ia-get - Internet Archive Downloader"
+            .bright_cyan()
+            .bold()
+    );
+    println!();
+    println!("No arguments provided. Choose an option:");
+    println!();
+    println!("  {} Launch GUI interface", "1.".bright_green());
+    println!("  {} Show command-line help", "2.".bright_green());
+    println!("  {} Exit", "3.".bright_green());
+    println!();
+    print!("Enter your choice (1-3): ");
+
+    use std::io::{self, Write};
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    match input.trim() {
+        "1" => {
+            #[cfg(feature = "gui")]
+            {
+                if can_use_gui() {
+                    println!("{} Launching GUI...", "🎨".bright_blue());
+                    // We need to switch to async context for GUI
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(launch_gui())?;
+                } else {
+                    println!("{} GUI not available in this environment.", "⚠️".yellow());
+                    println!("Try running with command-line arguments instead.");
+                    println!("Use 'ia-get --help' for more information.");
+                }
+            }
+            #[cfg(not(feature = "gui"))]
+            {
+                println!("{} GUI not compiled in this build.", "⚠️".yellow());
+                println!("Try running with command-line arguments instead.");
+                println!("Use 'ia-get --help' for more information.");
+            }
+        }
+        "2" => {
+            build_cli().print_help()?;
+        }
+        "3" => {
+            println!("Goodbye! 👋");
+            return Ok(());
+        }
+        _ => {
+            println!(
+                "{} Invalid choice. Use 'ia-get --help' for command-line usage.",
+                "⚠️".yellow()
+            );
+            return Err(anyhow::anyhow!("Invalid menu choice"));
+        }
+    }
+
+    Ok(())
+}
+
+/// Entry point for the ia-get CLI application  
 #[tokio::main]
 async fn main() -> Result<()> {
     // Set up signal handling for graceful shutdown
@@ -25,7 +176,38 @@ async fn main() -> Result<()> {
     });
 
     // Parse command line arguments
-    let matches = build_cli().get_matches();
+    let matches = build_cli().try_get_matches();
+
+    // Handle parsing errors gracefully
+    let matches = match matches {
+        Ok(matches) => matches,
+        Err(e) => {
+            // Check if this is a "missing arguments" error and we have no args at all
+            let args: Vec<String> = std::env::args().collect();
+            if args.len() == 1 {
+                // No arguments provided - use smart detection
+                if can_use_gui() {
+                    #[cfg(feature = "gui")]
+                    {
+                        println!(
+                            "{} No arguments provided, launching GUI mode...",
+                            "🎨".bright_blue()
+                        );
+                        return launch_gui().await;
+                    }
+                    #[cfg(not(feature = "gui"))]
+                    {
+                        return show_interactive_menu();
+                    }
+                } else {
+                    return show_interactive_menu();
+                }
+            } else {
+                // Other parsing errors, show them normally
+                e.exit();
+            }
+        }
+    };
 
     // Check for API health command first
     if matches.get_flag("api-health") {
@@ -33,7 +215,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Extract arguments
+    // Extract arguments - these are now guaranteed to be present due to CLI parsing
     let identifier = matches
         .get_one::<String>("identifier")
         .ok_or_else(|| anyhow::anyhow!("Archive identifier is required"))?;

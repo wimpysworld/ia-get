@@ -6,18 +6,20 @@ The ia-get GUI provides a cross-platform graphical interface for downloading fil
 
 ## Running the GUI
 
-To start the GUI application:
+## Running the GUI
 
+**Smart Detection (Recommended):**
 ```bash
-cargo run --bin ia-get-gui
+ia-get
+```
+The application automatically detects your environment and launches the GUI when appropriate.
+
+**Manual GUI launch with built versions:**
+```bash
+./target/debug/ia-get    # Any platform - smart detection
 ```
 
-Or if you have built the project:
-
-```bash
-./target/debug/ia-get-gui    # Linux/macOS
-./target/debug/ia-get-gui.exe    # Windows
-```
+**Note:** The GUI requires a display environment. In headless environments, the application will automatically fall back to an interactive command-line menu.
 
 ## GUI Features
 
@@ -153,9 +155,18 @@ The GUI is built with egui and supports:
 
 ## Troubleshooting
 
+## Troubleshooting
+
 ### GUI Won't Start
-- Ensure all dependencies are installed: `cargo build --bin ia-get-gui`
-- Check that display/graphics drivers are properly configured
+- **Smart Detection**: Try running `ia-get` without arguments - it will automatically choose the best mode
+- **Environment Check**: Ensure `DISPLAY` (Linux) or graphics drivers are properly configured
+- **Build Features**: Make sure GUI features are compiled: `cargo build --features gui --release`
+- **Fallback**: If GUI fails, the application will show an interactive menu with options
+
+### Environment Detection Issues
+- **Headless Systems**: GUI detection automatically fails on headless systems and shows command-line options
+- **SSH/Remote**: When connected via SSH without X11 forwarding, use command-line arguments directly
+- **Docker/CI**: In containerized environments, use CLI mode: `ia-get <identifier>`
 
 ### Downloads Fail
 - Check internet connectivity

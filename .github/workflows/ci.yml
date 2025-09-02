@@ -52,7 +52,7 @@ jobs:
     - name: Build CLI (fast build)
       run: cargo build --no-default-features --features cli --release
 
-    - name: Build GUI (full build)
+    - name: Build Unified Binary with GUI (full build)
       run: cargo build --features gui --release
 
     - name: Run tests (CLI only - faster)

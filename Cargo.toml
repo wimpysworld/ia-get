@@ -76,8 +76,3 @@ harness = false
 [[bench]]
 name = "performance_benchmarks"
 harness = false
-
-[[bin]]
-name = "ia-get-gui"
-path = "src/bin/ia-get-gui.rs"
-required-features = ["gui"]

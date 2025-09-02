@@ -22,15 +22,15 @@ cargo build --profile fast-dev --no-default-features --features cli
 When working on GUI components:
 ```bash
 cargo build --features gui
-cargo run --features gui --bin ia-get-gui
+cargo run --features gui  # Smart detection will launch GUI in dev environment
 ```
 
 ### Release Builds
 ```bash
-# CLI binary
+# CLI-only binary (smaller, faster)
 cargo build --no-default-features --features cli --release
 
-# GUI binary  
+# Unified binary with GUI support
 cargo build --features gui --release
 ```
 

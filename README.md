@@ -16,7 +16,25 @@
 
 # Usage 📖
 
-ia-get provides both a command-line interface (CLI) and a graphical user interface (GUI) for downloading files from [archive.org](https://archive.org).
+ia-get provides both a command-line interface (CLI) and a graphical user interface (GUI) for downloading files from [archive.org](https://archive.org). The application automatically detects the best mode based on your environment and usage.
+
+## Smart Mode Detection ✨
+
+**No arguments?** ia-get automatically chooses the best experience:
+- **GUI Mode**: Launches automatically when display is available  
+- **Interactive Menu**: Shows options when GUI isn't available
+- **Command-line**: Always available with arguments
+
+```shell
+# Auto-detect mode (GUI if available, menu otherwise)
+ia-get
+
+# Force command-line mode
+ia-get https://archive.org/details/<identifier>
+
+# Show help
+ia-get --help
+```
 
 ## Command Line Interface
 
@@ -28,13 +46,15 @@ ia-get https://archive.org/details/<identifier>
 
 ## Graphical User Interface 🖼️
 
-For users who prefer a visual interface, ia-get includes a cross-platform GUI:
+ia-get includes a built-in cross-platform GUI that launches automatically when no command-line arguments are provided and a display is available:
 
 ```shell
-ia-get-gui
+# Launch interactive mode (GUI or menu)
+ia-get
 ```
 
 The GUI provides:
+- **Smart detection**: Automatically launches when appropriate
 - **Easy archive input**: Enter URLs or identifiers with validation
 - **Visual file filtering**: Configure downloads with intuitive controls  
 - **Real-time progress**: See download status with progress bars and statistics
