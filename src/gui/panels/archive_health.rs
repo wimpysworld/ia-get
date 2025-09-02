@@ -94,7 +94,7 @@ impl ArchiveHealthPanel {
                 // Use a much shorter delay and request immediate repaint
                 // In real implementation, this would be replaced with actual async HTTP calls
                 std::thread::sleep(Duration::from_millis(10));
-                
+
                 // Request repaint to update UI immediately
                 ctx_clone.request_repaint();
             });
