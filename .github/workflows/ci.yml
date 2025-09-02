@@ -189,52 +189,126 @@ jobs:
       if: matrix.features == 'gui' && runner.os != 'Windows'
       shell: bash
       run: |
-        # The build script already creates artifacts in the artifacts/ directory
-        # Just verify they exist and calculate hashes
-        if [ -d "artifacts" ]; then
-          cd artifacts
-          echo "# Calculated SHA256 hashes:" > ../hashes_${{ runner.os }}_${{ matrix.features }}.txt
-          for file in *; do
-            if [ -f "$file" ]; then
-              if command -v sha256sum > /dev/null 2>&1; then
-                hash=$(sha256sum "$file" | cut -d' ' -f1)
-                echo "SHA256 for $file: $hash"
-                echo "$hash  $file" >> ../hashes_${{ runner.os }}_${{ matrix.features }}.txt
-              elif command -v shasum > /dev/null 2>&1; then
-                hash=$(shasum -a 256 "$file" | cut -d' ' -f1)
-                echo "SHA256 for $file: $hash"
-                echo "$hash  $file" >> ../hashes_${{ runner.os }}_${{ matrix.features }}.txt
-              else
-                echo "SHA256 calculation not available for $file" >> ../hashes_${{ runner.os }}_${{ matrix.features }}.txt
-              fi
-            fi
-          done
+        # Ensure artifacts directory exists and is properly populated
+        mkdir -p artifacts
+        
+        # Copy the binary (primary artifact)
+        if [ -f "target/release/ia-get" ]; then
+          # Check binary size before copying
+          binary_size=$(stat -f%z "target/release/ia-get" 2>/dev/null || stat -c%s "target/release/ia-get" 2>/dev/null || echo "0")
+          binary_size_mb=$((binary_size / 1024 / 1024))
+          echo "📏 Binary size: ${binary_size_mb}MB (${binary_size} bytes)"
+          
+          # Verify binary is reasonable size (should be at least 1MB for a real binary)
+          if [ "$binary_size" -lt 1048576 ]; then
+            echo "❌ Binary is too small (${binary_size} bytes) - likely missing content"
+            ls -la target/release/ || echo "Release directory not found"
+            exit 1
+          fi
+          
+          cp "target/release/ia-get" "artifacts/"
+          echo "✅ Binary copied to artifacts"
         else
-          echo "No artifacts directory found, creating basic artifact..."
-          mkdir -p artifacts
-          cp target/release/ia-get artifacts/
+          echo "❌ Binary not found at target/release/ia-get"
+          ls -la target/release/ || echo "Release directory not found"
+          exit 1
         fi
+        
+        # Copy documentation files
+        for doc_file in README.md LICENSE; do
+          if [ -f "$doc_file" ]; then
+            cp "$doc_file" "artifacts/"
+            echo "✅ $doc_file copied to artifacts"
+          fi
+        done
+        
+        # List contents and sizes
+        echo "📦 Artifacts directory contents:"
+        ls -la artifacts/
+        echo "📊 Artifacts total size:"
+        du -sh artifacts/
+        
+        # Calculate hashes
+        cd artifacts
+        echo "# Calculated SHA256 hashes:" > ../hashes_${{ runner.os }}_${{ matrix.features }}.txt
+        for file in *; do
+          if [ -f "$file" ]; then
+            if command -v sha256sum > /dev/null 2>&1; then
+              hash=$(sha256sum "$file" | cut -d' ' -f1)
+              echo "SHA256 for $file: $hash"
+              echo "$hash  $file" >> ../hashes_${{ runner.os }}_${{ matrix.features }}.txt
+            elif command -v shasum > /dev/null 2>&1; then
+              hash=$(shasum -a 256 "$file" | cut -d' ' -f1)
+              echo "SHA256 for $file: $hash"
+              echo "$hash  $file" >> ../hashes_${{ runner.os }}_${{ matrix.features }}.txt
+            else
+              echo "SHA256 calculation not available for $file" >> ../hashes_${{ runner.os }}_${{ matrix.features }}.txt
+            fi
+          fi
+        done
+        cd ..
 
     - name: Create artifact (Windows)
       if: matrix.features == 'gui' && runner.os == 'Windows'
       shell: pwsh
       run: |
-        # The build script already creates artifacts in the artifacts/ directory
-        # Just verify they exist and calculate hashes
-        if (Test-Path "artifacts") {
-          Set-Location "artifacts"
-          "# Calculated SHA256 hashes:" | Out-File -FilePath "../hashes_${{ runner.os }}_${{ matrix.features }}.txt" -Encoding UTF8
-          Get-ChildItem -File | ForEach-Object {
-            $hash = (Get-FileHash -Path $_.Name -Algorithm SHA256).Hash.ToLower()
-            Write-Host "SHA256 for $($_.Name): $hash"
-            "$hash  $($_.Name)" | Add-Content -Path "../hashes_${{ runner.os }}_${{ matrix.features }}.txt" -Encoding UTF8
+        # Ensure artifacts directory exists and is properly populated
+        New-Item -ItemType Directory -Path "artifacts" -Force | Out-Null
+        
+        # Copy the binary (primary artifact)
+        if (Test-Path "target\release\ia-get.exe") {
+          # Check binary size before copying
+          $binarySize = (Get-Item "target\release\ia-get.exe").Length
+          $binarySizeMB = [math]::Round($binarySize / 1MB, 2)
+          Write-Host "📏 Binary size: ${binarySizeMB}MB ($binarySize bytes)"
+          
+          # Verify binary is reasonable size (should be at least 1MB for a real binary)
+          if ($binarySize -lt 1048576) {
+            Write-Host "❌ Binary is too small ($binarySize bytes) - likely missing content"
+            if (Test-Path "target\release") {
+              Get-ChildItem "target\release" | Format-Table Name, Length
+            } else {
+              Write-Host "Release directory not found"
+            }
+            exit 1
           }
-          Set-Location ".."
+          
+          Copy-Item "target\release\ia-get.exe" "artifacts\"
+          Write-Host "✅ Binary copied to artifacts"
         } else {
-          Write-Host "No artifacts directory found, creating basic artifact..."
-          New-Item -ItemType Directory -Path "artifacts" -Force
-          Copy-Item "target/release/ia-get.exe" "artifacts/"
+          Write-Host "❌ Binary not found at target\release\ia-get.exe"
+          if (Test-Path "target\release") {
+            Get-ChildItem "target\release" | Format-Table Name, Length
+          } else {
+            Write-Host "Release directory not found"
+          }
+          exit 1
         }
+        
+        # Copy documentation files
+        $docFiles = @("README.md", "LICENSE")
+        foreach ($docFile in $docFiles) {
+          if (Test-Path $docFile) {
+            Copy-Item $docFile "artifacts\"
+            Write-Host "✅ $docFile copied to artifacts"
+          }
+        }
+        
+        # List contents and sizes
+        Write-Host "📦 Artifacts directory contents:"
+        Get-ChildItem "artifacts" | Format-Table Name, Length
+        $totalSize = (Get-ChildItem "artifacts" -Recurse | Measure-Object -Property Length -Sum).Sum
+        Write-Host "📊 Artifacts total size: $([math]::Round($totalSize / 1MB, 2)) MB"
+        
+        # Calculate hashes
+        Set-Location "artifacts"
+        "# Calculated SHA256 hashes:" | Out-File -FilePath "../hashes_${{ runner.os }}_${{ matrix.features }}.txt" -Encoding UTF8
+        Get-ChildItem -File | ForEach-Object {
+          $hash = (Get-FileHash -Path $_.Name -Algorithm SHA256).Hash.ToLower()
+          Write-Host "SHA256 for $($_.Name): $hash"
+          "$hash  $($_.Name)" | Add-Content -Path "../hashes_${{ runner.os }}_${{ matrix.features }}.txt" -Encoding UTF8
+        }
+        Set-Location ".."
 
     - name: Upload artifact
       if: matrix.features == 'gui'
