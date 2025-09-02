@@ -76,21 +76,70 @@ fn create_zip_archive(artifacts_dir: &Path, package_name: &str) {
     let zip_name = format!("{}.zip", package_name);
     let zip_path = artifacts_dir.with_file_name(&zip_name);
 
-    // Use 7z if available (better compression), otherwise use built-in zip
-    let use_7z = Command::new("7z").arg("--help").output().is_ok();
-
-    if use_7z {
+    // Try 7z first (best compression), then PowerShell, then skip with warning
+    if Command::new("7z").arg("--help").output().is_ok() {
+        // Use 7z if available
         let status = Command::new("7z")
             .args(["a", &zip_path.to_string_lossy(), "."])
             .current_dir(artifacts_dir)
-            .status()
-            .expect("Failed to create zip archive with 7z");
+            .status();
 
-        if status.success() {
-            println!("cargo:warning=Created zip archive: {}", zip_path.display());
+        match status {
+            Ok(s) if s.success() => {
+                println!(
+                    "cargo:warning=Created zip archive with 7z: {}",
+                    zip_path.display()
+                );
+                return;
+            }
+            _ => {
+                println!("cargo:warning=7z failed, trying PowerShell...");
+            }
         }
     } else {
-        println!("cargo:warning=7z not available, skipping archive creation");
+        println!("cargo:warning=7z not available, trying PowerShell...");
+    }
+
+    // Fallback to PowerShell compression if 7z failed or not available
+    let ps_script = format!(
+        "try {{ Compress-Archive -Path (Join-Path '{}' '*') -DestinationPath '{}' -Force; Write-Host 'SUCCESS' }} catch {{ Write-Host 'ERROR: $($_.Exception.Message)' }}",
+        artifacts_dir.to_string_lossy(),
+        zip_path.to_string_lossy()
+    );
+
+    println!("cargo:warning=Running PowerShell command: {}", ps_script);
+
+    let output = Command::new("powershell")
+        .args(["-Command", &ps_script])
+        .output();
+
+    match output {
+        Ok(result) => {
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+
+            if result.status.success() && stdout.contains("SUCCESS") {
+                println!(
+                    "cargo:warning=Created zip archive with PowerShell: {}",
+                    zip_path.display()
+                );
+            } else {
+                println!("cargo:warning=PowerShell compression failed");
+                println!("cargo:warning=STDOUT: {}", stdout);
+                println!("cargo:warning=STDERR: {}", stderr);
+                println!(
+                    "cargo:warning=Files are available in: {}",
+                    artifacts_dir.display()
+                );
+            }
+        }
+        Err(e) => {
+            println!("cargo:warning=Failed to run PowerShell: {}", e);
+            println!(
+                "cargo:warning=Files are available in: {}",
+                artifacts_dir.display()
+            );
+        }
     }
 }
 
@@ -98,13 +147,53 @@ fn create_tar_archive(artifacts_dir: &Path, package_name: &str) {
     let tar_name = format!("{}.tar.gz", package_name);
     let tar_path = artifacts_dir.with_file_name(&tar_name);
 
+    // Try tar command first
     let status = Command::new("tar")
         .args(["czf", &tar_path.to_string_lossy(), "."])
         .current_dir(artifacts_dir)
-        .status()
-        .expect("Failed to create tar archive");
+        .status();
 
-    if status.success() {
-        println!("cargo:warning=Created tar archive: {}", tar_path.display());
+    match status {
+        Ok(s) if s.success() => {
+            println!("cargo:warning=Created tar archive: {}", tar_path.display());
+        }
+        _ => {
+            println!("cargo:warning=tar command failed, trying gzip fallback...");
+
+            // Fallback: create tar file first, then compress with gzip
+            let tar_only_name = format!("{}.tar", package_name);
+            let tar_only_path = artifacts_dir.with_file_name(&tar_only_name);
+
+            let tar_status = Command::new("tar")
+                .args(["cf", &tar_only_path.to_string_lossy(), "."])
+                .current_dir(artifacts_dir)
+                .status();
+
+            if tar_status.is_ok() && tar_status.unwrap().success() {
+                let gzip_status = Command::new("gzip")
+                    .arg(tar_only_path.to_string_lossy().as_ref())
+                    .status();
+
+                match gzip_status {
+                    Ok(s) if s.success() => {
+                        println!(
+                            "cargo:warning=Created tar.gz archive with gzip: {}",
+                            tar_path.display()
+                        );
+                    }
+                    _ => {
+                        println!(
+                            "cargo:warning=gzip compression failed, tar file available: {}",
+                            tar_only_path.display()
+                        );
+                    }
+                }
+            } else {
+                println!(
+                    "cargo:warning=Archive creation failed, files are available in: {}",
+                    artifacts_dir.display()
+                );
+            }
+        }
     }
 }
