@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ main, master ]
 
+# Cancel previous runs when new commits are pushed to the same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
