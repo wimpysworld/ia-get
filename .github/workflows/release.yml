@@ -1,5 +1,10 @@
 name: Build 🏗️ and Publish 📦️
 
+# Cancel previous runs when new tags are pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # Optimize Cargo for release builds
   CARGO_TERM_COLOR: always
@@ -9,6 +14,8 @@ env:
   CARGO_HTTP_LOW_SPEED_LIMIT: 10
   # Prefer cached dependencies when available
   CARGO_NET_OFFLINE: false
+  # Enable incremental compilation for faster builds
+  CARGO_INCREMENTAL: 1
 
 on:
   push:
@@ -18,9 +25,10 @@ on:
 
 jobs:
   publish:
-    name: Publishing for ${{ matrix.job.os }}
+    name: Publishing for ${{ matrix.job.os }} (${{ matrix.job.target }})
     runs-on: ${{ matrix.job.os }}
     strategy:
+      fail-fast: false
       matrix:
         job:
           - os: macos-latest
@@ -160,11 +168,17 @@ jobs:
           # Use the build script for packaging (it will run automatically on release builds)
           # Just ensure artifacts are created and calculate hashes
           mkdir -p artifacts
-          cp "target/${{ matrix.job.target }}/release/$PROJECT_NAME" "artifacts/" 2>/dev/null || cp "target/release/$PROJECT_NAME" "artifacts/" 2>/dev/null || echo "Binary not found in expected location"
+          if [ -f "target/${{ matrix.job.target }}/release/$PROJECT_NAME" ]; then
+            cp "target/${{ matrix.job.target }}/release/$PROJECT_NAME" "artifacts/"
+          elif [ -f "target/release/$PROJECT_NAME" ]; then
+            cp "target/release/$PROJECT_NAME" "artifacts/"
+          else
+            echo "Binary not found in expected location"
+          fi
 
           # Copy documentation
-          cp README.md artifacts/ 2>/dev/null || true
-          cp LICENSE artifacts/ 2>/dev/null || true
+          [ -f README.md ] && cp README.md artifacts/ || echo "README.md not found"
+          [ -f LICENSE ] && cp LICENSE artifacts/ || echo "LICENSE not found"
 
           # Create archive
           cd artifacts
@@ -253,7 +267,7 @@ jobs:
           All artifacts include SHA256 checksums for integrity verification:
           
           \`\`\`
-          $(cat ALL_HASHES.txt 2>/dev/null || echo "Checksums will be available shortly...")
+          $([ -f ALL_HASHES.txt ] && cat ALL_HASHES.txt || echo "Checksums will be available shortly...")
           \`\`\`
           
           **Usage**: Download the RELEASE_HASHES.txt file and run \`sha256sum -c RELEASE_HASHES.txt\`

@@ -3,7 +3,8 @@
 //! Handles storing and retrieving complete Internet Archive JSON metadata
 //! for download resumption and comprehensive file management.
 
-use crate::{IaGetError, Result};
+use crate::IaGetError;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -368,10 +369,9 @@ impl DownloadSession {
     /// Load session from disk
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| IaGetError::FileSystem(format!("Failed to read session file: {}", e)))?;
+            .map_err(|e| anyhow!("Failed to read session file: {}", e))?;
 
-        serde_json::from_str(&content)
-            .map_err(|e| IaGetError::JsonParsing(format!("Failed to parse session file: {}", e)))
+        serde_json::from_str(&content).map_err(|e| anyhow!("Failed to parse session file: {}", e))
     }
 
     /// Update file status
@@ -858,25 +858,74 @@ pub fn sanitize_filename_for_filesystem(filename: &str) -> String {
     sanitized
 }
 
+/// Check if Windows long path support is enabled
+#[cfg(target_os = "windows")]
+fn is_windows_long_path_enabled() -> bool {
+    // Try to create a file in a path longer than 260 characters to test if long paths work
+    use std::env;
+    use std::fs;
+    use std::io::Write;
+
+    let temp_dir = env::temp_dir();
+    let long_dir_name = "a".repeat(220); // Create a long directory name
+    let test_dir = temp_dir.join("ia-get-longpath-test").join(&long_dir_name);
+    let test_file = test_dir.join("testfile.txt");
+
+    // First, try to create the directory structure
+    if fs::create_dir_all(&test_dir).is_err() {
+        return false;
+    }
+
+    // Try to create and write a file - this is the real test for long path support
+    let result = match fs::File::create(&test_file) {
+        Ok(mut file) => {
+            // Try to write to the file to ensure it's fully functional
+            file.write_all(b"test").is_ok()
+        }
+        Err(_) => false,
+    };
+
+    // Clean up the test directory
+    let _ = fs::remove_dir_all(temp_dir.join("ia-get-longpath-test"));
+
+    result
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_windows_long_path_enabled() -> bool {
+    // On non-Windows systems, long paths are generally supported
+    true
+}
+
 /// Validate and potentially truncate file paths for Windows compatibility
 ///
 /// Windows has a default path length limit of 260 characters (MAX_PATH).
 /// This function checks path length and suggests directory name truncation if needed.
+/// If Windows long path support is detected, it allows longer paths.
 pub fn validate_path_length(output_dir: &str, filename: &str) -> Result<()> {
     let full_path = format!("{}/{}", output_dir, filename);
 
-    // Windows MAX_PATH limit
-    const MAX_PATH_LENGTH: usize = 260;
+    // Check if we're on Windows and if long path support is enabled
+    let max_path_length = if cfg!(target_os = "windows") && !is_windows_long_path_enabled() {
+        260 // Traditional Windows MAX_PATH limit
+    } else {
+        32767 // Extended Windows path limit or non-Windows systems
+    };
 
-    if full_path.len() > MAX_PATH_LENGTH {
-        return Err(IaGetError::FileSystem(format!(
-            "Path too long for Windows compatibility: {} characters (max: {}). \
-            Consider using a shorter output directory path or enable long path support in Windows. \
+    if full_path.len() > max_path_length {
+        return Err(anyhow!(
+            "Path too long: {} characters (max: {}). \
+            {} \
             Path: {}",
             full_path.len(),
-            MAX_PATH_LENGTH,
+            max_path_length,
+            if cfg!(target_os = "windows") && max_path_length == 260 {
+                "Consider enabling Windows long path support or using a shorter output directory path."
+            } else {
+                "Path exceeds system limits."
+            },
             full_path
-        )));
+        ));
     }
 
     Ok(())
@@ -1096,10 +1145,45 @@ mod tests {
         let filename = "test.mp3";
         assert!(validate_path_length(output_dir, filename).is_ok());
 
-        // Test long path
+        // Test long path - behavior depends on system long path support
         let long_dir = "C:\\".to_string() + &"very_long_directory_name\\".repeat(20);
         let long_filename = "very_long_filename_that_makes_path_exceed_windows_limit.mp3";
-        assert!(validate_path_length(&long_dir, long_filename).is_err());
+        let full_path = format!("{}/{}", long_dir, long_filename);
+        
+        // The validation result depends on system capabilities
+        let result = validate_path_length(&long_dir, long_filename);
+        
+        // On systems with long path support, it should pass (path is ~584 chars, under 32767 limit)
+        // On systems without long path support, it should fail (path exceeds 260 char limit)
+        if full_path.len() > 260 {
+            // If the system supports long paths (like this test environment), it should pass
+            #[cfg(target_os = "windows")]
+            {
+                if is_windows_long_path_enabled() {
+                    assert!(result.is_ok(), "Long path should be allowed on systems with long path support");
+                } else {
+                    assert!(result.is_err(), "Long path should be rejected on systems without long path support");
+                }
+            }
+            
+            // On non-Windows systems, long paths are generally supported
+            #[cfg(not(target_os = "windows"))]
+            assert!(result.is_ok(), "Long paths should be supported on non-Windows systems");
+        }
+    }
+
+    #[test]
+    fn test_validate_extremely_long_path() {
+        // Test a path that exceeds even the extended Windows limit (32767)
+        // Create a path longer than 32767 characters
+        let extremely_long_dir = "C:\\".to_string() + &"a".repeat(32800);
+        let filename = "test.mp3";
+        let full_path = format!("{}/{}", extremely_long_dir, filename);
+        
+        // This should fail even on systems with long path support
+        let result = validate_path_length(&extremely_long_dir, filename);
+        
+        assert!(result.is_err(), "Extremely long paths should be rejected even with long path support. Path length: {}", full_path.len());
     }
 
     #[test]

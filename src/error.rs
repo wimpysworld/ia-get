@@ -90,3 +90,9 @@ impl From<url::ParseError> for IaGetError {
         IaGetError::UrlFormat(err.to_string())
     }
 }
+
+impl From<anyhow::Error> for IaGetError {
+    fn from(err: anyhow::Error) -> Self {
+        IaGetError::FileSystem(err.to_string())
+    }
+}

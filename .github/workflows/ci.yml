@@ -25,11 +25,20 @@ env:
 
 jobs:
   test:
-    name: Test and Build
+    name: Test and Build (${{ matrix.os }}, ${{ matrix.features }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        features: [cli, gui]
+        include:
+          - features: cli
+            feature_flags: "--no-default-features --features cli"
+            cache_suffix: "cli"
+          - features: gui  
+            feature_flags: "--features gui"
+            cache_suffix: "gui"
 
     steps:
     - name: Checkout repository
@@ -63,9 +72,10 @@ jobs:
           # Windows-specific paths
           ${{ runner.os == 'Windows' && 'C:\Users\runneradmin\.cargo\registry\' || '' }}
           ${{ runner.os == 'Windows' && 'C:\Users\runneradmin\.cargo\git\' || '' }}
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
+        key: ${{ runner.os }}-${{ matrix.cache_suffix }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-${{ matrix.cache_suffix }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-${{ matrix.cache_suffix }}-cargo-
           ${{ runner.os }}-cargo-
 
     - name: Cache build artifacts by target
@@ -78,10 +88,11 @@ jobs:
           target/release/deps/
           target/release/build/
           target/release/.fingerprint/
-        key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('src/**/*.rs') }}-${{ hashFiles('build.rs') }}
+        key: ${{ runner.os }}-${{ matrix.cache_suffix }}-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('src/**/*.rs') }}-${{ hashFiles('build.rs') }}
         restore-keys: |
-          ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('src/**/*.rs') }}-
-          ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-${{ matrix.cache_suffix }}-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('src/**/*.rs') }}-
+          ${{ runner.os }}-${{ matrix.cache_suffix }}-target-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-${{ matrix.cache_suffix }}-target-
           ${{ runner.os }}-target-
 
     - name: Warm up dependency cache
@@ -91,11 +102,19 @@ jobs:
         # Verify cache integrity and show cache statistics
         echo "=== Cache Statistics ==="
         echo "Cargo cache size:"
-        du -sh ~/.cargo/ 2>/dev/null || echo "Cache size check not available on this platform"
+        if command -v du > /dev/null 2>&1; then
+          du -sh ~/.cargo/ 2>/dev/null || echo "Cache size check not available"
+        else
+          echo "Cache size check not available on this platform"
+        fi
         echo "Target directory size:"
-        du -sh target/ 2>/dev/null || echo "Target size check not available on this platform"
+        if command -v du > /dev/null 2>&1; then
+          du -sh target/ 2>/dev/null || echo "Target size check not available"
+        else
+          echo "Target size check not available on this platform"
+        fi
         # Verify dependencies are available offline
-        cargo tree --quiet > /dev/null || echo "Cache warming completed"
+        cargo tree --quiet > /dev/null 2>&1 || echo "Cache warming completed"
 
     - name: Optimize cache for build speed
       run: |
@@ -106,41 +125,42 @@ jobs:
     - name: Check formatting
       run: cargo fmt --all -- --check
 
-    - name: Run clippy (CLI only)
-      run: cargo clippy --no-default-features --features cli --all-targets -- -D warnings
+    - name: Run clippy
+      run: cargo clippy ${{ matrix.feature_flags }} --all-targets -- -D warnings
 
-    - name: Run clippy (GUI features)
-      run: cargo clippy --features gui --all-targets -- -D warnings
+    - name: Build (${{ matrix.features }} features)
+      run: cargo build ${{ matrix.feature_flags }} --release
 
-    - name: Build CLI (fast build)
-      run: cargo build --no-default-features --features cli --release
+    - name: Run tests (${{ matrix.features }} features)
+      run: cargo test ${{ matrix.feature_flags }}
 
-    - name: Build Unified Binary with GUI (full build)
-      run: cargo build --features gui --release
-
-    - name: Run tests (CLI only - faster)
-      run: cargo test --no-default-features --features cli
-
-    - name: Run tests (GUI features)
-      run: cargo test --features gui
-
-    - name: Run build validation script
+    - name: Run build validation script (Windows only)
+      if: runner.os == 'Windows' && matrix.features == 'gui'
       run: .\scripts\validate-build.ps1
       shell: pwsh
 
     - name: Create artifact (using build script)
+      if: matrix.features == 'gui'
       shell: bash
       run: |
         # The build script already creates artifacts in the artifacts/ directory
         # Just verify they exist and calculate hashes
         if [ -d "artifacts" ]; then
           cd artifacts
-          echo "# Calculated SHA256 hashes:" > ../hashes_${{ runner.os }}.txt
+          echo "# Calculated SHA256 hashes:" > ../hashes_${{ runner.os }}_${{ matrix.features }}.txt
           for file in *; do
             if [ -f "$file" ]; then
-              hash=$(sha256sum "$file" | cut -d' ' -f1)
-              echo "SHA256 for $file: $hash"
-              echo "$hash  $file" >> ../hashes_${{ runner.os }}.txt
+              if command -v sha256sum > /dev/null 2>&1; then
+                hash=$(sha256sum "$file" | cut -d' ' -f1)
+                echo "SHA256 for $file: $hash"
+                echo "$hash  $file" >> ../hashes_${{ runner.os }}_${{ matrix.features }}.txt
+              elif command -v shasum > /dev/null 2>&1; then
+                hash=$(shasum -a 256 "$file" | cut -d' ' -f1)
+                echo "SHA256 for $file: $hash"
+                echo "$hash  $file" >> ../hashes_${{ runner.os }}_${{ matrix.features }}.txt
+              else
+                echo "SHA256 calculation not available for $file" >> ../hashes_${{ runner.os }}_${{ matrix.features }}.txt
+              fi
             fi
           done
         else
@@ -154,22 +174,33 @@ jobs:
         fi
 
     - name: Upload artifact
+      if: matrix.features == 'gui'
       uses: actions/upload-artifact@v4
       with:
-        name: ia-get-${{ runner.os }}
+        name: ia-get-${{ runner.os }}-${{ matrix.features }}
         path: |
           artifacts/*
-          hashes_${{ runner.os }}.txt
+          hashes_${{ runner.os }}_${{ matrix.features }}.txt
         retention-days: 30
 
     - name: Cache cleanup and optimization
       if: always()
+      shell: pwsh
       run: |
-        # Clean up target directory to keep cache size manageable
-        cargo clean --target-dir target/debug 2>/dev/null || true
+        # Clean up target directory to keep cache size manageable  
+        try { cargo clean --target-dir target/debug } catch { Write-Host "Debug clean failed, continuing..." }
+        
         # Remove old incremental compilation artifacts
-        find target/ -name "incremental" -type d -exec rm -rf {} + 2>/dev/null || true
-        echo "Cache cleanup completed"
+        Get-ChildItem -Path target/ -Recurse -Directory -Name "incremental" -ErrorAction SilentlyContinue | ForEach-Object { 
+            try { 
+                Remove-Item -Path "target/$_" -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Host "Removed incremental cache: target/$_"
+            } catch {
+                Write-Host "Could not remove target/$_"
+            }
+        }
+        
+        Write-Host "Cache cleanup completed"
 
   release:
     name: Create Development Release
@@ -187,17 +218,18 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         path: release-artifacts
+        pattern: ia-get-*-gui  # Only download GUI artifacts for release
 
     - name: Prepare release artifacts
       run: |
         mkdir -p final-artifacts
         # Flatten artifact directory structure and gather hash information
         find release-artifacts -type f -name "*.tar.gz" -o -name "*.zip" | while read file; do
-          cp "$file" final-artifacts/
+          [ -f "$file" ] && cp "$file" final-artifacts/
         done
         # Copy binaries
         find release-artifacts -type f -name "ia-get" -o -name "ia-get.exe" | while read file; do
-          cp "$file" final-artifacts/
+          [ -f "$file" ] && cp "$file" final-artifacts/
         done
         
         cd final-artifacts
@@ -205,7 +237,7 @@ jobs:
         echo "" >> ../HASHES.md
         
         # Collect hashes from all hash files
-        for hash_file in ../release-artifacts/*/hashes_*.txt; do
+        for hash_file in ../release-artifacts/*/hashes_*_gui.txt; do
           if [ -f "$hash_file" ]; then
             # Read each line from the hash file and match with files in final-artifacts
             while IFS= read -r line; do
@@ -253,8 +285,12 @@ jobs:
     - name: Delete previous development release
       continue-on-error: true
       run: |
-        gh release delete development --yes || true
-        git push origin :refs/tags/development || true
+        if gh release view development >/dev/null 2>&1; then
+          gh release delete development --yes
+        fi
+        if git tag -l | grep -q "^development$"; then
+          git push origin :refs/tags/development
+        fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
