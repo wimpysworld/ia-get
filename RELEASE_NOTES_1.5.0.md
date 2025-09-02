@@ -15,9 +15,16 @@ All code changes for version 1.5.0 have been completed successfully:
 To trigger the automated release workflow, run:
 
 ```bash
-git tag -a 1.5.0 -m "Release version 1.5.0: Comprehensive performance enhancements and enterprise-grade testing infrastructure"
+# With 'v' prefix (recommended format used by this project)
+git tag -a v1.5.0 -m "Release version 1.5.0: Comprehensive performance enhancements and enterprise-grade testing infrastructure"
+git push origin v1.5.0
+
+# Alternative: Without 'v' prefix (also supported)
+git tag -a 1.5.0 -m "Release version 1.5.0: Comprehensive performance enhancements and enterprise-grade testing infrastructure"  
 git push origin 1.5.0
 ```
+
+**Note**: Both tag formats (`v1.5.0` and `1.5.0`) are supported by the release workflow.
 
 ### 2. Release Workflow Will Automatically:
 - Build binaries for all supported platforms (Linux, Windows, macOS, ARM)

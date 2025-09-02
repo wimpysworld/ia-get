@@ -276,6 +276,7 @@ The project now includes comprehensive CI/CD processes:
 ### Automated Artifacts
 - **Every commit**: Binary artifacts automatically published as [development releases](https://github.com/Gameaday/ia-get-cli/releases/tag/development)
 - **Tagged releases**: Production-quality binaries with comprehensive packaging (archives, .deb packages)
+  - Supports both `v1.2.3` and `1.2.3` tag formats
 - **Permanent retention**: All artifacts available permanently via GitHub releases
 - **Integrity verification**: SHA256 checksums for all downloads ensuring reproducible builds
 - **Commit traceability**: Development builds tagged with commit SHA for easy identification
