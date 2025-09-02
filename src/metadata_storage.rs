@@ -1149,10 +1149,10 @@ mod tests {
         let long_dir = "C:\\".to_string() + &"very_long_directory_name\\".repeat(20);
         let long_filename = "very_long_filename_that_makes_path_exceed_windows_limit.mp3";
         let full_path = format!("{}/{}", long_dir, long_filename);
-        
+
         // The validation result depends on system capabilities
         let result = validate_path_length(&long_dir, long_filename);
-        
+
         // On systems with long path support, it should pass (path is ~584 chars, under 32767 limit)
         // On systems without long path support, it should fail (path exceeds 260 char limit)
         if full_path.len() > 260 {
@@ -1160,15 +1160,24 @@ mod tests {
             #[cfg(target_os = "windows")]
             {
                 if is_windows_long_path_enabled() {
-                    assert!(result.is_ok(), "Long path should be allowed on systems with long path support");
+                    assert!(
+                        result.is_ok(),
+                        "Long path should be allowed on systems with long path support"
+                    );
                 } else {
-                    assert!(result.is_err(), "Long path should be rejected on systems without long path support");
+                    assert!(
+                        result.is_err(),
+                        "Long path should be rejected on systems without long path support"
+                    );
                 }
             }
-            
+
             // On non-Windows systems, long paths are generally supported
             #[cfg(not(target_os = "windows"))]
-            assert!(result.is_ok(), "Long paths should be supported on non-Windows systems");
+            assert!(
+                result.is_ok(),
+                "Long paths should be supported on non-Windows systems"
+            );
         }
     }
 
@@ -1179,11 +1188,15 @@ mod tests {
         let extremely_long_dir = "C:\\".to_string() + &"a".repeat(32800);
         let filename = "test.mp3";
         let full_path = format!("{}/{}", extremely_long_dir, filename);
-        
+
         // This should fail even on systems with long path support
         let result = validate_path_length(&extremely_long_dir, filename);
-        
-        assert!(result.is_err(), "Extremely long paths should be rejected even with long path support. Path length: {}", full_path.len());
+
+        assert!(
+            result.is_err(),
+            "Extremely long paths should be rejected even with long path support. Path length: {}",
+            full_path.len()
+        );
     }
 
     #[test]

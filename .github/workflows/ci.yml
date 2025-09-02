@@ -95,7 +95,9 @@ jobs:
           ${{ runner.os }}-${{ matrix.cache_suffix }}-target-
           ${{ runner.os }}-target-
 
-    - name: Warm up dependency cache
+    - name: Warm up dependency cache (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
       run: |
         # Pre-fetch dependencies to populate cache
         cargo fetch --verbose
@@ -116,11 +118,55 @@ jobs:
         # Verify dependencies are available offline
         cargo tree --quiet > /dev/null 2>&1 || echo "Cache warming completed"
 
-    - name: Optimize cache for build speed
+    - name: Warm up dependency cache (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        # Pre-fetch dependencies to populate cache
+        cargo fetch --verbose
+        # Verify cache integrity and show cache statistics
+        Write-Host "=== Cache Statistics ==="
+        Write-Host "Cargo cache size:"
+        try {
+          $cargoPath = if (Test-Path "$env:USERPROFILE\.cargo") { "$env:USERPROFILE\.cargo" } else { "~/.cargo" }
+          if (Test-Path $cargoPath) {
+            $size = (Get-ChildItem -Path $cargoPath -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            Write-Host "Cache size: $([math]::Round($size / 1MB, 2)) MB"
+          } else {
+            Write-Host "Cache size check not available"
+          }
+        } catch {
+          Write-Host "Cache size check not available"
+        }
+        Write-Host "Target directory size:"
+        try {
+          if (Test-Path "target") {
+            $size = (Get-ChildItem -Path "target" -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            Write-Host "Target size: $([math]::Round($size / 1MB, 2)) MB"
+          } else {
+            Write-Host "Target size check not available"
+          }
+        } catch {
+          Write-Host "Target size check not available"
+        }
+        # Verify dependencies are available offline
+        try { cargo tree --quiet *>$null } catch { Write-Host "Cache warming completed" }
+
+    - name: Optimize cache for build speed (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
       run: |
         # Set environment variables for optimized builds
         echo "CARGO_NET_OFFLINE=true" >> $GITHUB_ENV
         echo "CARGO_TARGET_DIR=target" >> $GITHUB_ENV
+
+    - name: Optimize cache for build speed (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        # Set environment variables for optimized builds
+        "CARGO_NET_OFFLINE=true" | Add-Content -Path $env:GITHUB_ENV -Encoding UTF8
+        "CARGO_TARGET_DIR=target" | Add-Content -Path $env:GITHUB_ENV -Encoding UTF8
 
     - name: Check formatting
       run: cargo fmt --all -- --check
@@ -139,8 +185,8 @@ jobs:
       run: .\scripts\validate-build.ps1
       shell: pwsh
 
-    - name: Create artifact (using build script)
-      if: matrix.features == 'gui'
+    - name: Create artifact (Unix)
+      if: matrix.features == 'gui' && runner.os != 'Windows'
       shell: bash
       run: |
         # The build script already creates artifacts in the artifacts/ directory
@@ -166,12 +212,29 @@ jobs:
         else
           echo "No artifacts directory found, creating basic artifact..."
           mkdir -p artifacts
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp target/release/ia-get.exe artifacts/
-          else
-            cp target/release/ia-get artifacts/
-          fi
+          cp target/release/ia-get artifacts/
         fi
+
+    - name: Create artifact (Windows)
+      if: matrix.features == 'gui' && runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        # The build script already creates artifacts in the artifacts/ directory
+        # Just verify they exist and calculate hashes
+        if (Test-Path "artifacts") {
+          Set-Location "artifacts"
+          "# Calculated SHA256 hashes:" | Out-File -FilePath "../hashes_${{ runner.os }}_${{ matrix.features }}.txt" -Encoding UTF8
+          Get-ChildItem -File | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.Name -Algorithm SHA256).Hash.ToLower()
+            Write-Host "SHA256 for $($_.Name): $hash"
+            "$hash  $($_.Name)" | Add-Content -Path "../hashes_${{ runner.os }}_${{ matrix.features }}.txt" -Encoding UTF8
+          }
+          Set-Location ".."
+        } else {
+          Write-Host "No artifacts directory found, creating basic artifact..."
+          New-Item -ItemType Directory -Path "artifacts" -Force
+          Copy-Item "target/release/ia-get.exe" "artifacts/"
+        }
 
     - name: Upload artifact
       if: matrix.features == 'gui'
