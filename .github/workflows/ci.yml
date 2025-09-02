@@ -247,6 +247,21 @@ jobs:
           fi
         done
         cd ..
+        
+        # Create compressed archive for distribution
+        PACKAGE_NAME="ia-get-${{ runner.os }}"
+        echo "📦 Creating distribution archive: ${PACKAGE_NAME}.tar.gz"
+        tar -czf "${PACKAGE_NAME}.tar.gz" -C artifacts .
+        
+        # Verify archive was created
+        if [ -f "${PACKAGE_NAME}.tar.gz" ]; then
+          archive_size=$(stat -f%z "${PACKAGE_NAME}.tar.gz" 2>/dev/null || stat -c%s "${PACKAGE_NAME}.tar.gz" 2>/dev/null || echo "0")
+          archive_size_mb=$((archive_size / 1024 / 1024))
+          echo "✅ Archive created: ${PACKAGE_NAME}.tar.gz (${archive_size_mb}MB)"
+        else
+          echo "❌ Failed to create archive"
+          exit 1
+        fi
 
     - name: Create artifact (Windows)
       if: matrix.features == 'gui' && runner.os == 'Windows'
@@ -309,6 +324,21 @@ jobs:
           "$hash  $($_.Name)" | Add-Content -Path "../hashes_${{ runner.os }}_${{ matrix.features }}.txt" -Encoding UTF8
         }
         Set-Location ".."
+        
+        # Create compressed archive for distribution
+        $packageName = "ia-get-${{ runner.os }}"
+        $archivePath = "${packageName}.zip"
+        Write-Host "📦 Creating distribution archive: $archivePath"
+        
+        try {
+          Compress-Archive -Path "artifacts\*" -DestinationPath $archivePath -Force
+          $archiveSize = (Get-Item $archivePath).Length
+          $archiveSizeMB = [math]::Round($archiveSize / 1MB, 2)
+          Write-Host "✅ Archive created: $archivePath (${archiveSizeMB}MB)"
+        } catch {
+          Write-Host "❌ Failed to create archive: $_"
+          exit 1
+        }
 
     - name: Upload artifact
       if: matrix.features == 'gui'
@@ -318,6 +348,7 @@ jobs:
         path: |
           artifacts/*
           hashes_${{ runner.os }}_${{ matrix.features }}.txt
+          ia-get-${{ runner.os }}.*
         retention-days: 30
 
     - name: Cache cleanup and optimization

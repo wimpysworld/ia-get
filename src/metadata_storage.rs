@@ -735,6 +735,11 @@ fn sanitize_identifier_for_filesystem(identifier: &str) -> String {
     // Trim leading/trailing hyphens and underscores
     sanitized = sanitized.trim_matches(&['-', '_'] as &[char]).to_string();
 
+    // Windows doesn't allow filenames ending with periods or spaces
+    sanitized = sanitized
+        .trim_end_matches(&['.', ' '] as &[char])
+        .to_string();
+
     // Ensure we have something if the identifier was all invalid characters
     if sanitized.is_empty() {
         sanitized = "archive".to_string();
@@ -811,6 +816,11 @@ pub fn sanitize_filename_for_filesystem(filename: &str) -> String {
 
     // Trim leading/trailing underscores
     sanitized = sanitized.trim_matches('_').to_string();
+
+    // Windows doesn't allow filenames ending with periods or spaces
+    sanitized = sanitized
+        .trim_end_matches(&['.', ' '] as &[char])
+        .to_string();
 
     // Ensure we have something if the filename was all invalid characters
     if sanitized.is_empty() {
@@ -1091,6 +1101,27 @@ mod tests {
 
         // Should generate different filenames due to timestamp
         assert_ne!(result1, result2);
+    }
+
+    #[test]
+    fn test_windows_filename_edge_cases() {
+        // Test filenames ending with periods
+        let result = sanitize_filename_for_filesystem("test_file...");
+        assert!(!result.ends_with('.'));
+
+        // Test filenames ending with spaces
+        let result = sanitize_filename_for_filesystem("test_file   ");
+        assert!(!result.ends_with(' '));
+
+        // Test combination of periods and spaces
+        let result = sanitize_filename_for_filesystem("test_file. . ");
+        assert!(!result.ends_with('.'));
+        assert!(!result.ends_with(' '));
+
+        // Test identifiers ending with periods and spaces
+        let result = sanitize_identifier_for_filesystem("test-identifier... ");
+        assert!(!result.ends_with('.'));
+        assert!(!result.ends_with(' '));
     }
 
     #[test]

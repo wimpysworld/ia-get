@@ -5,6 +5,7 @@
 use crate::{
     config::{Config, ConfigManager},
     download_service::{DownloadRequest, DownloadService, ProgressUpdate},
+    metadata_storage::sanitize_filename_for_filesystem,
 };
 use egui::{Context, Ui};
 use std::path::PathBuf;
@@ -155,7 +156,12 @@ impl IaGetApp {
 
         // Get download parameters
         let identifier = self.archive_identifier.clone();
-        let output_dir = PathBuf::from(&self.output_directory);
+        let mut output_dir = PathBuf::from(&self.output_directory);
+
+        // Create archive-specific subdirectory like CLI does
+        let sanitized_identifier = sanitize_filename_for_filesystem(&identifier);
+        output_dir.push(sanitized_identifier);
+
         let (include_formats, exclude_formats, min_size, max_size) =
             self.filters_panel.get_filter_settings();
         let include_formats: Vec<String> = if include_formats.is_empty() {

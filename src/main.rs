@@ -10,7 +10,7 @@ use ia_get::{
     archive_api::{get_archive_servers, ArchiveOrgApiClient},
     constants::get_user_agent,
     filters::format_size,
-    metadata_storage::DownloadState,
+    metadata_storage::{sanitize_filename_for_filesystem, DownloadState},
     DownloadRequest, DownloadResult, DownloadService,
 };
 
@@ -202,7 +202,9 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             let mut current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            current.push(identifier);
+            // Sanitize the identifier when using it as a directory name to prevent Windows path issues
+            let sanitized_identifier = sanitize_filename_for_filesystem(identifier);
+            current.push(sanitized_identifier);
             current
         });
 

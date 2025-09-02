@@ -487,6 +487,54 @@ impl ArchiveDownloader {
         progress_bar: &ProgressBar,
         enable_compression: bool,
     ) -> Result<()> {
+        // Try with compression first, then fall back to no compression if decoding fails
+        let max_attempts = if enable_compression { 2 } else { 1 };
+
+        for attempt in 0..max_attempts {
+            let use_compression = enable_compression && attempt == 0;
+
+            match Self::attempt_download(
+                client,
+                url,
+                output_path,
+                file_info,
+                progress_bar,
+                use_compression,
+            )
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    // If it's a decoding error and we haven't tried without compression yet
+                    if attempt == 0 && enable_compression && e.to_string().contains("decoding")
+                        || e.to_string().contains("decode")
+                    {
+                        progress_bar.set_message(format!(
+                            "Compression decoding failed, retrying without compression: {}",
+                            file_info.name
+                        ));
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        Err(IaGetError::Network(format!(
+            "Failed to download {} after {} attempts",
+            file_info.name, max_attempts
+        )))
+    }
+
+    /// Attempt a single download with specified compression setting
+    async fn attempt_download(
+        client: &Client,
+        url: &str,
+        output_path: &Path,
+        file_info: &ArchiveFile,
+        progress_bar: &ProgressBar,
+        enable_compression: bool,
+    ) -> Result<()> {
         let mut request = client.get(url);
 
         // Enable HTTP compression if requested
@@ -526,9 +574,19 @@ impl ArchiveDownloader {
 
         use futures_util::StreamExt;
         let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk =
-                chunk.map_err(|e| IaGetError::Network(format!("Download stream error: {}", e)))?;
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = match chunk_result {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    // Handle response body decoding errors more gracefully
+                    let error_msg = if e.to_string().contains("decode") {
+                        format!("Error decoding response body for {}: {}. This may be due to corrupted data or encoding issues.", file_info.name, e)
+                    } else {
+                        format!("Download stream error for {}: {}", file_info.name, e)
+                    };
+                    return Err(IaGetError::Network(error_msg));
+                }
+            };
 
             file.write_all(&chunk)
                 .await
