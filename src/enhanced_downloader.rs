@@ -544,6 +544,17 @@ impl ArchiveDownloader {
             .map_err(|e| IaGetError::FileSystem(format!("Failed to flush file: {}", e)))?;
         drop(file);
 
+        // Verify that we downloaded the expected amount of data
+        if let Some(expected_size) = file_info.size {
+            if downloaded != expected_size {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(IaGetError::Network(format!(
+                    "Download incomplete: expected {} bytes, got {} bytes for {}",
+                    expected_size, downloaded, file_info.name
+                )));
+            }
+        }
+
         // Move temporary file to final location
         tokio::fs::rename(&temp_path, output_path)
             .await
@@ -573,8 +584,14 @@ impl ArchiveDownloader {
                         if let Some(file_info) =
                             archive_metadata.files.iter().find(|f| f.name == *file_name)
                         {
+                            let sanitized_filename = crate::metadata_storage::sanitize_filename_for_filesystem(file_name);
                             let local_path =
-                                format!("{}/{}", download_config.output_dir, file_name);
+                                format!("{}/{}", download_config.output_dir, sanitized_filename);
+                            
+                            // Validate path length for Windows compatibility
+                            if let Err(e) = crate::metadata_storage::validate_path_length(&download_config.output_dir, &sanitized_filename) {
+                                eprintln!("⚠️  Warning: {}", e);
+                            }
                             existing_session.file_status.insert(
                                 file_name.clone(),
                                 FileDownloadStatus {

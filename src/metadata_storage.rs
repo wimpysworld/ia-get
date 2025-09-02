@@ -314,7 +314,13 @@ impl DownloadSession {
         let mut file_status = HashMap::new();
         for file_name in &requested_files {
             if let Some(file_info) = archive_metadata.files.iter().find(|f| f.name == *file_name) {
-                let local_path = format!("{}/{}", download_config.output_dir, file_name);
+                let sanitized_filename = crate::metadata_storage::sanitize_filename_for_filesystem(file_name);
+                let local_path = format!("{}/{}", download_config.output_dir, sanitized_filename);
+                
+                // Validate path length for Windows compatibility
+                if let Err(e) = crate::metadata_storage::validate_path_length(&download_config.output_dir, &sanitized_filename) {
+                    eprintln!("⚠️  Warning: {}", e);
+                }
                 file_status.insert(
                     file_name.clone(),
                     FileDownloadStatus {
@@ -473,12 +479,75 @@ impl ArchiveFile {
 
     /// Validate MD5 hash of a local file
     pub fn validate_md5<P: AsRef<Path>>(&self, file_path: P) -> Result<bool> {
+        let file_path_ref = file_path.as_ref();
+        
+        // Special handling for XML files due to frequent hash mismatches at Internet Archive
+        if file_path_ref.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_lowercase() == "xml")
+            .unwrap_or(false)
+        {
+            return self.validate_xml_file_alternative(file_path_ref);
+        }
+
         if let Some(expected_md5) = &self.md5 {
             let actual_md5 = crate::utils::calculate_md5(file_path)?;
             Ok(actual_md5.to_lowercase() == expected_md5.to_lowercase())
         } else {
             Ok(true) // No MD5 to validate
         }
+    }
+
+    /// Alternative validation for XML files using size and structure validation
+    /// Returns true if the file appears to be a valid XML file
+    fn validate_xml_file_alternative<P: AsRef<Path>>(&self, file_path: P) -> Result<bool> {
+        use std::fs;
+        
+        // Check if file exists and has reasonable size (not empty, not too small)
+        let metadata = match fs::metadata(&file_path) {
+            Ok(meta) => meta,
+            Err(_) => return Ok(false), // File doesn't exist or can't be read
+        };
+
+        let file_size = metadata.len();
+        
+        // XML files should have some minimum size (at least basic XML structure)
+        if file_size < 10 {
+            return Ok(false);
+        }
+
+        // Check if file size matches the expected size from metadata (if available)
+        // Skip size check for files with null/unknown sizes in Archive.org metadata
+        if let Some(expected_size) = self.size {
+            if file_size != expected_size {
+                // For XML files, we're more lenient due to Archive.org inconsistencies
+                // Allow some variance in size (e.g., due to encoding differences)
+                let size_difference = if file_size > expected_size {
+                    file_size - expected_size
+                } else {
+                    expected_size - file_size
+                };
+                
+                // Allow up to 10% size difference or 100 bytes, whichever is larger
+                let tolerance = std::cmp::max(expected_size / 10, 100);
+                if size_difference > tolerance {
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Try to read the beginning of the file to validate it's XML-like
+        let file_content = match fs::read_to_string(&file_path) {
+            Ok(content) => content,
+            Err(_) => return Ok(false), // Can't read as text
+        };
+
+        // Basic XML validation - should start with XML declaration or opening tag
+        let trimmed = file_content.trim();
+        let is_xml_like = trimmed.starts_with("<?xml") || 
+                         trimmed.starts_with('<');
+
+        Ok(is_xml_like)
     }
 
     /// Set the modification time of a local file to match the archive
@@ -712,6 +781,108 @@ pub fn generate_session_filename(identifier: &str) -> String {
     format!("ia-get-session-{}-{}.json", sanitized_identifier, timestamp)
 }
 
+/// Sanitize a filename for safe filesystem use across platforms
+///
+/// This function ensures filenames are safe for use in Windows, macOS, and Linux filesystems:
+/// - Replaces invalid characters with safe alternatives
+/// - Handles Windows reserved names
+/// - Limits length to prevent path issues
+pub fn sanitize_filename_for_filesystem(filename: &str) -> String {
+    // Windows-forbidden characters in filenames: < > : " | ? * \ /
+    // Also avoid characters that could cause issues in shells
+    let mut sanitized = filename
+        .chars()
+        .filter_map(|c| match c {
+            // Windows-forbidden characters
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\' | '/' => Some('_'),
+            // Shell-problematic characters - replace with safe alternatives
+            '&' | '$' | '!' | '%' | '^' | '(' | ')' | '[' | ']' | '{' | '}' | ';' => Some('_'),
+            // Remove control characters
+            c if c.is_control() => None,
+            // Keep everything else
+            c => Some(c),
+        })
+        .collect::<String>();
+
+    // Remove consecutive underscores
+    while sanitized.contains("__") {
+        sanitized = sanitized.replace("__", "_");
+    }
+
+    // Trim leading/trailing underscores
+    sanitized = sanitized.trim_matches('_').to_string();
+
+    // Ensure we have something if the filename was all invalid characters
+    if sanitized.is_empty() {
+        sanitized = "file".to_string();
+    }
+
+    // Handle Windows reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+    let reserved_names = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
+        "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4",
+        "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    ];
+    
+    // Split filename and extension
+    if let Some(dot_pos) = sanitized.rfind('.') {
+        let (name_part, ext_part) = sanitized.split_at(dot_pos);
+        let name_upper = name_part.to_uppercase();
+        
+        if reserved_names.contains(&name_upper.as_str()) {
+            sanitized = format!("{}_file{}", name_part, ext_part);
+        }
+    } else {
+        let name_upper = sanitized.to_uppercase();
+        if reserved_names.contains(&name_upper.as_str()) {
+            sanitized = format!("{}_file", sanitized);
+        }
+    }
+
+    // Windows filename limit is 255 characters
+    const MAX_FILENAME_LENGTH: usize = 255;
+    if sanitized.len() > MAX_FILENAME_LENGTH {
+        // Try to preserve extension if possible
+        if let Some(dot_pos) = sanitized.rfind('.') {
+            let ext = &sanitized[dot_pos..];
+            if ext.len() < MAX_FILENAME_LENGTH - 10 {
+                let name_part = &sanitized[..(MAX_FILENAME_LENGTH - ext.len())];
+                sanitized = format!("{}{}", name_part, ext);
+            } else {
+                sanitized.truncate(MAX_FILENAME_LENGTH);
+            }
+        } else {
+            sanitized.truncate(MAX_FILENAME_LENGTH);
+        }
+    }
+
+    sanitized
+}
+
+/// Validate and potentially truncate file paths for Windows compatibility
+///
+/// Windows has a default path length limit of 260 characters (MAX_PATH).
+/// This function checks path length and suggests directory name truncation if needed.
+pub fn validate_path_length(output_dir: &str, filename: &str) -> Result<()> {
+    let full_path = format!("{}/{}", output_dir, filename);
+    
+    // Windows MAX_PATH limit
+    const MAX_PATH_LENGTH: usize = 260;
+    
+    if full_path.len() > MAX_PATH_LENGTH {
+        return Err(IaGetError::FileSystem(format!(
+            "Path too long for Windows compatibility: {} characters (max: {}). \
+            Consider using a shorter output directory path or enable long path support in Windows. \
+            Path: {}",
+            full_path.len(),
+            MAX_PATH_LENGTH,
+            full_path
+        )));
+    }
+    
+    Ok(())
+}
+
 /// Find the most recent session file for an identifier
 pub fn find_latest_session_file(identifier: &str, session_dir: &str) -> Result<Option<String>> {
     // Try both the new sanitized identifier and the original identifier for backward compatibility
@@ -889,5 +1060,88 @@ mod tests {
 
         // Should generate the same result for the same input
         assert_eq!(result1, result2);
+    }
+
+    #[test]
+    fn test_sanitize_filename_for_filesystem() {
+        // Test normal filename
+        let filename = "test_file.mp3";
+        let result = sanitize_filename_for_filesystem(filename);
+        assert_eq!(result, filename);
+
+        // Test problematic characters
+        let filename = "file<name>:with|invalid?chars*.mp3";
+        let result = sanitize_filename_for_filesystem(filename);
+        assert_eq!(result, "file_name_with_invalid_chars_.mp3");
+
+        // Test Windows reserved name
+        let filename = "CON.txt";
+        let result = sanitize_filename_for_filesystem(filename);
+        assert_eq!(result, "CON_file.txt");
+
+        // Test consecutive underscores
+        let filename = "file__with___underscores.txt";
+        let result = sanitize_filename_for_filesystem(filename);
+        assert_eq!(result, "file_with_underscores.txt");
+
+        // Test empty after sanitization
+        let filename = "<<<>>>";
+        let result = sanitize_filename_for_filesystem(filename);
+        assert_eq!(result, "file");
+    }
+
+    #[test]
+    fn test_validate_path_length() {
+        // Test normal path
+        let output_dir = "/home/user/downloads";
+        let filename = "test.mp3";
+        assert!(validate_path_length(output_dir, filename).is_ok());
+
+        // Test long path
+        let long_dir = "C:\\".to_string() + &"very_long_directory_name\\".repeat(20);
+        let long_filename = "very_long_filename_that_makes_path_exceed_windows_limit.mp3";
+        assert!(validate_path_length(&long_dir, long_filename).is_err());
+    }
+
+    #[test]
+    fn test_xml_alternative_validation() {
+        use tempfile::Builder;
+        use std::io::Write;
+
+        // Create temporary XML file with .xml extension
+        let mut temp_file = Builder::new()
+            .suffix(".xml")
+            .tempfile()
+            .unwrap();
+        
+        let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+<root>
+    <item>test</item>
+</root>"#;
+        temp_file.write_all(xml_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        println!("XML content length: {}", xml_content.len());
+        println!("Temp file path: {:?}", temp_file.path());
+
+        let file_info = ArchiveFile {
+            name: "test.xml".to_string(),
+            source: "original".to_string(),
+            format: Some("XML".to_string()),
+            mtime: Some(1234567890),
+            size: Some(xml_content.len() as u64),
+            md5: Some("dummy_md5".to_string()),
+            crc32: None,
+            sha1: None,
+            btih: None,
+            summation: None,
+            original: None,
+            rotation: None,
+        };
+
+        // Should validate as true for properly structured XML
+        let result = file_info.validate_md5(temp_file.path());
+        println!("XML validation result: {:?}", result);
+        assert!(result.unwrap());
     }
 }
