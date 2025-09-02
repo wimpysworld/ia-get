@@ -155,7 +155,18 @@ impl IaGetApp {
         };
 
         // Get download parameters
-        let identifier = self.archive_identifier.clone();
+        let raw_identifier = self.archive_identifier.clone();
+
+        // Normalize the identifier - extract just the identifier portion if it's a URL
+        let identifier = match crate::url_processing::normalize_archive_identifier(&raw_identifier)
+        {
+            Ok(id) => id,
+            Err(e) => {
+                self.error_message = Some(format!("Invalid archive identifier: {}", e));
+                self.is_downloading = false;
+                return;
+            }
+        };
         let mut output_dir = PathBuf::from(&self.output_directory);
 
         // Create archive-specific subdirectory like CLI does

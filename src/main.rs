@@ -193,9 +193,13 @@ async fn main() -> Result<()> {
     }
 
     // Extract arguments - these are now guaranteed to be present due to CLI parsing
-    let identifier = matches
+    let raw_identifier = matches
         .get_one::<String>("identifier")
         .ok_or_else(|| anyhow::anyhow!("Archive identifier is required"))?;
+
+    // Normalize the identifier - extract just the identifier portion if it's a URL
+    let identifier = ia_get::url_processing::normalize_archive_identifier(raw_identifier)
+        .context("Failed to normalize archive identifier")?;
 
     let output_dir = matches
         .get_one::<String>("output")
@@ -203,7 +207,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| {
             let mut current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             // Sanitize the identifier when using it as a directory name to prevent Windows path issues
-            let sanitized_identifier = sanitize_filename_for_filesystem(identifier);
+            let sanitized_identifier = sanitize_filename_for_filesystem(&identifier);
             current.push(sanitized_identifier);
             current
         });

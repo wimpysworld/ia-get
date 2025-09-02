@@ -90,5 +90,5 @@ pub use network::{is_transient_error, is_transient_reqwest_error, is_url_accessi
 pub use performance::{AdaptiveBufferManager, PerformanceMetrics, PerformanceMonitor};
 pub use url_processing::{
     construct_download_url, construct_metadata_url, extract_identifier_from_url, is_archive_url,
-    validate_and_process_url,
+    normalize_archive_identifier, validate_and_process_url,
 };

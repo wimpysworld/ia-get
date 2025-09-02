@@ -46,6 +46,18 @@ use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 
+/// Download context to avoid too many function arguments
+struct DownloadContext<'a> {
+    client: &'a Client,
+    url: &'a str,
+    temp_path: &'a Path,
+    output_path: &'a Path,
+    file_info: &'a ArchiveFile,
+    progress_bar: &'a ProgressBar,
+    enable_compression: bool,
+    resume_from: u64,
+}
+
 /// Enhanced downloader that uses full Archive.org metadata
 pub struct ArchiveDownloader {
     client: Client,
@@ -535,11 +547,75 @@ impl ArchiveDownloader {
         progress_bar: &ProgressBar,
         enable_compression: bool,
     ) -> Result<()> {
-        let mut request = client.get(url);
+        const MAX_RESUME_ATTEMPTS: usize = 3;
+        let temp_path = output_path.with_extension("tmp");
 
-        // Enable HTTP compression if requested
-        if enable_compression {
+        for attempt in 0..MAX_RESUME_ATTEMPTS {
+            // Check if we have a partial file from previous attempt
+            let resume_from = if attempt > 0 && temp_path.exists() {
+                tokio::fs::metadata(&temp_path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            // Create download context to avoid too many function arguments
+            let download_ctx = DownloadContext {
+                client,
+                url,
+                temp_path: &temp_path,
+                output_path,
+                file_info,
+                progress_bar,
+                enable_compression,
+                resume_from,
+            };
+
+            match Self::perform_download(download_ctx).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if attempt < MAX_RESUME_ATTEMPTS - 1 {
+                        // Check if this looks like an incomplete download that we can resume
+                        if e.to_string().contains("Download incomplete")
+                            || e.to_string().contains("stream error")
+                            || e.to_string().contains("connection")
+                        {
+                            progress_bar.set_message(format!(
+                                "Download interrupted, resuming from {} bytes (attempt {}/{})",
+                                resume_from,
+                                attempt + 2,
+                                MAX_RESUME_ATTEMPTS
+                            ));
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        Err(IaGetError::Network(format!(
+            "Failed to download {} after {} resume attempts",
+            file_info.name, MAX_RESUME_ATTEMPTS
+        )))
+    }
+
+    /// Perform a single download attempt with optional resume
+    async fn perform_download(ctx: DownloadContext<'_>) -> Result<()> {
+        let mut request = ctx.client.get(ctx.url);
+
+        // Enable HTTP compression if requested and not resuming
+        // (compression and range requests don't mix well)
+        if ctx.enable_compression && ctx.resume_from == 0 {
             request = request.header("Accept-Encoding", "gzip, deflate, br");
+        }
+
+        // Add range header for resume
+        if ctx.resume_from > 0 {
+            request = request.header("Range", format!("bytes={}-", ctx.resume_from));
         }
 
         let response = request
@@ -547,7 +623,9 @@ impl ArchiveDownloader {
             .await
             .map_err(|e| IaGetError::Network(format!("Failed to start download: {}", e)))?;
 
-        if !response.status().is_success() {
+        if !response.status().is_success()
+            && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+        {
             return Err(IaGetError::Network(format!(
                 "HTTP error {}: {}",
                 response.status(),
@@ -558,19 +636,52 @@ impl ArchiveDownloader {
             )));
         }
 
-        // Set up progress bar with file size
-        if let Some(total_size) = file_info.size {
-            progress_bar.set_length(total_size);
+        // Verify Content-Length if available
+        let content_length = response.content_length();
+        if let (Some(expected_size), Some(content_len)) = (ctx.file_info.size, content_length) {
+            let expected_remaining = if ctx.resume_from > 0 {
+                expected_size.saturating_sub(ctx.resume_from)
+            } else {
+                expected_size
+            };
+
+            if content_len != expected_remaining {
+                ctx.progress_bar.set_message(format!(
+                    "Warning: Content-Length mismatch for {}. Expected {} bytes, server reports {} bytes",
+                    ctx.file_info.name, expected_remaining, content_len
+                ));
+            }
         }
 
-        // Create temporary file
-        let temp_path = output_path.with_extension("tmp");
-        let mut file = File::create(&temp_path).await.map_err(|e| {
-            IaGetError::FileSystem(format!("Failed to create temporary file: {}", e))
-        })?;
+        // Set up progress bar with file size
+        if let Some(total_size) = ctx.file_info.size {
+            ctx.progress_bar.set_length(total_size);
+            if ctx.resume_from > 0 {
+                ctx.progress_bar.set_position(ctx.resume_from);
+            }
+        }
+
+        // Create or open temporary file for writing
+        let mut file = if ctx.resume_from > 0 {
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(ctx.temp_path)
+                .await
+                .map_err(|e| {
+                    IaGetError::FileSystem(format!(
+                        "Failed to open temporary file for resume: {}",
+                        e
+                    ))
+                })?
+        } else {
+            File::create(ctx.temp_path).await.map_err(|e| {
+                IaGetError::FileSystem(format!("Failed to create temporary file: {}", e))
+            })?
+        };
 
         // Download with progress tracking
-        let mut downloaded = 0u64;
+        let mut downloaded = ctx.resume_from;
 
         use futures_util::StreamExt;
         let mut stream = response.bytes_stream();
@@ -580,9 +691,9 @@ impl ArchiveDownloader {
                 Err(e) => {
                     // Handle response body decoding errors more gracefully
                     let error_msg = if e.to_string().contains("decode") {
-                        format!("Error decoding response body for {}: {}. This may be due to corrupted data or encoding issues.", file_info.name, e)
+                        format!("Error decoding response body for {}: {}. This may be due to corrupted data or encoding issues.", ctx.file_info.name, e)
                     } else {
-                        format!("Download stream error for {}: {}", file_info.name, e)
+                        format!("Download stream error for {}: {}", ctx.file_info.name, e)
                     };
                     return Err(IaGetError::Network(error_msg));
                 }
@@ -593,7 +704,7 @@ impl ArchiveDownloader {
                 .map_err(|e| IaGetError::FileSystem(format!("Failed to write to file: {}", e)))?;
 
             downloaded += chunk.len() as u64;
-            progress_bar.set_position(downloaded);
+            ctx.progress_bar.set_position(downloaded);
         }
 
         // Ensure all data is written
@@ -603,18 +714,18 @@ impl ArchiveDownloader {
         drop(file);
 
         // Verify that we downloaded the expected amount of data
-        if let Some(expected_size) = file_info.size {
+        if let Some(expected_size) = ctx.file_info.size {
             if downloaded != expected_size {
-                let _ = tokio::fs::remove_file(&temp_path).await;
+                // Don't delete the temp file - we might be able to resume
                 return Err(IaGetError::Network(format!(
                     "Download incomplete: expected {} bytes, got {} bytes for {}",
-                    expected_size, downloaded, file_info.name
+                    expected_size, downloaded, ctx.file_info.name
                 )));
             }
         }
 
         // Move temporary file to final location
-        tokio::fs::rename(&temp_path, output_path)
+        tokio::fs::rename(ctx.temp_path, ctx.output_path)
             .await
             .map_err(|e| IaGetError::FileSystem(format!("Failed to finalize file: {}", e)))?;
 
