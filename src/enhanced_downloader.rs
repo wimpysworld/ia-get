@@ -584,12 +584,18 @@ impl ArchiveDownloader {
                         if let Some(file_info) =
                             archive_metadata.files.iter().find(|f| f.name == *file_name)
                         {
-                            let sanitized_filename = crate::metadata_storage::sanitize_filename_for_filesystem(file_name);
+                            let sanitized_filename =
+                                crate::metadata_storage::sanitize_filename_for_filesystem(
+                                    file_name,
+                                );
                             let local_path =
                                 format!("{}/{}", download_config.output_dir, sanitized_filename);
-                            
+
                             // Validate path length for Windows compatibility
-                            if let Err(e) = crate::metadata_storage::validate_path_length(&download_config.output_dir, &sanitized_filename) {
+                            if let Err(e) = crate::metadata_storage::validate_path_length(
+                                &download_config.output_dir,
+                                &sanitized_filename,
+                            ) {
                                 eprintln!("⚠️  Warning: {}", e);
                             }
                             existing_session.file_status.insert(

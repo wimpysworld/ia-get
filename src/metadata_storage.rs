@@ -314,11 +314,15 @@ impl DownloadSession {
         let mut file_status = HashMap::new();
         for file_name in &requested_files {
             if let Some(file_info) = archive_metadata.files.iter().find(|f| f.name == *file_name) {
-                let sanitized_filename = crate::metadata_storage::sanitize_filename_for_filesystem(file_name);
+                let sanitized_filename =
+                    crate::metadata_storage::sanitize_filename_for_filesystem(file_name);
                 let local_path = format!("{}/{}", download_config.output_dir, sanitized_filename);
-                
+
                 // Validate path length for Windows compatibility
-                if let Err(e) = crate::metadata_storage::validate_path_length(&download_config.output_dir, &sanitized_filename) {
+                if let Err(e) = crate::metadata_storage::validate_path_length(
+                    &download_config.output_dir,
+                    &sanitized_filename,
+                ) {
                     eprintln!("⚠️  Warning: {}", e);
                 }
                 file_status.insert(
@@ -480,9 +484,10 @@ impl ArchiveFile {
     /// Validate MD5 hash of a local file
     pub fn validate_md5<P: AsRef<Path>>(&self, file_path: P) -> Result<bool> {
         let file_path_ref = file_path.as_ref();
-        
+
         // Special handling for XML files due to frequent hash mismatches at Internet Archive
-        if file_path_ref.extension()
+        if file_path_ref
+            .extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_lowercase() == "xml")
             .unwrap_or(false)
@@ -502,7 +507,7 @@ impl ArchiveFile {
     /// Returns true if the file appears to be a valid XML file
     fn validate_xml_file_alternative<P: AsRef<Path>>(&self, file_path: P) -> Result<bool> {
         use std::fs;
-        
+
         // Check if file exists and has reasonable size (not empty, not too small)
         let metadata = match fs::metadata(&file_path) {
             Ok(meta) => meta,
@@ -510,7 +515,7 @@ impl ArchiveFile {
         };
 
         let file_size = metadata.len();
-        
+
         // XML files should have some minimum size (at least basic XML structure)
         if file_size < 10 {
             return Ok(false);
@@ -527,7 +532,7 @@ impl ArchiveFile {
                 } else {
                     expected_size - file_size
                 };
-                
+
                 // Allow up to 10% size difference or 100 bytes, whichever is larger
                 let tolerance = std::cmp::max(expected_size / 10, 100);
                 if size_difference > tolerance {
@@ -544,8 +549,7 @@ impl ArchiveFile {
 
         // Basic XML validation - should start with XML declaration or opening tag
         let trimmed = file_content.trim();
-        let is_xml_like = trimmed.starts_with("<?xml") || 
-                         trimmed.starts_with('<');
+        let is_xml_like = trimmed.starts_with("<?xml") || trimmed.starts_with('<');
 
         Ok(is_xml_like)
     }
@@ -819,16 +823,15 @@ pub fn sanitize_filename_for_filesystem(filename: &str) -> String {
 
     // Handle Windows reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
     let reserved_names = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
-        "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4",
-        "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
-    
+
     // Split filename and extension
     if let Some(dot_pos) = sanitized.rfind('.') {
         let (name_part, ext_part) = sanitized.split_at(dot_pos);
         let name_upper = name_part.to_uppercase();
-        
+
         if reserved_names.contains(&name_upper.as_str()) {
             sanitized = format!("{}_file{}", name_part, ext_part);
         }
@@ -865,10 +868,10 @@ pub fn sanitize_filename_for_filesystem(filename: &str) -> String {
 /// This function checks path length and suggests directory name truncation if needed.
 pub fn validate_path_length(output_dir: &str, filename: &str) -> Result<()> {
     let full_path = format!("{}/{}", output_dir, filename);
-    
+
     // Windows MAX_PATH limit
     const MAX_PATH_LENGTH: usize = 260;
-    
+
     if full_path.len() > MAX_PATH_LENGTH {
         return Err(IaGetError::FileSystem(format!(
             "Path too long for Windows compatibility: {} characters (max: {}). \
@@ -879,7 +882,7 @@ pub fn validate_path_length(output_dir: &str, filename: &str) -> Result<()> {
             full_path
         )));
     }
-    
+
     Ok(())
 }
 
@@ -1105,15 +1108,12 @@ mod tests {
 
     #[test]
     fn test_xml_alternative_validation() {
-        use tempfile::Builder;
         use std::io::Write;
+        use tempfile::Builder;
 
         // Create temporary XML file with .xml extension
-        let mut temp_file = Builder::new()
-            .suffix(".xml")
-            .tempfile()
-            .unwrap();
-        
+        let mut temp_file = Builder::new().suffix(".xml").tempfile().unwrap();
+
         let xml_content = r#"<?xml version="1.0" encoding="UTF-8"?>
 <root>
     <item>test</item>
