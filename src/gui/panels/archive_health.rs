@@ -4,10 +4,10 @@
 //! and compliance information for responsible usage.
 
 use crate::{
-    archive_api::{ArchiveOrgApiClient, ApiStats, get_archive_servers},
+    archive_api::{get_archive_servers, ApiStats, ArchiveOrgApiClient},
     constants::get_user_agent,
 };
-use egui::{Context, Ui, Color32, RichText};
+use egui::{Color32, Context, RichText, Ui};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,12 +17,12 @@ pub struct ArchiveHealthPanel {
     api_client: Option<Arc<Mutex<ArchiveOrgApiClient>>>,
     last_test_time: Option<Instant>,
     test_interval: Duration,
-    
+
     // Test results
     connection_status: ConnectionStatus,
     api_stats: Option<ApiStats>,
     servers: Vec<String>,
-    
+
     // UI state
     auto_refresh: bool,
     #[allow(dead_code)]
@@ -82,23 +82,23 @@ impl ArchiveHealthPanel {
         }
 
         self.init_api_client();
-        
+
         if let Some(_api_client_arc) = self.api_client.clone() {
             self.test_in_progress = true;
             self.connection_status = ConnectionStatus::Testing;
-            
+
             let ctx_clone = ctx.clone();
-            
+
             // Spawn async task (in real implementation, use proper async runtime)
             std::thread::spawn(move || {
                 // In a real async implementation, we would use tokio::spawn here
                 // For now, simulate the test with a delay
                 std::thread::sleep(Duration::from_millis(1000));
-                
+
                 // Simulate test result (since we can't do real HTTP in this context)
                 // In real implementation, this would be an actual API call
                 let _test_result = ConnectionStatus::Success("200 OK".to_string());
-                
+
                 // Request repaint to update UI
                 ctx_clone.request_repaint();
             });
@@ -110,7 +110,7 @@ impl ArchiveHealthPanel {
         if !self.auto_refresh || self.test_in_progress {
             return false;
         }
-        
+
         match self.last_test_time {
             Some(last_time) => last_time.elapsed() >= self.test_interval,
             None => true,
@@ -124,7 +124,7 @@ impl ArchiveHealthPanel {
                 self.api_stats = Some(api_client.get_stats());
                 self.test_in_progress = false;
                 self.last_test_time = Some(Instant::now());
-                
+
                 // Simulate successful connection for demo
                 if matches!(self.connection_status, ConnectionStatus::Testing) {
                     self.connection_status = ConnectionStatus::Success("200 OK".to_string());
@@ -142,7 +142,7 @@ impl ArchiveHealthPanel {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.auto_refresh, "Auto-refresh");
             ui.label(format!("(every {} seconds)", self.test_interval.as_secs()));
-            
+
             if ui.button("🔄 Test Now").clicked() {
                 self.test_connectivity(ui.ctx());
             }
@@ -154,7 +154,7 @@ impl ArchiveHealthPanel {
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("🔗 Connection Status:").strong());
-                
+
                 match &self.connection_status {
                     ConnectionStatus::Unknown => {
                         ui.label(RichText::new("Unknown").color(Color32::GRAY));
@@ -180,17 +180,25 @@ impl ArchiveHealthPanel {
             ui.group(|ui| {
                 ui.label(RichText::new("📊 API Session Statistics").strong());
                 ui.separator();
-                
+
                 ui.horizontal(|ui| {
                     ui.label("Requests:");
-                    ui.label(RichText::new(stats.request_count.to_string()).color(Color32::LIGHT_BLUE));
+                    ui.label(
+                        RichText::new(stats.request_count.to_string()).color(Color32::LIGHT_BLUE),
+                    );
                 });
-                
+
                 ui.horizontal(|ui| {
                     ui.label("Session Duration:");
-                    ui.label(RichText::new(format!("{:.1} minutes", stats.session_duration.as_secs_f64() / 60.0)).color(Color32::LIGHT_BLUE));
+                    ui.label(
+                        RichText::new(format!(
+                            "{:.1} minutes",
+                            stats.session_duration.as_secs_f64() / 60.0
+                        ))
+                        .color(Color32::LIGHT_BLUE),
+                    );
                 });
-                
+
                 ui.horizontal(|ui| {
                     ui.label("Average Rate:");
                     let rate_color = if stats.average_requests_per_minute < 30.0 {
@@ -198,7 +206,10 @@ impl ArchiveHealthPanel {
                     } else {
                         Color32::YELLOW
                     };
-                    ui.label(RichText::new(format!("{:.1} req/min", stats.average_requests_per_minute)).color(rate_color));
+                    ui.label(
+                        RichText::new(format!("{:.1} req/min", stats.average_requests_per_minute))
+                            .color(rate_color),
+                    );
                 });
             });
         }
@@ -209,7 +220,7 @@ impl ArchiveHealthPanel {
         ui.group(|ui| {
             ui.label(RichText::new("🌐 Available Servers").strong());
             ui.separator();
-            
+
             for (i, server) in self.servers.iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.label(format!("{}.", i + 1));
@@ -224,13 +235,21 @@ impl ArchiveHealthPanel {
         ui.group(|ui| {
             ui.label(RichText::new("🎯 Health Assessment").strong());
             ui.separator();
-            
+
             if let Some(api_client_arc) = &self.api_client {
                 if let Ok(api_client) = api_client_arc.try_lock() {
                     if api_client.is_rate_healthy() {
-                        ui.label(RichText::new("✅ Request rate is healthy and Archive.org compliant").color(Color32::GREEN));
+                        ui.label(
+                            RichText::new("✅ Request rate is healthy and Archive.org compliant")
+                                .color(Color32::GREEN),
+                        );
                     } else {
-                        ui.label(RichText::new("⚠️ Request rate is high - consider slowing down requests").color(Color32::YELLOW));
+                        ui.label(
+                            RichText::new(
+                                "⚠️ Request rate is high - consider slowing down requests",
+                            )
+                            .color(Color32::YELLOW),
+                        );
                     }
                 } else {
                     ui.label(RichText::new("⏳ Checking health status...").color(Color32::GRAY));
@@ -246,22 +265,26 @@ impl ArchiveHealthPanel {
         ui.group(|ui| {
             ui.label(RichText::new("⚙️ Current Configuration").strong());
             ui.separator();
-            
+
             ui.horizontal(|ui| {
                 ui.label("User Agent:");
-                ui.label(RichText::new(get_user_agent()).color(Color32::LIGHT_BLUE).monospace());
+                ui.label(
+                    RichText::new(get_user_agent())
+                        .color(Color32::LIGHT_BLUE)
+                        .monospace(),
+                );
             });
-            
+
             ui.horizontal(|ui| {
                 ui.label("Default Timeout:");
                 ui.label(RichText::new("30 seconds").color(Color32::LIGHT_BLUE));
             });
-            
+
             ui.horizontal(|ui| {
                 ui.label("Min Request Delay:");
                 ui.label(RichText::new("100ms").color(Color32::LIGHT_BLUE));
             });
-            
+
             ui.horizontal(|ui| {
                 ui.label("Max Concurrent:");
                 ui.label(RichText::new("5 connections").color(Color32::LIGHT_BLUE));

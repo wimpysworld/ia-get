@@ -7,11 +7,11 @@ use std::path::PathBuf;
 use tokio::signal;
 
 use ia_get::{
-    DownloadRequest, DownloadResult, DownloadService,
+    archive_api::{get_archive_servers, ArchiveOrgApiClient},
+    constants::get_user_agent,
     filters::format_size,
     metadata_storage::DownloadState,
-    archive_api::{ArchiveOrgApiClient, get_archive_servers},
-    constants::get_user_agent,
+    DownloadRequest, DownloadResult, DownloadService,
 };
 
 /// Entry point for the ia-get CLI application
@@ -61,9 +61,7 @@ async fn main() -> Result<()> {
         .map(|values| values.map(|s| s.to_string()).collect::<Vec<_>>())
         .unwrap_or_default();
 
-    let max_file_size = matches
-        .get_one::<String>("max-size")
-        .map(|s| s.to_string());
+    let max_file_size = matches.get_one::<String>("max-size").map(|s| s.to_string());
 
     // Compression settings - enable by default as requested
     let enable_compression = !matches.get_flag("no-compress"); // Default to true unless --no-compress is specified
@@ -106,8 +104,7 @@ async fn main() -> Result<()> {
     }
 
     // Create download service
-    let service = DownloadService::new()
-        .context("Failed to create download service")?;
+    let service = DownloadService::new().context("Failed to create download service")?;
 
     // Execute download using unified API
     match service.download(request.clone(), None).await {
@@ -125,8 +122,13 @@ async fn main() -> Result<()> {
                     println!("\n{} Archive.org API Usage:", "📊".blue().bold());
                     println!("  {}", stats);
                     if verbose {
-                        println!("  Session healthy: {}", 
-                            if stats.average_requests_per_minute < 30.0 { "✅ Yes" } else { "⚠️ High rate" }
+                        println!(
+                            "  Session healthy: {}",
+                            if stats.average_requests_per_minute < 30.0 {
+                                "✅ Yes"
+                            } else {
+                                "⚠️ High rate"
+                            }
                         );
                     }
                 }
@@ -151,7 +153,10 @@ async fn main() -> Result<()> {
                 println!("\n{} Archive Information:", "📊".blue().bold());
                 println!("  Identifier: {}", session.identifier);
                 println!("  Total files: {}", session.archive_metadata.files.len());
-                println!("  Archive size: {}", format_size(session.archive_metadata.item_size));
+                println!(
+                    "  Archive size: {}",
+                    format_size(session.archive_metadata.item_size)
+                );
                 println!("  Server: {}", session.archive_metadata.server);
                 println!(
                     "  Available servers: {}",
@@ -163,14 +168,21 @@ async fn main() -> Result<()> {
                 println!("  Selected: {} files", session.requested_files.len());
 
                 for (i, filename) in session.requested_files.iter().enumerate().take(10) {
-                    println!("  {:<3} {}", format!("{}.", i + 1).dimmed(), filename.green());
+                    println!(
+                        "  {:<3} {}",
+                        format!("{}.", i + 1).dimmed(),
+                        filename.green()
+                    );
                 }
                 if session.requested_files.len() > 10 {
-                    println!("  ... and {} more files", session.requested_files.len() - 10);
+                    println!(
+                        "  ... and {} more files",
+                        session.requested_files.len() - 10
+                    );
                 }
 
                 println!("\n{} Use without --dry-run to download", "💡".yellow());
-                
+
                 // Display Archive.org API statistics for dry run too
                 if let Some(stats) = api_stats {
                     println!("\n{} Archive.org API Usage:", "📊".blue().bold());
@@ -207,7 +219,10 @@ async fn display_api_health() -> Result<()> {
 
     // Test basic connectivity
     println!("{} Testing Archive.org connectivity...", "🔗".cyan());
-    match api_client.make_request("https://archive.org/metadata/nasa").await {
+    match api_client
+        .make_request("https://archive.org/metadata/nasa")
+        .await
+    {
         Ok(response) => {
             println!("  ✅ Connection successful (status: {})", response.status());
         }
@@ -220,19 +235,27 @@ async fn display_api_health() -> Result<()> {
     println!("\n{} Available Archive.org Servers:", "🌐".green().bold());
     let servers = get_archive_servers();
     for (i, server) in servers.iter().enumerate() {
-        println!("  {:<2} {}", format!("{}.", i + 1).dimmed(), server.bright_blue());
+        println!(
+            "  {:<2} {}",
+            format!("{}.", i + 1).dimmed(),
+            server.bright_blue()
+        );
     }
 
     // Test multiple requests to show rate limiting
     println!("\n{} Testing API rate limiting...", "⏱️".yellow());
     let _start_time = std::time::Instant::now();
-    
+
     for i in 0..3 {
         let test_url = format!("https://archive.org/metadata/test{}", i);
         match api_client.make_request(&test_url).await {
             Ok(_) => {
                 let stats = api_client.get_stats();
-                println!("  Request {}: ✅ (Rate: {:.1} req/min)", i + 1, stats.average_requests_per_minute);
+                println!(
+                    "  Request {}: ✅ (Rate: {:.1} req/min)",
+                    i + 1,
+                    stats.average_requests_per_minute
+                );
             }
             Err(e) => {
                 println!("  Request {}: ❌ {}", i + 1, e);
@@ -244,7 +267,7 @@ async fn display_api_health() -> Result<()> {
     println!("\n{} API Session Statistics:", "📊".purple().bold());
     let final_stats = api_client.get_stats();
     println!("  {}", final_stats);
-    
+
     // Health assessment
     println!("\n{} Health Assessment:", "🎯".bright_green().bold());
     if api_client.is_rate_healthy() {
@@ -253,7 +276,10 @@ async fn display_api_health() -> Result<()> {
         println!("  ⚠️  Request rate is high - consider slowing down requests");
     }
 
-    println!("\n{} Archive.org API Guidelines:", "📋".bright_cyan().bold());
+    println!(
+        "\n{} Archive.org API Guidelines:",
+        "📋".bright_cyan().bold()
+    );
     println!("  • Keep concurrent connections ≤ 5 for respectful usage");
     println!("  • Include descriptive User-Agent with contact information");
     println!("  • Implement retry logic for transient failures");

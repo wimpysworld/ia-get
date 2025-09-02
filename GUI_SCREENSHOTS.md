@@ -1,4 +1,6 @@
-# ia-get GUI Screenshots and Visual Guide
+# ia-get GUI Interface Mockups
+
+**Note: These are ASCII art mockups showing the planned GUI interface design, not actual screenshots.**
 
 ## Main Window Layout
 

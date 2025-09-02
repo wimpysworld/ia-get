@@ -271,7 +271,8 @@ fn decompress_zip<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()> {
         .map_err(|e| IaGetError::FileSystem(format!("Failed to create output directory: {}", e)))?;
 
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i)
+        let mut file = archive
+            .by_index(i)
             .map_err(|e| IaGetError::Parse(format!("Failed to access ZIP entry {}: {}", i, e)))?;
 
         let outpath = match file.enclosed_name() {
@@ -281,19 +282,22 @@ fn decompress_zip<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()> {
 
         if file.name().ends_with('/') {
             // Directory
-            std::fs::create_dir_all(&outpath)
-                .map_err(|e| IaGetError::FileSystem(format!("Failed to create directory: {}", e)))?;
+            std::fs::create_dir_all(&outpath).map_err(|e| {
+                IaGetError::FileSystem(format!("Failed to create directory: {}", e))
+            })?;
         } else {
             // File
             if let Some(p) = outpath.parent() {
                 if !p.exists() {
-                    std::fs::create_dir_all(p)
-                        .map_err(|e| IaGetError::FileSystem(format!("Failed to create parent directory: {}", e)))?;
+                    std::fs::create_dir_all(p).map_err(|e| {
+                        IaGetError::FileSystem(format!("Failed to create parent directory: {}", e))
+                    })?;
                 }
             }
-            let mut outfile = File::create(&outpath)
-                .map_err(|e| IaGetError::FileSystem(format!("Failed to create output file: {}", e)))?;
-            
+            let mut outfile = File::create(&outpath).map_err(|e| {
+                IaGetError::FileSystem(format!("Failed to create output file: {}", e))
+            })?;
+
             std::io::copy(&mut file, &mut outfile)
                 .map_err(|e| IaGetError::FileSystem(format!("Failed to extract file: {}", e)))?;
         }
@@ -303,8 +307,9 @@ fn decompress_zip<P: AsRef<Path>>(input_path: P, output_dir: P) -> Result<()> {
         {
             use std::os::unix::fs::PermissionsExt;
             if let Some(mode) = file.unix_mode() {
-                std::fs::set_permissions(&outpath, std::fs::Permissions::from_mode(mode))
-                    .map_err(|e| IaGetError::FileSystem(format!("Failed to set file permissions: {}", e)))?;
+                std::fs::set_permissions(&outpath, std::fs::Permissions::from_mode(mode)).map_err(
+                    |e| IaGetError::FileSystem(format!("Failed to set file permissions: {}", e)),
+                )?;
             }
         }
     }
@@ -441,13 +446,13 @@ mod tests {
         // Create a temporary file that's not a valid ZIP
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(b"not a zip file").unwrap();
-        
+
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         // This should fail gracefully with an error
         let result = super::decompress_zip(temp_file.path(), temp_dir.path());
         assert!(result.is_err());
-        
+
         // Verify the error message indicates it's a ZIP parsing issue
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("Failed to read ZIP archive"));

@@ -33,7 +33,11 @@ pub struct JsonFile {
     #[serde(deserialize_with = "deserialize_string_to_u64_option")]
     pub size: Option<u64>,
     pub format: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_optional_string_to_u32")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_string_to_u32"
+    )]
     pub rotation: Option<u32>,
     pub md5: Option<String>,
     pub crc32: Option<String>,
@@ -235,22 +239,22 @@ where
     D: serde::Deserializer<'de>,
 {
     use serde::Deserialize;
-    
+
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum StringOrNumber {
         String(String),
         Number(u32),
     }
-    
+
     match Option::<StringOrNumber>::deserialize(deserializer)? {
         Some(StringOrNumber::String(s)) => {
             if s.is_empty() {
                 Ok(None)
             } else {
-                s.parse::<u32>()
-                    .map(Some)
-                    .map_err(|_| serde::de::Error::custom(format!("could not parse '{}' as u32", s)))
+                s.parse::<u32>().map(Some).map_err(|_| {
+                    serde::de::Error::custom(format!("could not parse '{}' as u32", s))
+                })
             }
         }
         Some(StringOrNumber::Number(n)) => Ok(Some(n)),
@@ -386,11 +390,17 @@ mod tests {
         }"#;
 
         let result = parse_json_files(luigi_json);
-        assert!(result.is_ok(), "Luigi JSON should parse successfully now with string-to-number conversion");
+        assert!(
+            result.is_ok(),
+            "Luigi JSON should parse successfully now with string-to-number conversion"
+        );
 
         let metadata = result.unwrap();
         assert_eq!(metadata.files.len(), 1);
-        assert_eq!(metadata.files[0].name(), "Life_with_Luigi_49-02-27_ep024_Luigi_Needs_Drivers_License.mp3");
+        assert_eq!(
+            metadata.files[0].name(),
+            "Life_with_Luigi_49-02-27_ep024_Luigi_Needs_Drivers_License.mp3"
+        );
         assert_eq!(metadata.files[0].rotation, Some(0)); // This would have failed before with "invalid type: string "0", expected u32"
         assert_eq!(metadata.files_count, 1);
         assert_eq!(metadata.item_last_updated, 1756778586);

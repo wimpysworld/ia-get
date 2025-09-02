@@ -34,7 +34,7 @@ impl ArchiveOrgApiClient {
         if let Some(last_time) = self.last_request_time {
             let elapsed = last_time.elapsed();
             let min_delay = Duration::from_millis(MIN_REQUEST_DELAY_MS);
-            
+
             if elapsed < min_delay {
                 let wait_time = min_delay - elapsed;
                 sleep(wait_time).await;
@@ -42,7 +42,8 @@ impl ArchiveOrgApiClient {
         }
 
         // Add Archive.org-specific headers
-        let response = self.client
+        let response = self
+            .client
             .get(url)
             .header("Accept", "application/json, text/plain, */*")
             .header("Accept-Language", "en-US,en;q=0.9")
@@ -79,36 +80,28 @@ impl ArchiveOrgApiClient {
                     wait_time, url
                 )))
             }
-            reqwest::StatusCode::SERVICE_UNAVAILABLE => {
-                Err(IaGetError::Network(format!(
-                    "Archive.org service temporarily unavailable. URL: {}",
-                    url
-                )))
-            }
-            reqwest::StatusCode::FORBIDDEN => {
-                Err(IaGetError::Network(format!(
-                    "Access forbidden. This item may be restricted or require authentication. URL: {}",
-                    url
-                )))
-            }
-            reqwest::StatusCode::NOT_FOUND => {
-                Err(IaGetError::Network(format!(
-                    "Archive item not found. The identifier may be incorrect. URL: {}",
-                    url
-                )))
-            }
-            status if status.is_server_error() => {
-                Err(IaGetError::Network(format!(
-                    "Archive.org server error ({}). This is likely temporary. URL: {}",
-                    status.as_u16(), url
-                )))
-            }
-            status if status.is_client_error() => {
-                Err(IaGetError::Network(format!(
-                    "Client error ({}). Check your request format. URL: {}",
-                    status.as_u16(), url
-                )))
-            }
+            reqwest::StatusCode::SERVICE_UNAVAILABLE => Err(IaGetError::Network(format!(
+                "Archive.org service temporarily unavailable. URL: {}",
+                url
+            ))),
+            reqwest::StatusCode::FORBIDDEN => Err(IaGetError::Network(format!(
+                "Access forbidden. This item may be restricted or require authentication. URL: {}",
+                url
+            ))),
+            reqwest::StatusCode::NOT_FOUND => Err(IaGetError::Network(format!(
+                "Archive item not found. The identifier may be incorrect. URL: {}",
+                url
+            ))),
+            status if status.is_server_error() => Err(IaGetError::Network(format!(
+                "Archive.org server error ({}). This is likely temporary. URL: {}",
+                status.as_u16(),
+                url
+            ))),
+            status if status.is_client_error() => Err(IaGetError::Network(format!(
+                "Client error ({}). Check your request format. URL: {}",
+                status.as_u16(),
+                url
+            ))),
             _ => Ok(()),
         }
     }
@@ -200,7 +193,10 @@ pub fn validate_identifier(identifier: &str) -> Result<()> {
     }
 
     // Check for valid characters
-    if !identifier.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+    if !identifier
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
         return Err(IaGetError::UrlFormat(
             "Archive identifier contains invalid characters. Only letters, numbers, hyphens, underscores, and periods are allowed".to_string(),
         ));
@@ -209,7 +205,7 @@ pub fn validate_identifier(identifier: &str) -> Result<()> {
     // Check start/end characters
     let first_char = identifier.chars().next().unwrap();
     let last_char = identifier.chars().last().unwrap();
-    
+
     if !first_char.is_alphanumeric() || !last_char.is_alphanumeric() {
         return Err(IaGetError::UrlFormat(
             "Archive identifier must start and end with letters or numbers".to_string(),

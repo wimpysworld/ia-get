@@ -4,7 +4,7 @@
 //! ensuring both CLI and GUI use exactly the same API and business logic.
 
 use crate::{
-    archive_api::{validate_identifier, ArchiveOrgApiClient, ApiStats},
+    archive_api::{validate_identifier, ApiStats, ArchiveOrgApiClient},
     config::Config,
     constants::get_user_agent,
     enhanced_downloader::ArchiveDownloader,
@@ -83,14 +83,10 @@ impl DownloadRequest {
             concurrent_downloads: config.concurrent_downloads,
             enable_compression: config.default_compress,
             auto_decompress: config.default_decompress,
-            decompress_formats: config.default_decompress_formats
+            decompress_formats: config
+                .default_decompress_formats
                 .as_ref()
-                .map(|formats| {
-                    formats
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .collect()
-                })
+                .map(|formats| formats.split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default(),
             dry_run: config.default_dry_run,
             verbose: config.default_verbose,
@@ -107,7 +103,8 @@ impl DownloadRequest {
             Some(parse_size_string(&self.min_file_size)?)
         };
 
-        let max_size = self.max_file_size
+        let max_size = self
+            .max_file_size
             .as_ref()
             .map(|s| parse_size_string(s))
             .transpose()?;
@@ -266,34 +263,37 @@ impl DownloadService {
         if request.dry_run {
             // For dry run, just return the file list information
             let api_stats = api_client.get_stats();
-            return Ok(DownloadResult::Success(Box::new(DownloadSession {
-                original_url: archive_url.clone(),
-                identifier: request.identifier.clone(),
-                archive_metadata: metadata,
-                download_config: DownloadConfig {
-                    output_dir: request.output_dir.to_string_lossy().to_string(),
-                    max_concurrent: request.concurrent_downloads as u32,
-                    format_filters: request.include_formats,
-                    min_size,
-                    max_size,
-                    verify_md5: request.verify_md5,
-                    preserve_mtime: request.preserve_mtime,
-                    user_agent: get_user_agent(),
-                    enable_compression: request.enable_compression,
-                    auto_decompress: request.auto_decompress,
-                    decompress_formats: request.decompress_formats.clone(),
-                },
-                requested_files: filtered_files.iter().map(|f| f.name.clone()).collect(),
-                file_status: std::collections::HashMap::new(),
-                session_start: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-                last_updated: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-            }), Some(api_stats)));
+            return Ok(DownloadResult::Success(
+                Box::new(DownloadSession {
+                    original_url: archive_url.clone(),
+                    identifier: request.identifier.clone(),
+                    archive_metadata: metadata,
+                    download_config: DownloadConfig {
+                        output_dir: request.output_dir.to_string_lossy().to_string(),
+                        max_concurrent: request.concurrent_downloads as u32,
+                        format_filters: request.include_formats,
+                        min_size,
+                        max_size,
+                        verify_md5: request.verify_md5,
+                        preserve_mtime: request.preserve_mtime,
+                        user_agent: get_user_agent(),
+                        enable_compression: request.enable_compression,
+                        auto_decompress: request.auto_decompress,
+                        decompress_formats: request.decompress_formats.clone(),
+                    },
+                    requested_files: filtered_files.iter().map(|f| f.name.clone()).collect(),
+                    file_status: std::collections::HashMap::new(),
+                    session_start: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                    last_updated: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                }),
+                Some(api_stats),
+            ));
         }
 
         // Create download configuration
@@ -358,8 +358,11 @@ impl DownloadService {
         {
             Ok(session) => {
                 let final_api_stats = api_client.get_stats();
-                Ok(DownloadResult::Success(Box::new(session), Some(final_api_stats)))
-            },
+                Ok(DownloadResult::Success(
+                    Box::new(session),
+                    Some(final_api_stats),
+                ))
+            }
             Err(e) => Ok(DownloadResult::Error(format!("Download failed: {}", e))),
         }
     }
@@ -437,7 +440,7 @@ impl DownloadService {
     /// Display download summary for CLI usage
     pub fn display_download_summary(session: &DownloadSession, request: &DownloadRequest) {
         use colored::Colorize;
-        
+
         let completed_files = session
             .file_status
             .values()
@@ -536,9 +539,11 @@ mod tests {
 
     #[test]
     fn test_parse_sizes() {
-        let mut request = DownloadRequest::default();
-        request.min_file_size = "1MB".to_string();
-        request.max_file_size = Some("100MB".to_string());
+        let request = DownloadRequest {
+            min_file_size: "1MB".to_string(),
+            max_file_size: Some("100MB".to_string()),
+            ..Default::default()
+        };
 
         let (min_size, max_size) = request.get_parsed_sizes().unwrap();
         assert_eq!(min_size, Some(1_048_576)); // 1 MB in binary (1024^2)

@@ -174,14 +174,11 @@ impl IaGetApp {
                 .map(|s| s.trim().to_string())
                 .collect()
         };
-        let decompress_formats: Vec<String> = self.config.default_decompress_formats
+        let decompress_formats: Vec<String> = self
+            .config
+            .default_decompress_formats
             .as_ref()
-            .map(|formats| {
-                formats
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect()
-            })
+            .map(|formats| formats.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default();
 
         // Create unified download request using from_config
@@ -205,9 +202,7 @@ impl IaGetApp {
         if let Some(handle) = &self.rt_handle {
             let ctx_clone = ctx.clone();
             handle.spawn(async move {
-                let _result = service
-                    .download(request, Some(progress_callback))
-                    .await;
+                let _result = service.download(request, Some(progress_callback)).await;
 
                 // Request repaint when done
                 ctx_clone.request_repaint();
@@ -377,7 +372,11 @@ impl IaGetApp {
         if self.config.default_decompress {
             ui.horizontal(|ui| {
                 ui.label("Decompress Formats:");
-                let mut formats = self.config.default_decompress_formats.clone().unwrap_or_default();
+                let mut formats = self
+                    .config
+                    .default_decompress_formats
+                    .clone()
+                    .unwrap_or_default();
                 if ui.text_edit_singleline(&mut formats).changed() {
                     self.config.default_decompress_formats = if formats.is_empty() {
                         None
@@ -509,11 +508,14 @@ impl IaGetApp {
                         ui.add_space(10.0);
                         ui.label("High-performance file downloader for Internet Archive");
                         ui.add_space(10.0);
-                        ui.hyperlink_to("GitHub Repository", "https://github.com/Gameaday/ia-get-cli");
+                        ui.hyperlink_to(
+                            "GitHub Repository",
+                            "https://github.com/Gameaday/ia-get-cli",
+                        );
                         ui.add_space(10.0);
                         ui.label("Built with Rust and egui");
                         ui.add_space(20.0);
-                        
+
                         if ui.button("Close").clicked() {
                             self.show_about_dialog = false;
                         }
@@ -531,17 +533,18 @@ impl IaGetApp {
                     ui.vertical(|ui| {
                         ui.label("Enter Internet Archive identifier or URL:");
                         ui.add_space(10.0);
-                        
+
                         let mut temp_identifier = self.archive_identifier.clone();
-                        ui.add(egui::TextEdit::singleline(&mut temp_identifier)
-                            .hint_text("e.g., commute_test or https://archive.org/details/commute_test"));
-                        
+                        ui.add(egui::TextEdit::singleline(&mut temp_identifier).hint_text(
+                            "e.g., commute_test or https://archive.org/details/commute_test",
+                        ));
+
                         ui.add_space(10.0);
                         ui.label("Examples:");
                         ui.label("• commute_test");
                         ui.label("• https://archive.org/details/commute_test");
                         ui.label("• https://archive.org/download/commute_test/");
-                        
+
                         ui.add_space(20.0);
                         ui.horizontal(|ui| {
                             if ui.button("Open").clicked() {
@@ -549,7 +552,7 @@ impl IaGetApp {
                                 self.current_tab = AppTab::Download;
                                 self.show_open_dialog = false;
                             }
-                            
+
                             if ui.button("Cancel").clicked() {
                                 self.show_open_dialog = false;
                             }
@@ -582,7 +585,7 @@ impl eframe::App for IaGetApp {
         }
 
         self.render_main_ui(ctx, frame);
-        
+
         // Handle dialogs
         self.render_dialogs(ctx);
     }

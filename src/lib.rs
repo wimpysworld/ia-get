@@ -55,8 +55,8 @@ pub mod compression;
 pub mod concurrent_simple;
 pub mod config;
 pub mod constants;
-pub mod downloader;
 pub mod download_service;
+pub mod downloader;
 pub mod downloads;
 pub mod enhanced_downloader;
 pub mod error;
@@ -75,7 +75,7 @@ pub mod utils;
 pub use error::{IaGetError, Result};
 
 // Re-export commonly used functions
-pub use archive_api::{validate_identifier, ArchiveOrgApiClient, ApiStats};
+pub use archive_api::{validate_identifier, ApiStats, ArchiveOrgApiClient};
 pub use cli::Cli;
 pub use concurrent_simple::{DownloadStats, FileDownloadResult, SimpleConcurrentDownloader};
 pub use constants::get_user_agent;

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Complete Internet Archive metadata response structure
-/// Based on https://archive.org/developers/md-read.html
+/// Based on <https://archive.org/developers/md-read.html>
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ArchiveMetadata {
     /// Timestamp when the item was created

@@ -6,7 +6,7 @@
 //!
 //! ## API Reference
 //!
-//! Internet Archive Metadata API: https://archive.org/developers/md-read.html
+//! Internet Archive Metadata API: <https://archive.org/developers/md-read.html>
 //!
 //! ## Usage
 //!

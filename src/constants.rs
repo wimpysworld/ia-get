@@ -4,7 +4,7 @@
 //! optimized for Internet Archive API compliance.
 
 /// Generate a compliant user agent string following Internet Archive recommendations
-/// 
+///
 /// Format follows Mozilla/RFC standards while being descriptive enough for IA server logs:
 /// - Tool name and version
 /// - Contact information (GitHub repo)
