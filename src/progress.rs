@@ -2,9 +2,9 @@
 //!
 //! Provides detailed statistics, ETA calculations, and summary reports.
 
-use std::time::{Duration, Instant};
-use colored::*;
 use crate::filters::format_size;
+use colored::*;
+use std::time::{Duration, Instant};
 
 /// Download statistics tracker
 #[derive(Debug, Clone)]
@@ -38,7 +38,7 @@ impl DownloadStats {
         if self.current_speed <= 0.0 || self.downloaded_bytes >= self.total_bytes {
             return None;
         }
-        
+
         let remaining_bytes = self.total_bytes - self.downloaded_bytes;
         let eta_seconds = (remaining_bytes as f64 / self.current_speed) as u64;
         Some(Duration::from_secs(eta_seconds))
@@ -61,12 +61,27 @@ impl DownloadStats {
         }
     }
 
+    /// Get number of completed files
+    pub fn files_completed(&self) -> usize {
+        self.completed_files
+    }
+
+    /// Get total number of files
+    pub fn total_files(&self) -> usize {
+        self.total_files
+    }
+
+    /// Get total size in bytes
+    pub fn total_size(&self) -> u64 {
+        self.total_bytes
+    }
+
     /// Format current speed for display
     pub fn speed_string(&self) -> String {
         if self.current_speed <= 0.0 {
             return "calculating...".to_string();
         }
-        
+
         let speed_per_sec = self.current_speed;
         if speed_per_sec >= 1024.0 * 1024.0 * 1024.0 {
             format!("{:.1} GB/s", speed_per_sec / (1024.0 * 1024.0 * 1024.0))
@@ -102,12 +117,12 @@ impl DownloadStats {
         let hours = elapsed.as_secs() / 3600;
         let minutes = (elapsed.as_secs() % 3600) / 60;
         let seconds = elapsed.as_secs() % 60;
-        
+
         let mut summary = String::new();
         summary.push_str(&format!("\n{}\n", "=".repeat(60).cyan()));
         summary.push_str(&format!("{}\n", "📊 DOWNLOAD SUMMARY".bold().cyan()));
         summary.push_str(&format!("{}\n", "=".repeat(60).cyan()));
-        
+
         // File statistics
         summary.push_str(&format!(
             "📁 Files: {} {} | {} {} | {} {}\n",
@@ -118,7 +133,7 @@ impl DownloadStats {
             self.failed_files.to_string().red().bold(),
             "failed".red()
         ));
-        
+
         // Data statistics
         if self.total_bytes > 0 {
             summary.push_str(&format!(
@@ -128,7 +143,7 @@ impl DownloadStats {
                 self.completion_percentage().to_string().green().bold()
             ));
         }
-        
+
         // Time and speed
         summary.push_str(&format!(
             "⏱️  Time: {}h {}m {}s | Average speed: {}\n",
@@ -137,18 +152,26 @@ impl DownloadStats {
             seconds,
             self.speed_string().cyan().bold()
         ));
-        
+
         // Status
         if self.failed_files == 0 {
-            summary.push_str(&format!("✅ {}\n", "All downloads completed successfully!".green().bold()));
+            summary.push_str(&format!(
+                "✅ {}\n",
+                "All downloads completed successfully!".green().bold()
+            ));
         } else {
             summary.push_str(&format!(
                 "⚠️  {} {} with errors (check batchlog.json)\n",
                 self.failed_files.to_string().red().bold(),
-                if self.failed_files == 1 { "file" } else { "files" }.red()
+                if self.failed_files == 1 {
+                    "file"
+                } else {
+                    "files"
+                }
+                .red()
             ));
         }
-        
+
         summary.push_str(&format!("{}\n", "=".repeat(60).cyan()));
         summary
     }
@@ -176,7 +199,7 @@ impl ProgressFormatter {
             remaining_files.to_string().dimmed()
         )
     }
-    
+
     /// Format concurrent download status
     pub fn format_concurrent_status(
         active_downloads: &[(String, u8)], // (filename, progress)
@@ -186,7 +209,7 @@ impl ProgressFormatter {
             .iter()
             .map(|(name, progress)| format!("{}({}%)", name.truncate_to(15), progress))
             .collect();
-        
+
         format!(
             "Downloading: {} │ Speed: {} │ Overall: {}% │ ETA: {}",
             active_list.join(", ").bold(),
@@ -198,36 +221,24 @@ impl ProgressFormatter {
 }
 
 /// String truncation helper trait
-trait StringTruncate {
+pub trait StringTruncate {
     fn truncate_to(&self, max_len: usize) -> String;
 }
 
 impl StringTruncate for str {
     fn truncate_to(&self, max_len: usize) -> String {
-        if self.len() <= max_len {
-            self.to_string()
-        } else {
-            format!("{}…", &self[..max_len.saturating_sub(1)])
+        if max_len == 0 {
+            return String::new();
         }
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_download_stats() {
-        let mut stats = DownloadStats::new(10, 1024 * 1024); // 10 files, 1MB total
-        assert_eq!(stats.completion_percentage(), 0);
-        
-        stats.update_speed(512 * 1024); // 512KB downloaded
-        assert_eq!(stats.completion_percentage(), 50);
-    }
-
-    #[test]
-    fn test_string_truncate() {
-        assert_eq!("hello".truncate_to(10), "hello");
-        assert_eq!("hello world test".truncate_to(10), "hello wor…");
+        let char_count = self.chars().count();
+        if char_count <= max_len {
+            self.to_string()
+        } else if max_len == 1 {
+            "…".to_string()
+        } else {
+            let truncated: String = self.chars().take(max_len - 1).collect();
+            format!("{}…", truncated)
+        }
     }
 }

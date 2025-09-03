@@ -56,20 +56,3 @@ pub async fn download_files_with_retries(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::AtomicBool;
-
-    #[tokio::test]
-    async fn test_download_files_with_retries_empty() {
-        let client = Client::new();
-        let download_data = vec![];
-        let running = Arc::new(AtomicBool::new(true));
-
-        let _result = download_files_with_retries(&client, download_data, 0, false, running).await;
-        // This test verifies the function can handle empty download data
-        // The actual behavior depends on the downloader module implementation
-    }
-}

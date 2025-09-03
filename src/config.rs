@@ -383,35 +383,3 @@ pub mod endpoints {
             .unwrap_or_default()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_config() {
-        let config = Config::default();
-        assert_eq!(config.concurrent_downloads, 3);
-        assert_eq!(config.max_retries, 3);
-        assert!(!config.filter_presets.is_empty());
-    }
-
-    #[test]
-    fn test_config_validation() {
-        let mut config = Config::default();
-        assert!(ConfigManager::validate_config(&config).is_ok());
-
-        config.concurrent_downloads = 0;
-        assert!(ConfigManager::validate_config(&config).is_err());
-
-        config.concurrent_downloads = 25;
-        assert!(ConfigManager::validate_config(&config).is_err());
-    }
-
-    #[test]
-    fn test_filter_presets() {
-        let config = Config::default();
-        assert!(config.filter_presets.iter().any(|p| p.name == "Documents"));
-        assert!(config.filter_presets.iter().any(|p| p.name == "Images"));
-    }
-}

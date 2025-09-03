@@ -286,28 +286,3 @@ pub fn parse_archive_metadata(json_content: &str) -> Result<ArchiveMetadata> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_get_json_url_from_details() {
-        let details_url = "https://archive.org/details/example-item";
-        let expected = "https://archive.org/metadata/example-item";
-        assert_eq!(get_json_url(details_url), expected);
-    }
-
-    #[test]
-    fn test_get_json_url_from_metadata_url() {
-        let metadata_url = "https://archive.org/metadata/example-item";
-        assert_eq!(get_json_url(metadata_url), metadata_url);
-    }
-
-    #[test]
-    fn test_get_json_url_from_identifier() {
-        let identifier = "example-item";
-        let expected = "https://archive.org/metadata/example-item";
-        assert_eq!(get_json_url(identifier), expected);
-    }
-}

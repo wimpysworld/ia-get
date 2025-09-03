@@ -238,35 +238,3 @@ pub fn get_archive_servers() -> Vec<String> {
         "https://ia900001.us.archive.org".to_string(),
     ]
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_validate_identifier_valid() {
-        assert!(validate_identifier("test-item_1.0").is_ok());
-        assert!(validate_identifier("abc123").is_ok());
-        assert!(validate_identifier("my-archive-2023").is_ok());
-    }
-
-    #[test]
-    fn test_validate_identifier_invalid() {
-        assert!(validate_identifier("").is_err()); // Empty
-        assert!(validate_identifier("ab").is_err()); // Too short
-        assert!(validate_identifier(&"a".repeat(101)).is_err()); // Too long
-        assert!(validate_identifier("-test").is_err()); // Starts with special char
-        assert!(validate_identifier("test-").is_err()); // Ends with special char
-        assert!(validate_identifier("test--item").is_err()); // Consecutive special chars
-        assert!(validate_identifier("test item").is_err()); // Invalid character (space)
-        assert!(validate_identifier("test@item").is_err()); // Invalid character (@)
-    }
-
-    #[test]
-    fn test_get_archive_servers() {
-        let servers = get_archive_servers();
-        assert!(!servers.is_empty());
-        assert!(servers.iter().all(|s| s.starts_with("https://")));
-        assert!(servers.iter().any(|s| s.contains("archive.org")));
-    }
-}

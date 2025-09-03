@@ -1,13 +1,14 @@
 //! Main entry point for ia-get CLI application
 
 use anyhow::{Context, Result};
-use clap::{Arg, ArgAction, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command};
 use colored::Colorize;
 use std::path::PathBuf;
 use tokio::signal;
 
 use ia_get::{
     archive_api::{get_archive_servers, ArchiveOrgApiClient},
+    cli::SourceType,
     constants::get_user_agent,
     filters::format_size,
     metadata_storage::{sanitize_filename_for_filesystem, DownloadState},
@@ -228,37 +229,6 @@ async fn main() -> Result<()> {
 
     let max_file_size = matches.get_one::<String>("max-size").map(|s| s.to_string());
 
-    // Parse source filtering options
-    use ia_get::cli::SourceType;
-    let source_types = if let Some(types) = matches.get_many::<String>("source-types") {
-        // Explicit source types provided
-        types
-            .filter_map(|s| match s.as_str() {
-                "original" => Some(SourceType::Original),
-                "derivative" => Some(SourceType::Derivative),
-                "metadata" => Some(SourceType::Metadata),
-                _ => None,
-            })
-            .collect()
-    } else {
-        // Use convenience flags
-        let mut types = vec![SourceType::Original]; // Always include original by default
-
-        if matches.get_flag("include-derivatives") {
-            types.push(SourceType::Derivative);
-        }
-        if matches.get_flag("include-metadata") {
-            types.push(SourceType::Metadata);
-        }
-
-        // If original-only is explicitly set, only include original
-        if matches.get_flag("original-only") {
-            types = vec![SourceType::Original];
-        }
-
-        types
-    };
-
     // Compression settings - enable by default as requested
     let enable_compression = !matches.get_flag("no-compress"); // Default to true unless --no-compress is specified
     let auto_decompress = matches.get_flag("decompress");
@@ -284,7 +254,7 @@ async fn main() -> Result<()> {
         preserve_mtime: true,
         verbose,
         resume: true,
-        source_types, // Add source filtering from parsed arguments
+        source_types: get_source_types_from_matches(&matches),
     };
 
     println!(
@@ -490,6 +460,42 @@ async fn display_api_health() -> Result<()> {
     println!("  Max Concurrent: 5 connections");
 
     Ok(())
+}
+
+/// Extract source types from CLI matches
+fn get_source_types_from_matches(matches: &ArgMatches) -> Vec<SourceType> {
+    // Handle convenience flags first
+    if matches.get_flag("original-only") {
+        return vec![SourceType::Original];
+    }
+
+    let mut types = vec![SourceType::Original]; // Always include originals by default
+
+    if matches.get_flag("include-derivatives") {
+        types.push(SourceType::Derivative);
+    }
+
+    if matches.get_flag("include-metadata") {
+        types.push(SourceType::Metadata);
+    }
+
+    // Handle explicit source-types argument if provided
+    if let Some(source_types) = matches.get_many::<String>("source-types") {
+        let mut parsed_types = Vec::new();
+        for type_str in source_types {
+            match type_str.to_lowercase().as_str() {
+                "original" => parsed_types.push(SourceType::Original),
+                "derivative" => parsed_types.push(SourceType::Derivative),
+                "metadata" => parsed_types.push(SourceType::Metadata),
+                _ => {} // Ignore invalid types
+            }
+        }
+        if !parsed_types.is_empty() {
+            return parsed_types;
+        }
+    }
+
+    types
 }
 
 /// Build the CLI interface

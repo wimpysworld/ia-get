@@ -70,6 +70,7 @@ pub mod metadata;
 pub mod metadata_storage;
 pub mod network;
 pub mod performance;
+pub mod progress;
 pub mod url_processing;
 pub mod utils;
 

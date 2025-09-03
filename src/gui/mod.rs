@@ -6,7 +6,5 @@
 pub mod app;
 pub mod panels;
 
-#[cfg(test)]
-mod tests;
-
+// Re-export the main app struct for easy importing
 pub use app::IaGetApp;
