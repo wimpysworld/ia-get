@@ -228,6 +228,37 @@ async fn main() -> Result<()> {
 
     let max_file_size = matches.get_one::<String>("max-size").map(|s| s.to_string());
 
+    // Parse source filtering options
+    use ia_get::cli::SourceType;
+    let source_types = if let Some(types) = matches.get_many::<String>("source-types") {
+        // Explicit source types provided
+        types
+            .filter_map(|s| match s.as_str() {
+                "original" => Some(SourceType::Original),
+                "derivative" => Some(SourceType::Derivative),
+                "metadata" => Some(SourceType::Metadata),
+                _ => None,
+            })
+            .collect()
+    } else {
+        // Use convenience flags
+        let mut types = vec![SourceType::Original]; // Always include original by default
+
+        if matches.get_flag("include-derivatives") {
+            types.push(SourceType::Derivative);
+        }
+        if matches.get_flag("include-metadata") {
+            types.push(SourceType::Metadata);
+        }
+
+        // If original-only is explicitly set, only include original
+        if matches.get_flag("original-only") {
+            types = vec![SourceType::Original];
+        }
+
+        types
+    };
+
     // Compression settings - enable by default as requested
     let enable_compression = !matches.get_flag("no-compress"); // Default to true unless --no-compress is specified
     let auto_decompress = matches.get_flag("decompress");
@@ -253,6 +284,7 @@ async fn main() -> Result<()> {
         preserve_mtime: true,
         verbose,
         resume: true,
+        source_types, // Add source filtering from parsed arguments
     };
 
     println!(
@@ -534,6 +566,35 @@ fn build_cli() -> Command {
                 .value_name("FORMATS")
                 .value_delimiter(',')
                 .action(ArgAction::Append)
+        )
+        .arg(
+            Arg::new("source-types")
+                .long("source-types")
+                .help("Source types to include (original, derivative, metadata)")
+                .value_name("TYPES")
+                .value_delimiter(',')
+                .action(ArgAction::Append)
+        )
+        .arg(
+            Arg::new("original-only")
+                .long("original-only")
+                .help("Download only original files")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("source-types")
+        )
+        .arg(
+            Arg::new("include-derivatives")
+                .long("include-derivatives")
+                .help("Include derivative files in addition to originals")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("source-types")
+        )
+        .arg(
+            Arg::new("include-metadata")
+                .long("include-metadata")
+                .help("Include metadata files in addition to originals")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("source-types")
         )
         .arg(
             Arg::new("api-health")

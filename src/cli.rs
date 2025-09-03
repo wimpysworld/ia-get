@@ -2,7 +2,36 @@
 //!
 //! Contains the CLI structure and argument parsing logic.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
+
+/// File source types in Internet Archive
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[clap(rename_all = "lowercase")]
+pub enum SourceType {
+    /// Original uploaded files
+    Original,
+    /// Files derived from originals (e.g., different formats, thumbnails)
+    Derivative,
+    /// Metadata files (e.g., description files, database dumps)
+    Metadata,
+}
+
+impl SourceType {
+    /// Convert to string as used in IA metadata
+    pub fn as_str(&self) -> &str {
+        match self {
+            SourceType::Original => "original",
+            SourceType::Derivative => "derivative",
+            SourceType::Metadata => "metadata",
+        }
+    }
+
+    /// Check if a source string matches this type
+    pub fn matches(&self, source: &str) -> bool {
+        self.as_str() == source
+    }
+}
 
 /// Command options for the new CLI
 #[derive(Subcommand, Debug)]
@@ -97,6 +126,22 @@ pub struct Cli {
     #[arg(long, value_delimiter = ',')]
     pub decompress_formats: Vec<String>,
 
+    /// File source types to download (default: original only)
+    #[arg(long, value_enum, value_delimiter = ',', default_values_t = vec![SourceType::Original])]
+    pub source_types: Vec<SourceType>,
+
+    /// Download only original files (shorthand for --source-types original)
+    #[arg(long, conflicts_with = "source_types")]
+    pub original_only: bool,
+
+    /// Include derivative files in addition to originals
+    #[arg(long, conflicts_with = "source_types")]
+    pub include_derivatives: bool,
+
+    /// Include metadata files in addition to originals  
+    #[arg(long, conflicts_with = "source_types")]
+    pub include_metadata: bool,
+
     /// Subcommands
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -116,6 +161,37 @@ impl Cli {
         }
 
         Ok(())
+    }
+
+    /// Get the resolved source types based on CLI arguments
+    pub fn get_source_types(&self) -> Vec<SourceType> {
+        // Handle convenience flags
+        if self.original_only {
+            return vec![SourceType::Original];
+        }
+
+        let mut types = vec![SourceType::Original]; // Always include originals by default
+
+        if self.include_derivatives {
+            types.push(SourceType::Derivative);
+        }
+
+        if self.include_metadata {
+            types.push(SourceType::Metadata);
+        }
+
+        // If explicit source_types were provided, use those instead
+        if !self.source_types.is_empty() && self.source_types != vec![SourceType::Original] {
+            return self.source_types.clone();
+        }
+
+        types
+    }
+
+    /// Check if a file source should be downloaded based on CLI arguments
+    pub fn should_download_source(&self, source: &str) -> bool {
+        let allowed_types = self.get_source_types();
+        allowed_types.iter().any(|t| t.matches(source))
     }
 
     /// Get parsed extensions for inclusion filter
@@ -190,6 +266,10 @@ impl Default for Cli {
             compress: false,
             decompress: false,
             decompress_formats: vec![],
+            source_types: vec![SourceType::Original],
+            original_only: false,
+            include_derivatives: false,
+            include_metadata: false,
             command: None,
         }
     }

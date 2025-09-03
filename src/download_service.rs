@@ -5,6 +5,7 @@
 
 use crate::{
     archive_api::{validate_identifier, ApiStats, ArchiveOrgApiClient},
+    cli::SourceType,
     config::Config,
     constants::get_user_agent,
     enhanced_downloader::ArchiveDownloader,
@@ -50,6 +51,8 @@ pub struct DownloadRequest {
     pub verbose: bool,
     /// Enable resume capability
     pub resume: bool,
+    /// Source types to include in download (original, derivative, metadata)
+    pub source_types: Vec<SourceType>,
 }
 
 impl Default for DownloadRequest {
@@ -70,6 +73,7 @@ impl Default for DownloadRequest {
             preserve_mtime: true,
             verbose: false,
             resume: true,
+            source_types: vec![SourceType::Original], // Default to original files only
         }
     }
 }
@@ -239,6 +243,7 @@ impl DownloadService {
             &request.exclude_formats,
             min_size,
             max_size,
+            &request.source_types,
         );
 
         if filtered_files.is_empty() {
@@ -375,10 +380,20 @@ impl DownloadService {
         exclude_formats: &[String],
         min_file_size: Option<u64>,
         max_file_size: Option<u64>,
+        source_types: &[SourceType],
     ) -> Vec<ArchiveFile> {
         files
             .iter()
             .filter(|file| {
+                // Apply source type filter
+                let file_source = &file.source;
+                let source_matches = source_types
+                    .iter()
+                    .any(|source_type| source_type.matches(file_source));
+                if !source_matches {
+                    return false;
+                }
+
                 // Apply include format filter
                 if !include_formats.is_empty() {
                     let file_format = file.format.as_deref().unwrap_or("");

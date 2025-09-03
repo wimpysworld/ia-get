@@ -277,23 +277,8 @@ pub fn parse_archive_metadata(json_content: &str) -> Result<ArchiveMetadata> {
         }
         Err(e) => {
             // Provide helpful debugging information
-            const DEBUG_TRUNCATE_LEN: usize = 200;
-            let preview = if json_content.len() > DEBUG_TRUNCATE_LEN {
-                &json_content[..DEBUG_TRUNCATE_LEN]
-            } else {
-                json_content
-            };
-
-            eprintln!(
-                "JSON parsing failed.\nError: {}\nContent preview: {}{}",
-                e,
-                preview,
-                if json_content.len() > DEBUG_TRUNCATE_LEN {
-                    "..."
-                } else {
-                    ""
-                }
-            );
+            // Debug JSON parsing failures (disabled in tests to reduce noise)
+            // eprintln!("JSON parsing failed: {}", e);
             Err(IaGetError::JsonParsing(format!(
                 "Failed to parse JSON metadata: {}",
                 e

@@ -54,7 +54,6 @@ struct DownloadContext<'a> {
     output_path: &'a Path,
     file_info: &'a ArchiveFile,
     progress_bar: &'a ProgressBar,
-    enable_compression: bool,
     resume_from: u64,
 }
 
@@ -146,11 +145,11 @@ impl ArchiveDownloader {
         let main_progress = multi_progress.add(ProgressBar::new(pending_files.len() as u64));
         main_progress.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} files ({msg})")
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>3}/{len:>3} files {msg}")
                 .unwrap()
-                .progress_chars("##-")
+                .progress_chars("█▉▊▋▌▍▎▏ ")
         );
-        main_progress.set_message("Starting downloads".to_string());
+        main_progress.set_message("(Completed: 0, Failed: 0)".to_string());
 
         // Create semaphore for concurrency control
         let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
@@ -168,7 +167,7 @@ impl ArchiveDownloader {
                 let semaphore_clone = semaphore.clone();
                 let verify_md5 = self.verify_md5;
                 let preserve_mtime = self.preserve_mtime;
-                let enable_compression = self.enable_compression;
+                let _enable_compression = self.enable_compression; // Compression now always enabled per IA docs
                 let auto_decompress = self.auto_decompress;
                 let decompress_formats = session.download_config.decompress_formats.clone();
 
@@ -177,11 +176,11 @@ impl ArchiveDownloader {
                     multi_progress.add(ProgressBar::new(file_info.size.unwrap_or(0)));
                 file_progress.set_style(
                     ProgressStyle::default_bar()
-                        .template("{spinner:.green} {msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                        .template("{spinner:.green} {msg:30.30} [{bar:25.cyan/blue}] {bytes:>8}/{total_bytes:>8} {eta:>8}")
                         .unwrap()
-                        .progress_chars("##-")
+                        .progress_chars("█▉▊▋▌▍▎▏ ")
                 );
-                file_progress.set_message(format!("Downloading {}", file_info.name));
+                file_progress.set_message(file_info.name.chars().take(30).collect::<String>());
 
                 let handle = tokio::spawn(async move {
                     let _permit = semaphore_clone.acquire().await.unwrap();
@@ -194,7 +193,6 @@ impl ArchiveDownloader {
                         output_path,
                         verify_md5,
                         preserve_mtime,
-                        enable_compression,
                         auto_decompress,
                         decompress_formats,
                         file_progress,
@@ -209,6 +207,11 @@ impl ArchiveDownloader {
         // Wait for all downloads to complete and update session
         let mut completed = 0;
         let mut failed = 0;
+        let total_files = handles.len();
+
+        // Update progress message less frequently to reduce screen spam
+        let mut last_update = std::time::Instant::now();
+        const UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
         for (file_name, handle) in handles {
             match handle.await {
@@ -216,8 +219,16 @@ impl ArchiveDownloader {
                     session.update_file_status(&file_name, DownloadState::Completed);
                     completed += 1;
                     main_progress.inc(1);
-                    main_progress
-                        .set_message(format!("Completed: {}, Failed: {}", completed, failed));
+
+                    // Only update message if enough time has passed to reduce spam
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_update) >= UPDATE_INTERVAL
+                        || completed + failed == total_files
+                    {
+                        main_progress
+                            .set_message(format!("(Completed: {}, Failed: {})", completed, failed));
+                        last_update = now;
+                    }
                 }
                 Ok(Err(e)) => {
                     session.update_file_status(&file_name, DownloadState::Failed);
@@ -226,8 +237,18 @@ impl ArchiveDownloader {
                     }
                     failed += 1;
                     main_progress.inc(1);
-                    main_progress
-                        .set_message(format!("Completed: {}, Failed: {}", completed, failed));
+
+                    // Update message for failures and at intervals
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_update) >= UPDATE_INTERVAL
+                        || completed + failed == total_files
+                    {
+                        main_progress
+                            .set_message(format!("(Completed: {}, Failed: {})", completed, failed));
+                        last_update = now;
+                    }
+
+                    // Use eprintln for errors instead of progress bar messages to avoid spam
                     eprintln!("{} Failed to download {}: {}", "✘".red(), file_name, e);
                 }
                 Err(e) => {
@@ -237,8 +258,17 @@ impl ArchiveDownloader {
                     }
                     failed += 1;
                     main_progress.inc(1);
-                    main_progress
-                        .set_message(format!("Completed: {}, Failed: {}", completed, failed));
+
+                    // Update message for failures and at intervals
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_update) >= UPDATE_INTERVAL
+                        || completed + failed == total_files
+                    {
+                        main_progress
+                            .set_message(format!("(Completed: {}, Failed: {})", completed, failed));
+                        last_update = now;
+                    }
+
                     eprintln!("{} Task failed for {}: {}", "✘".red(), file_name, e);
                 }
             }
@@ -274,7 +304,6 @@ impl ArchiveDownloader {
         output_path: PathBuf,
         verify_md5: bool,
         preserve_mtime: bool,
-        enable_compression: bool,
         auto_decompress: bool,
         decompress_formats: Vec<String>,
         progress_bar: ProgressBar,
@@ -343,7 +372,6 @@ impl ArchiveDownloader {
                 &output_path,
                 &file_info,
                 &progress_bar,
-                enable_compression,
             )
             .await
             {
@@ -463,14 +491,43 @@ impl ArchiveDownloader {
                     return Ok(());
                 }
                 Err(e) => {
-                    progress_bar
-                        .set_message(format!("Failed from {}, trying next server...", server));
-                    last_error = Some(e);
+                    let error_str = e.to_string();
+                    let should_retry_server = error_str.contains("503")
+                        || error_str.contains("Service Unavailable")
+                        || error_str.contains("connection")
+                        || error_str.contains("timeout");
 
-                    // Add delay before trying next server
-                    if retry_count < servers.len() - 1 {
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let should_backoff_rate_limit =
+                        error_str.contains("429") || error_str.contains("Rate limited");
+
+                    if should_backoff_rate_limit {
+                        // For rate limiting, wait longer before trying next server
+                        progress_bar.set_message(format!(
+                            "Rate limited by IA server {}, backing off before trying next server...", 
+                            server
+                        ));
+                        let backoff_delay = std::cmp::min(60, 2_u64.pow(retry_count as u32)); // Max 60 seconds for rate limits
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff_delay)).await;
+                    } else if should_retry_server {
+                        progress_bar.set_message(format!(
+                            "Server {} unavailable (503/timeout), trying next server...",
+                            server
+                        ));
+                        // Standard exponential backoff for server errors
+                        if retry_count < servers.len() - 1 {
+                            let backoff_delay = std::cmp::min(2_u64.pow(retry_count as u32), 30); // Max 30 seconds
+                            tokio::time::sleep(std::time::Duration::from_secs(backoff_delay)).await;
+                        }
+                    } else {
+                        progress_bar
+                            .set_message(format!("Failed from {}, trying next server...", server));
+                        // Quick retry for other errors
+                        if retry_count < servers.len() - 1 {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
                     }
+
+                    last_error = Some(e);
                 }
             }
         }
@@ -497,102 +554,42 @@ impl ArchiveDownloader {
         output_path: &Path,
         file_info: &ArchiveFile,
         progress_bar: &ProgressBar,
-        enable_compression: bool,
     ) -> Result<()> {
-        // Try with compression first, then fall back to no compression if decoding fails
-        let max_attempts = if enable_compression { 2 } else { 1 };
-
-        for attempt in 0..max_attempts {
-            let use_compression = enable_compression && attempt == 0;
-
-            match Self::attempt_download(
-                client,
-                url,
-                output_path,
-                file_info,
-                progress_bar,
-                use_compression,
-            )
-            .await
-            {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    // If it's a decoding error and we haven't tried without compression yet
-                    if attempt == 0 && enable_compression && e.to_string().contains("decoding")
-                        || e.to_string().contains("decode")
-                    {
-                        progress_bar.set_message(format!(
-                            "Compression decoding failed, retrying without compression: {}",
-                            file_info.name
-                        ));
-                        continue;
-                    }
-                    return Err(e);
-                }
-            }
-        }
-
-        Err(IaGetError::Network(format!(
-            "Failed to download {} after {} attempts",
-            file_info.name, max_attempts
-        )))
-    }
-
-    /// Attempt a single download with specified compression setting
-    async fn attempt_download(
-        client: &Client,
-        url: &str,
-        output_path: &Path,
-        file_info: &ArchiveFile,
-        progress_bar: &ProgressBar,
-        enable_compression: bool,
-    ) -> Result<()> {
-        const MAX_RESUME_ATTEMPTS: usize = 3;
         let temp_path = output_path.with_extension("tmp");
 
+        // Try download with resume capability
+        const MAX_RESUME_ATTEMPTS: u32 = 3;
+
         for attempt in 0..MAX_RESUME_ATTEMPTS {
-            // Check if we have a partial file from previous attempt
-            let resume_from = if attempt > 0 && temp_path.exists() {
-                tokio::fs::metadata(&temp_path)
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0)
+            let resume_from = if temp_path.exists() {
+                match tokio::fs::metadata(&temp_path).await {
+                    Ok(metadata) => metadata.len(),
+                    Err(_) => 0,
+                }
             } else {
                 0
             };
 
-            // Create download context to avoid too many function arguments
-            let download_ctx = DownloadContext {
+            let ctx = DownloadContext {
                 client,
                 url,
                 temp_path: &temp_path,
                 output_path,
                 file_info,
                 progress_bar,
-                enable_compression,
                 resume_from,
             };
 
-            match Self::perform_download(download_ctx).await {
+            match Self::perform_download(ctx).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    if attempt < MAX_RESUME_ATTEMPTS - 1 {
-                        // Check if this looks like an incomplete download that we can resume
-                        if e.to_string().contains("Download incomplete")
-                            || e.to_string().contains("stream error")
-                            || e.to_string().contains("connection")
-                        {
-                            progress_bar.set_message(format!(
-                                "Download interrupted, resuming from {} bytes (attempt {}/{})",
-                                resume_from,
-                                attempt + 2,
-                                MAX_RESUME_ATTEMPTS
-                            ));
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                            continue;
-                        }
+                    // For decoding errors, don't retry with compression disabled since we already do that
+                    if attempt == MAX_RESUME_ATTEMPTS - 1 {
+                        return Err(e);
                     }
-                    return Err(e);
+
+                    // Short delay before retry
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                 }
             }
         }
@@ -607,13 +604,17 @@ impl ArchiveDownloader {
     async fn perform_download(ctx: DownloadContext<'_>) -> Result<()> {
         let mut request = ctx.client.get(ctx.url);
 
-        // Enable HTTP compression if requested and not resuming
-        // (compression and range requests don't mix well)
-        if ctx.enable_compression && ctx.resume_from == 0 {
-            request = request.header("Accept-Encoding", "gzip, deflate, br");
-        }
+        // Apply Internet Archive recommended compression headers
+        // Based on IA API docs: "Clients which support compression should include
+        // an Accept-Encoding: deflate, gzip header in requests"
+        request = request.header("Accept-Encoding", "deflate, gzip");
 
-        // Add range header for resume
+        // Add IA-specific header to avoid rate limiting on high-volume downloads
+        // IA API docs: "When set to a true-ish value (e.g., 1), a client submitting
+        // a task for execution can avoid rate limiting"
+        request = request.header("X-Accept-Reduced-Priority", "1");
+
+        // Add range header for resume - IA supports partial content requests
         if ctx.resume_from > 0 {
             request = request.header("Range", format!("bytes={}-", ctx.resume_from));
         }
@@ -623,17 +624,42 @@ impl ArchiveDownloader {
             .await
             .map_err(|e| IaGetError::Network(format!("Failed to start download: {}", e)))?;
 
-        if !response.status().is_success()
-            && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-        {
-            return Err(IaGetError::Network(format!(
-                "HTTP error {}: {}",
-                response.status(),
-                response
-                    .status()
-                    .canonical_reason()
-                    .unwrap_or("Unknown error")
-            )));
+        // Handle Internet Archive specific HTTP status codes
+        let status = response.status();
+        if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
+            return match status {
+                reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                    // IA API docs: Handle 429 Too Many Requests with backoff
+                    let retry_after = response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(60); // Default to 60 seconds if no header
+
+                    Err(IaGetError::Network(format!(
+                        "Rate limited by Internet Archive. Retry after {} seconds. File: {}",
+                        retry_after, ctx.file_info.name
+                    )))
+                }
+                reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                    // IA API docs: 503 Service Unavailable - may be temporary
+                    Err(IaGetError::Network(format!(
+                        "Internet Archive server temporarily unavailable (503). File: {}",
+                        ctx.file_info.name
+                    )))
+                }
+                reqwest::StatusCode::NOT_FOUND => Err(IaGetError::Network(format!(
+                    "File not found on Internet Archive (404): {}",
+                    ctx.file_info.name
+                ))),
+                _ => Err(IaGetError::Network(format!(
+                    "HTTP error {}: {} for file: {}",
+                    status,
+                    status.canonical_reason().unwrap_or("Unknown error"),
+                    ctx.file_info.name
+                ))),
+            };
         }
 
         // Verify Content-Length if available
@@ -689,11 +715,29 @@ impl ArchiveDownloader {
             let chunk = match chunk_result {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    // Handle response body decoding errors more gracefully
-                    let error_msg = if e.to_string().contains("decode") {
-                        format!("Error decoding response body for {}: {}. This may be due to corrupted data or encoding issues.", ctx.file_info.name, e)
+                    // Enhanced error handling for Internet Archive specific issues
+                    let error_msg = if e.to_string().to_lowercase().contains("decode")
+                        || e.to_string().to_lowercase().contains("decompress")
+                    {
+                        format!(
+                            "Compression decode error for {}: {}. Server may have sent corrupted compressed data. Will retry.",
+                            ctx.file_info.name, e
+                        )
+                    } else if e.to_string().to_lowercase().contains("timeout") {
+                        format!(
+                            "Download timeout for {}: {}. File may be large or Internet Archive server is busy.",
+                            ctx.file_info.name, e
+                        )
+                    } else if e.to_string().to_lowercase().contains("connection") {
+                        format!(
+                            "Connection lost for {}: {}. Will retry with exponential backoff.",
+                            ctx.file_info.name, e
+                        )
                     } else {
-                        format!("Download stream error for {}: {}", ctx.file_info.name, e)
+                        format!(
+                            "Download stream error for {}: {}. Will attempt retry.",
+                            ctx.file_info.name, e
+                        )
                     };
                     return Err(IaGetError::Network(error_msg));
                 }

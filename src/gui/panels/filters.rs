@@ -1,5 +1,6 @@
 //! File filtering panel
 
+use crate::cli::SourceType;
 use crate::config::{Config, FilterPreset};
 use egui::Ui;
 
@@ -11,11 +12,21 @@ pub struct FiltersPanel {
     max_file_size: String,
     min_file_size: String,
     selected_preset: Option<usize>,
+
+    // Source filtering
+    include_original: bool,
+    include_derivative: bool,
+    include_metadata: bool,
 }
 
 impl FiltersPanel {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            include_original: true, // Default to including original files
+            include_derivative: false,
+            include_metadata: false,
+            ..Default::default()
+        }
     }
 
     pub fn render(&mut self, ui: &mut Ui, config: &mut Config) {
@@ -81,6 +92,23 @@ impl FiltersPanel {
 
         ui.add_space(10.0);
 
+        // Source type filtering
+        ui.group(|ui| {
+            ui.label("Source Types");
+            ui.label("Select which types of files to include:");
+
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.include_original, "Original files")
+                    .on_hover_text("Files uploaded by users to the Internet Archive");
+                ui.checkbox(&mut self.include_derivative, "Derivative files")
+                    .on_hover_text("Files generated from originals (e.g., lower quality versions)");
+                ui.checkbox(&mut self.include_metadata, "Metadata files")
+                    .on_hover_text("Archive-generated metadata files (e.g., XML, torrents)");
+            });
+        });
+
+        ui.add_space(10.0);
+
         // Apply filters button
         ui.horizontal(|ui| {
             if ui.button("Apply Filters").clicked() {
@@ -112,17 +140,53 @@ impl FiltersPanel {
                 ui.label(format!("Max size: {}", self.max_file_size));
             }
 
+            // Show source types
+            let mut source_types = Vec::new();
+            if self.include_original {
+                source_types.push("original");
+            }
+            if self.include_derivative {
+                source_types.push("derivative");
+            }
+            if self.include_metadata {
+                source_types.push("metadata");
+            }
+            if !source_types.is_empty() {
+                ui.label(format!("Source types: {}", source_types.join(", ")));
+            }
+
             if self.include_formats.is_empty()
                 && self.exclude_formats.is_empty()
                 && self.min_file_size.is_empty()
                 && self.max_file_size.is_empty()
+                && self.include_original
+                && !self.include_derivative
+                && !self.include_metadata
             {
-                ui.label("No filters applied - all files will be downloaded");
+                ui.label("Default filters: original files only");
             }
         });
     }
 
     /// Apply a preset to the current filter settings
+    pub fn get_source_types(&self) -> Vec<SourceType> {
+        let mut source_types = Vec::new();
+        if self.include_original {
+            source_types.push(SourceType::Original);
+        }
+        if self.include_derivative {
+            source_types.push(SourceType::Derivative);
+        }
+        if self.include_metadata {
+            source_types.push(SourceType::Metadata);
+        }
+        // Default to original if none selected
+        if source_types.is_empty() {
+            source_types.push(SourceType::Original);
+        }
+        source_types
+    }
+
     fn apply_preset(&mut self, preset: &FilterPreset) {
         self.include_formats = preset.include_ext.clone().unwrap_or_default();
         self.exclude_formats = preset.exclude_ext.clone().unwrap_or_default();

@@ -209,6 +209,7 @@ impl IaGetApp {
             Some(max_size)
         };
         request.decompress_formats = decompress_formats;
+        request.source_types = self.filters_panel.get_source_types();
 
         // Create progress callback
         let progress_callback = Box::new(move |update: ProgressUpdate| {

@@ -34,13 +34,19 @@
 //! - **GB**: Gigabytes (1000 MB)
 //! - **TB**: Terabytes (1000 GB)
 
-use crate::{archive_metadata::FileEntry, cli::Commands, error::IaGetError, Result};
+use crate::{
+    archive_metadata::FileEntry,
+    cli::{Cli, Commands, SourceType},
+    error::IaGetError,
+    Result,
+};
 
 /// Trait for extracting filter options from different CLI structures
 pub trait FilterOptions {
     fn include_ext(&self) -> &Option<String>;
     fn exclude_ext(&self) -> &Option<String>;
     fn max_file_size(&self) -> &Option<String>;
+    fn source_types(&self) -> Vec<SourceType>;
 }
 
 impl FilterOptions for Commands {
@@ -60,6 +66,29 @@ impl FilterOptions for Commands {
         match self {
             Commands::Download { max_file_size, .. } => max_file_size,
         }
+    }
+
+    fn source_types(&self) -> Vec<SourceType> {
+        // Commands doesn't have source filtering - return default
+        vec![SourceType::Original]
+    }
+}
+
+impl FilterOptions for Cli {
+    fn include_ext(&self) -> &Option<String> {
+        &self.include_ext
+    }
+
+    fn exclude_ext(&self) -> &Option<String> {
+        &self.exclude_ext
+    }
+
+    fn max_file_size(&self) -> &Option<String> {
+        &self.max_file_size
+    }
+
+    fn source_types(&self) -> Vec<SourceType> {
+        self.get_source_types()
     }
 }
 
@@ -121,9 +150,20 @@ pub fn filter_files<T: FilterOptions, F: FileEntry>(files: Vec<F>, options: &T) 
         .as_ref()
         .and_then(|s| parse_size_string(s).ok());
 
+    let allowed_sources = options.source_types();
+
     files
         .into_iter()
         .filter(|file| {
+            // Check source type filtering
+            let file_source = file.source();
+            if !allowed_sources
+                .iter()
+                .any(|source_type| source_type.matches(file_source))
+            {
+                return false;
+            }
+
             // Get file extension
             let extension = std::path::Path::new(file.name())
                 .extension()

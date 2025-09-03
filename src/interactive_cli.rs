@@ -191,6 +191,11 @@ impl InteractiveCli {
             self.configure_size_filters(&mut request)?;
         }
 
+        // Source type filtering
+        if self.get_yes_no("Filter by source type?", false)? {
+            self.configure_source_filters(&mut request)?;
+        }
+
         // Concurrency settings
         request.concurrent_downloads = self.get_number_input(
             "Concurrent downloads (1-16)",
@@ -636,6 +641,44 @@ impl InteractiveCli {
         Ok(())
     }
 
+    fn configure_source_filters(&self, request: &mut DownloadRequest) -> Result<()> {
+        self.print_subsection("Source Type Filters");
+
+        println!("Select which source types to include:");
+        println!("  1. Original files only (default)");
+        println!("  2. Derivative files only");
+        println!("  3. Metadata files only");
+        println!("  4. Original + Derivative");
+        println!("  5. Original + Metadata");
+        println!("  6. Derivative + Metadata");
+        println!("  7. All types");
+
+        let choice =
+            self.get_string_input("Enter choice (1-7)", "Default: 1 (original files only)")?;
+
+        use crate::cli::SourceType;
+
+        request.source_types = match choice.trim() {
+            "1" | "" => vec![SourceType::Original],
+            "2" => vec![SourceType::Derivative],
+            "3" => vec![SourceType::Metadata],
+            "4" => vec![SourceType::Original, SourceType::Derivative],
+            "5" => vec![SourceType::Original, SourceType::Metadata],
+            "6" => vec![SourceType::Derivative, SourceType::Metadata],
+            "7" => vec![
+                SourceType::Original,
+                SourceType::Derivative,
+                SourceType::Metadata,
+            ],
+            _ => {
+                println!("Invalid choice, defaulting to original files only");
+                vec![SourceType::Original]
+            }
+        };
+
+        Ok(())
+    }
+
     fn show_download_summary(&self, request: &DownloadRequest) {
         self.print_subsection("Download Summary");
 
@@ -664,6 +707,19 @@ impl InteractiveCli {
         if let Some(ref max_size) = request.max_file_size {
             println!("Max size: {}", max_size.yellow());
         }
+
+        // Show source types
+        use crate::cli::SourceType;
+        let source_type_names: Vec<&str> = request
+            .source_types
+            .iter()
+            .map(|st| match st {
+                SourceType::Original => "original",
+                SourceType::Derivative => "derivative",
+                SourceType::Metadata => "metadata",
+            })
+            .collect();
+        println!("Source types: {}", source_type_names.join(", ").cyan());
 
         if request.dry_run {
             println!(
