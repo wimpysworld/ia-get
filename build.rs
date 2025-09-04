@@ -1,6 +1,3 @@
-#[cfg(target_os = "windows")]
-extern crate winres;
-
 fn main() {
     // Handle Windows-specific manifest for long path support
     #[cfg(target_os = "windows")]
@@ -14,12 +11,8 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn embed_windows_manifest() {
-    let mut res = winres::WindowsResource::new();
-    res.set_manifest_file("ia-get.exe.manifest");
-
-    if let Err(e) = res.compile() {
-        println!("cargo:warning=Failed to embed Windows manifest: {}", e);
-    } else {
-        println!("cargo:warning=Windows manifest embedded successfully");
+    match embed_manifest::embed_manifest_file("ia-get.exe.manifest") {
+        Ok(_) => println!("cargo:warning=Windows manifest embedded successfully"),
+        Err(e) => println!("cargo:warning=Failed to embed Windows manifest: {}", e),
     }
 }
