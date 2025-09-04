@@ -54,6 +54,9 @@ pub struct IaGetApp {
     // Dialog state
     show_about_dialog: bool,
     show_open_dialog: bool,
+
+    // Mode switching state
+    switch_to_cli: bool,
 }
 
 #[derive(Default, PartialEq)]
@@ -96,8 +99,14 @@ impl IaGetApp {
             download_panel: DownloadPanel::new(),
             filters_panel: FiltersPanel::new(),
             config,
+            switch_to_cli: false,
             ..Default::default()
         }
+    }
+
+    /// Check if the user wants to switch to CLI mode
+    pub fn should_switch_to_cli(&self) -> bool {
+        self.switch_to_cli
     }
 
     /// Set up the application theme
@@ -239,6 +248,10 @@ impl IaGetApp {
                     }
                     if ui.button("Settings").clicked() {
                         self.current_tab = AppTab::Config;
+                    }
+                    ui.separator();
+                    if ui.button("Switch to CLI Mode").clicked() {
+                        self.switch_to_cli = true;
                     }
                     ui.separator();
                     if ui.button("Exit").clicked() {

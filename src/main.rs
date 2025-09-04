@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use colored::Colorize;
 use std::path::PathBuf;
+#[cfg(feature = "gui")]
+use std::sync::{Arc, Mutex};
 use tokio::signal;
 
 use ia_get::{
@@ -15,8 +17,11 @@ use ia_get::{
     DownloadRequest, DownloadResult, DownloadService,
 };
 
+#[cfg(feature = "gui")]
+use ia_get::gui::IaGetApp;
+
 /// Detect if GUI mode is available and appropriate
-fn can_use_gui() -> bool {
+pub fn can_use_gui() -> bool {
     // Check if GUI features are compiled in
     #[cfg(not(feature = "gui"))]
     return false;
@@ -74,7 +79,13 @@ fn can_use_gui() -> bool {
 /// Launch GUI mode with graceful fallback
 #[cfg(feature = "gui")]
 async fn launch_gui() -> Result<()> {
-    use ia_get::gui::IaGetApp;
+    launch_gui_with_mode_switching().await
+}
+
+/// Launch GUI with support for switching to CLI mode
+#[cfg(feature = "gui")]
+async fn launch_gui_with_mode_switching() -> Result<()> {
+    use std::sync::{Arc, Mutex};
 
     // Set up logging for GUI
     if let Err(e) = env_logger::try_init() {
@@ -91,17 +102,66 @@ async fn launch_gui() -> Result<()> {
         ..Default::default()
     };
 
+    // Shared state to detect mode switching
+    let switch_to_cli = Arc::new(Mutex::new(false));
+    let switch_checker = Arc::clone(&switch_to_cli);
+
     // Try to run the GUI application
-    match eframe::run_native(
+    let gui_result = eframe::run_native(
         "ia-get GUI",
         options,
-        Box::new(|cc| Ok(Box::new(IaGetApp::new(cc)))),
-    ) {
-        Ok(()) => Ok(()),
+        Box::new(move |cc| {
+            let app = IaGetApp::new(cc);
+            let app_with_checker = AppWrapper::new(app, switch_checker);
+            Ok(Box::new(app_with_checker))
+        }),
+    );
+
+    match gui_result {
+        Ok(()) => {
+            // Check if we should switch to CLI mode
+            if *switch_to_cli.lock().unwrap() {
+                println!("{} Switching to CLI mode...", "🔄".blue());
+                show_interactive_menu().await
+            } else {
+                // GUI closed normally
+                Ok(())
+            }
+        }
         Err(e) => {
             eprintln!("{} GUI launch failed: {}", "⚠️".yellow(), e);
             eprintln!("{} Falling back to interactive CLI menu...", "🔄".blue());
-            show_interactive_menu()
+            show_interactive_menu().await
+        }
+    }
+}
+
+/// Wrapper around IaGetApp to handle mode switching
+#[cfg(feature = "gui")]
+struct AppWrapper {
+    app: IaGetApp,
+    switch_checker: Arc<Mutex<bool>>,
+}
+
+#[cfg(feature = "gui")]
+impl AppWrapper {
+    fn new(app: IaGetApp, switch_checker: Arc<Mutex<bool>>) -> Self {
+        Self {
+            app,
+            switch_checker,
+        }
+    }
+}
+
+#[cfg(feature = "gui")]
+impl eframe::App for AppWrapper {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.app.update(ctx, frame);
+
+        // Check if we should switch to CLI mode
+        if self.app.should_switch_to_cli() {
+            *self.switch_checker.lock().unwrap() = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 }
@@ -123,10 +183,11 @@ fn load_icon() -> egui::IconData {
 }
 
 /// Show an interactive menu when no arguments are provided
-fn show_interactive_menu() -> Result<()> {
-    // Use the enhanced interactive CLI
-    let rt = tokio::runtime::Runtime::new()?;
-    Ok(rt.block_on(async { ia_get::interactive_cli::launch_interactive_cli().await })?)
+async fn show_interactive_menu() -> Result<()> {
+    // Use the enhanced interactive CLI directly without creating a new runtime
+    ia_get::interactive_cli::launch_interactive_cli()
+        .await
+        .map_err(|e| anyhow::anyhow!("Interactive CLI error: {}", e))
 }
 
 /// Entry point for the ia-get CLI application  
@@ -171,14 +232,14 @@ async fn main() -> Result<()> {
                             "⚠️".yellow()
                         );
                         println!("{} Using interactive CLI menu instead...", "📋".blue());
-                        return show_interactive_menu();
+                        return show_interactive_menu().await;
                     }
                 } else {
                     println!(
                         "{} Command-line environment detected, using interactive menu...",
                         "💻".green()
                     );
-                    return show_interactive_menu();
+                    return show_interactive_menu().await;
                 }
             } else {
                 // Other parsing errors, show them normally
