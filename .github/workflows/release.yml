@@ -58,7 +58,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         
       - name: Installing Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -66,7 +66,7 @@ jobs:
           targets: ${{ matrix.job.target }}
           
       - name: Cache Rust toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v4.2.4
         with:
           path: |
             ~/.rustup/toolchains
@@ -79,7 +79,7 @@ jobs:
             ${{ runner.os }}-rustup-stable-
 
       - name: Cache Cargo registry and dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v4.2.4
         with:
           path: |
             ~/.cargo/registry/index/
@@ -94,7 +94,7 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache target directory for cross-compilation
-        uses: actions/cache@v4
+        uses: actions/cache@v4.2.4
         with:
           path: |
             target/${{ matrix.job.target }}/release/deps/
@@ -112,7 +112,7 @@ jobs:
 
       - name: Cache cross-compilation tools
         if: matrix.job.use-cross
-        uses: actions/cache@v4
+        uses: actions/cache@v4.2.4
         with:
           path: |
             ~/.cargo/bin/cross
@@ -233,7 +233,7 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download release assets to collect hashes
         shell: bash

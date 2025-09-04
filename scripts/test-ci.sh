@@ -11,22 +11,26 @@ cargo fmt --check
 echo "✅ Formatting check passed"
 
 echo "📋 Step 2: Run clippy linting..."
-cargo clippy --bin ia-get --lib -- -D warnings
+cargo clippy --no-default-features --features cli --all-targets -- -D warnings
 echo "✅ Clippy check passed"
 
-echo "📋 Step 3: Build project..."
-cargo build --verbose
-echo "✅ Build successful"
+echo "📋 Step 3: Build project (using optimized CI profile)..."
+cargo build --profile ci --no-default-features --features cli --verbose
+echo "✅ CI build successful"
 
 echo "📋 Step 4: Build release binary..."
-cargo build --release
+cargo build --release --no-default-features --features cli
 echo "✅ Release build successful"
 
 echo "📋 Step 5: Test binary..."
 ./target/release/ia-get --version
 echo "✅ Binary test passed"
 
-echo "📋 Step 6: Create artifact..."
+echo "📋 Step 6: Run tests..."
+cargo test --no-default-features --features cli --quiet
+echo "✅ Tests passed"
+
+echo "📋 Step 7: Create artifact..."
 mkdir -p artifacts
 PROJECT_NAME="ia-get"
 TARGET="x86_64-unknown-linux-gnu"

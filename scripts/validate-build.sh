@@ -110,6 +110,16 @@ fi
 
 echo ""
 echo "📋 Step 8: Checking for security vulnerabilities..."
+# Install cargo-audit if not present (but don't fail if it can't be installed)
+if ! command_exists cargo-audit; then
+    print_status "info" "Installing cargo-audit for security scanning..."
+    if cargo install cargo-audit --quiet; then
+        print_status "success" "cargo-audit installed successfully"
+    else
+        print_status "warning" "Failed to install cargo-audit. Consider running: cargo install cargo-audit"
+    fi
+fi
+
 if command_exists cargo-audit; then
     if cargo audit --quiet; then
         print_status "success" "Security audit passed"
@@ -117,11 +127,21 @@ if command_exists cargo-audit; then
         print_status "warning" "Security vulnerabilities found (non-blocking)"
     fi
 else
-    print_status "warning" "cargo-audit not installed. Install with: cargo install cargo-audit"
+    print_status "warning" "cargo-audit not available. Install with: cargo install cargo-audit"
 fi
 
 echo ""
 echo "📋 Step 9: Checking for outdated dependencies..."
+# Install cargo-outdated if not present (but don't fail if it can't be installed)
+if ! command_exists cargo-outdated; then
+    print_status "info" "Installing cargo-outdated for dependency checking..."
+    if cargo install cargo-outdated --quiet; then
+        print_status "success" "cargo-outdated installed successfully"
+    else
+        print_status "warning" "Failed to install cargo-outdated. Consider running: cargo install cargo-outdated"
+    fi
+fi
+
 if command_exists cargo-outdated; then
     if cargo outdated --quiet; then
         print_status "success" "No major dependency updates available"

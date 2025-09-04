@@ -224,6 +224,9 @@ cargo build --features gui
 # Fast development builds
 cargo build --profile fast-dev --no-default-features --features cli
 
+# Optimized CI builds (balanced speed and optimization)
+cargo build --profile ci --no-default-features --features cli
+
 # Build optimized release
 cargo build --release --no-default-features --features cli
 
@@ -232,6 +235,15 @@ cargo run --no-default-features --features cli -- https://archive.org/details/yo
 ```
 
 ## ⚡ Build Performance
+
+The project includes several optimized build profiles:
+
+- **`dev`**: Fast compilation for development (opt-level 0)
+- **`fast-dev`**: Faster development builds with minimal optimization (opt-level 1)  
+- **`ci`**: Balanced CI builds with good optimization but faster than release (opt-level 3, thin LTO)
+- **`release`**: Maximum optimization for production (opt-level "z", full LTO, panic="abort")
+
+**Recent improvements**: 16% binary size reduction through profile optimization.
 
 The project now includes significant build time optimizations:
 

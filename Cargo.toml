@@ -57,6 +57,8 @@ gui = ["eframe", "egui", "egui_extras", "rfd", "env_logger"]
 strip = true  # Automatically strip symbols from the binary.
 opt-level = "z"  # Optimize for size.
 lto = true
+codegen-units = 1  # Better optimization
+panic = "abort"  # Smaller binary size
 
 [profile.dev]
 # Optimize for fast compilation during development
@@ -71,6 +73,14 @@ inherits = "dev"
 opt-level = 1
 debug = false  # Reduce debug info for faster compilation
 incremental = true
+
+# Profile for CI builds - balance between speed and optimization
+[profile.ci]
+inherits = "release"
+opt-level = 3  # Full optimization but not size-focused
+strip = true
+lto = "thin"  # Faster than full LTO but still good optimization
+codegen-units = 1
 
 [[bench]]
 name = "download_performance"
