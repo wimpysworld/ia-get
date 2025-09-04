@@ -289,3 +289,226 @@ pub fn parse_archive_metadata(json_content: &str) -> Result<ArchiveMetadata> {
         }
     }
 }
+
+/// Enhanced metadata functionality using the Internet Archive APIs
+pub mod enhanced {
+    use super::*;
+    use crate::infrastructure::api::EnhancedArchiveApiClient;
+    use indicatif::ProgressBar;
+    use reqwest::Client;
+    use serde_json::Value;
+
+    /// Enhanced metadata structure with additional API information
+    #[derive(Debug, serde::Deserialize, serde::Serialize)]
+    pub struct EnhancedMetadata {
+        pub basic_metadata: ArchiveMetadata,
+        pub search_results: Option<Value>,
+        pub related_items: Option<Value>,
+        pub tasks_status: Option<Value>,
+        pub collection_info: Option<Value>,
+    }
+
+    /// Fetch comprehensive metadata using enhanced API client
+    ///
+    /// This function fetches not just the basic metadata but also:
+    /// - Related items in the same collection
+    /// - Task status information
+    /// - Search context for the item
+    pub async fn fetch_enhanced_metadata(
+        identifier: &str,
+        client: &Client,
+        progress: &ProgressBar,
+        include_related: bool,
+        include_tasks: bool,
+    ) -> Result<EnhancedMetadata> {
+        progress.set_message(format!("🔍 Fetching enhanced metadata for {}", identifier));
+
+        // Create enhanced API client
+        let mut api_client = EnhancedArchiveApiClient::new(client.clone());
+
+        // Fetch basic metadata using existing function
+        let (basic_metadata, _url) = fetch_json_metadata(identifier, client, progress).await?;
+
+        let mut enhanced = EnhancedMetadata {
+            basic_metadata,
+            search_results: None,
+            related_items: None,
+            tasks_status: None,
+            collection_info: None,
+        };
+
+        // Fetch related items if requested
+        if include_related {
+            progress.set_message(format!("🔗 Finding related items for {}", identifier));
+            match api_client.find_related_items(identifier, Some(10)).await {
+                Ok(response) => {
+                    if let Ok(text) = response.text().await {
+                        if let Ok(json) = serde_json::from_str::<Value>(&text) {
+                            enhanced.related_items = Some(json);
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Log error but don't fail the entire operation
+                    progress.set_message(format!("⚠️ Could not fetch related items: {}", e));
+                }
+            }
+        }
+
+        // Fetch task status if requested
+        if include_tasks {
+            progress.set_message(format!("⚙️ Checking task status for {}", identifier));
+            match api_client.get_tasks(identifier).await {
+                Ok(response) => {
+                    if let Ok(text) = response.text().await {
+                        if let Ok(json) = serde_json::from_str::<Value>(&text) {
+                            enhanced.tasks_status = Some(json);
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Log error but don't fail the entire operation
+                    progress.set_message(format!("⚠️ Could not fetch task status: {}", e));
+                }
+            }
+        }
+
+        // Try to get collection information from metadata
+        if let Some(collections) = enhanced.basic_metadata.metadata.get("collection") {
+            progress.set_message(format!("📁 Fetching collection info for {}", identifier));
+
+            // If there are collections, try to get info about the first one
+            if let Some(collection_array) = collections.as_array() {
+                if let Some(first_collection) = collection_array.first() {
+                    if let Some(collection_id) = first_collection.as_str() {
+                        match api_client
+                            .search_collection(
+                                collection_id,
+                                Some("identifier,title,description,item_count"),
+                                Some(5),
+                            )
+                            .await
+                        {
+                            Ok(response) => {
+                                if let Ok(text) = response.text().await {
+                                    if let Ok(json) = serde_json::from_str::<Value>(&text) {
+                                        enhanced.collection_info = Some(json);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                progress.set_message(format!(
+                                    "⚠️ Could not fetch collection info: {}",
+                                    e
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        progress.set_message(format!("✅ Enhanced metadata retrieved for {}", identifier));
+        Ok(enhanced)
+    }
+
+    /// Analyze metadata to provide insights about the archive item
+    pub fn analyze_metadata(metadata: &EnhancedMetadata) -> MetadataAnalysis {
+        let basic = &metadata.basic_metadata;
+
+        let file_count = basic.files.len();
+        let total_size: u64 = basic.files.iter().filter_map(|f| f.size).sum();
+
+        // Analyze file types
+        let mut file_types = std::collections::HashMap::new();
+        for file in &basic.files {
+            if let Some(extension) = std::path::Path::new(&file.name).extension() {
+                let ext = extension.to_string_lossy().to_lowercase();
+                *file_types.entry(ext).or_insert(0) += 1;
+            }
+        }
+
+        // Analyze collections
+        let collections: Vec<String> = metadata
+            .basic_metadata
+            .metadata
+            .get("collection")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        MetadataAnalysis {
+            identifier: basic
+                .metadata
+                .get("identifier")
+                .and_then(|i| i.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            file_count,
+            total_size,
+            file_types,
+            collections,
+            has_related_items: metadata.related_items.is_some(),
+            has_tasks: metadata.tasks_status.is_some(),
+            creation_date: basic
+                .metadata
+                .get("date")
+                .and_then(|d| d.as_str())
+                .map(String::from),
+        }
+    }
+
+    /// Metadata analysis results
+    #[derive(Debug)]
+    pub struct MetadataAnalysis {
+        pub identifier: String,
+        pub file_count: usize,
+        pub total_size: u64,
+        pub file_types: std::collections::HashMap<String, usize>,
+        pub collections: Vec<String>,
+        pub has_related_items: bool,
+        pub has_tasks: bool,
+        pub creation_date: Option<String>,
+    }
+
+    impl std::fmt::Display for MetadataAnalysis {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            use crate::utilities::filters::format_size;
+
+            writeln!(f, "📊 Metadata Analysis for '{}'", self.identifier)?;
+            writeln!(f, "   Files: {}", self.file_count)?;
+            writeln!(f, "   Total Size: {}", format_size(self.total_size))?;
+
+            if !self.file_types.is_empty() {
+                writeln!(f, "   File Types:")?;
+                let mut types: Vec<_> = self.file_types.iter().collect();
+                types.sort_by(|a, b| b.1.cmp(a.1)); // Sort by count, descending
+                for (ext, count) in types.iter().take(5) {
+                    writeln!(f, "     {}: {}", ext, count)?;
+                }
+            }
+
+            if !self.collections.is_empty() {
+                writeln!(f, "   Collections: {}", self.collections.join(", "))?;
+            }
+
+            if let Some(date) = &self.creation_date {
+                writeln!(f, "   Created: {}", date)?;
+            }
+
+            if self.has_related_items {
+                writeln!(f, "   ✓ Related items available")?;
+            }
+
+            if self.has_tasks {
+                writeln!(f, "   ✓ Task status available")?;
+            }
+
+            Ok(())
+        }
+    }
+}

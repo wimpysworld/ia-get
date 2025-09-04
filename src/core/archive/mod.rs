@@ -4,7 +4,7 @@
 
 pub use archive_metadata::*;
 pub use metadata::*;
-// Note: metadata_new module is available but not re-exported as it may be deprecated
+pub use metadata_new::*;
 
 pub mod archive_metadata;
 pub mod metadata;

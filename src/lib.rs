@@ -59,7 +59,10 @@ pub mod utilities;
 pub use error::{IaGetError, Result};
 
 // Re-export commonly used functions from organized modules
-pub use core::archive::{fetch_json_metadata, get_json_url, parse_archive_metadata};
+pub use core::archive::{
+    fetch_json_metadata, get_json_url, parse_archive_metadata, AdvancedMetadataProcessor,
+    MetadataAnalysis,
+};
 pub use core::download::{
     download_files_with_retries, DownloadRequest, DownloadResult, DownloadService, DownloadStats,
     FileDownloadResult, ProgressUpdate, SimpleConcurrentDownloader,
@@ -68,7 +71,10 @@ pub use core::session::{
     sanitize_filename_for_filesystem, ArchiveFile, ArchiveMetadata, DownloadConfig,
     DownloadSession, DownloadState,
 };
-pub use infrastructure::api::{validate_identifier, ApiStats, ArchiveOrgApiClient};
+pub use infrastructure::api::{
+    validate_identifier, ApiStats, ArchiveOrgApiClient, EnhancedArchiveApiClient, ItemDetails,
+    ServiceStatus,
+};
 pub use infrastructure::http::{
     is_transient_error, is_transient_reqwest_error, is_url_accessible, ClientConfig,
     EnhancedHttpClient, HttpClientFactory,
