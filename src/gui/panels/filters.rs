@@ -13,6 +13,27 @@ pub struct FiltersPanel {
     min_file_size: String,
     selected_preset: Option<usize>,
 
+    // Format category checkboxes
+    include_documents: bool,
+    include_images: bool,
+    include_audio: bool,
+    include_video: bool,
+    include_software: bool,
+    include_data: bool,
+    include_web: bool,
+    include_archives: bool,
+    include_metadata_formats: bool,
+
+    exclude_documents: bool,
+    exclude_images: bool,
+    exclude_audio: bool,
+    exclude_video: bool,
+    exclude_software: bool,
+    exclude_data: bool,
+    exclude_web: bool,
+    exclude_archives: bool,
+    exclude_metadata_formats: bool,
+
     // Source filtering
     include_original: bool,
     include_derivative: bool,
@@ -87,6 +108,81 @@ impl FiltersPanel {
                 ui.label("Max file size:");
                 ui.text_edit_singleline(&mut self.max_file_size);
                 ui.label("(e.g., 100MB, 2GB)");
+            });
+        });
+
+        ui.add_space(10.0);
+
+        // Format category filters
+        ui.group(|ui| {
+            ui.label("Format Categories");
+            ui.label("Select format categories to include or exclude:");
+
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label("Include Categories:");
+                    ui.checkbox(&mut self.include_documents, "📄 Documents")
+                        .on_hover_text("PDF, text, eBooks, office documents");
+                    ui.checkbox(&mut self.include_images, "🖼️ Images")
+                        .on_hover_text("Photos, graphics, artwork");
+                    ui.checkbox(&mut self.include_audio, "🎵 Audio")
+                        .on_hover_text("Music, recordings, podcasts");
+                    ui.checkbox(&mut self.include_video, "🎬 Video")
+                        .on_hover_text("Movies, TV shows, clips");
+                    ui.checkbox(&mut self.include_software, "💾 Software")
+                        .on_hover_text("Applications, games, installers");
+                });
+
+                ui.vertical(|ui| {
+                    ui.label("Exclude Categories:");
+                    ui.checkbox(&mut self.exclude_documents, "📄 Documents");
+                    ui.checkbox(&mut self.exclude_images, "🖼️ Images");
+                    ui.checkbox(&mut self.exclude_audio, "🎵 Audio");
+                    ui.checkbox(&mut self.exclude_video, "🎬 Video");
+                    ui.checkbox(&mut self.exclude_software, "💾 Software");
+                });
+
+                ui.vertical(|ui| {
+                    ui.label("More Categories:");
+                    ui.checkbox(&mut self.include_data, "📊 Data")
+                        .on_hover_text("Datasets, databases, structured data");
+                    ui.checkbox(&mut self.include_web, "🌐 Web")
+                        .on_hover_text("Web pages, websites, archives");
+                    ui.checkbox(&mut self.include_archives, "📦 Archives")
+                        .on_hover_text("ZIP, RAR, compressed files");
+                    ui.checkbox(&mut self.include_metadata_formats, "🏷️ Metadata")
+                        .on_hover_text("Archive metadata, checksums");
+                    ui.label(""); // Spacer
+                });
+
+                ui.vertical(|ui| {
+                    ui.label("Exclude More:");
+                    ui.checkbox(&mut self.exclude_data, "📊 Data");
+                    ui.checkbox(&mut self.exclude_web, "🌐 Web");
+                    ui.checkbox(&mut self.exclude_archives, "📦 Archives");
+                    ui.checkbox(&mut self.exclude_metadata_formats, "🏷️ Metadata");
+                    ui.label(""); // Spacer
+                });
+            });
+
+            // Quick preset buttons
+            ui.horizontal(|ui| {
+                if ui.button("Documents Only").clicked() {
+                    self.clear_format_categories();
+                    self.include_documents = true;
+                }
+                if ui.button("Media Only").clicked() {
+                    self.clear_format_categories();
+                    self.include_images = true;
+                    self.include_audio = true;
+                    self.include_video = true;
+                }
+                if ui.button("No Metadata").clicked() {
+                    self.exclude_metadata_formats = true;
+                }
+                if ui.button("Clear Categories").clicked() {
+                    self.clear_format_categories();
+                }
             });
         });
 
@@ -196,16 +292,38 @@ impl FiltersPanel {
 
     /// Apply current filter settings to the configuration
     fn apply_filters_to_config(&self, config: &mut Config) {
-        config.default_include_ext = if self.include_formats.is_empty() {
+        // Combine manual formats with category-based formats
+        let mut combined_include = self.include_formats.clone();
+        let mut combined_exclude = self.exclude_formats.clone();
+
+        // Add category-based includes
+        let include_categories = self.get_selected_include_categories();
+        if !include_categories.is_empty() {
+            if !combined_include.is_empty() {
+                combined_include.push(',');
+            }
+            combined_include.push_str(&include_categories.join(","));
+        }
+
+        // Add category-based excludes
+        let exclude_categories = self.get_selected_exclude_categories();
+        if !exclude_categories.is_empty() {
+            if !combined_exclude.is_empty() {
+                combined_exclude.push(',');
+            }
+            combined_exclude.push_str(&exclude_categories.join(","));
+        }
+
+        config.default_include_ext = if combined_include.is_empty() {
             None
         } else {
-            Some(self.include_formats.clone())
+            Some(combined_include)
         };
 
-        config.default_exclude_ext = if self.exclude_formats.is_empty() {
+        config.default_exclude_ext = if combined_exclude.is_empty() {
             None
         } else {
-            Some(self.exclude_formats.clone())
+            Some(combined_exclude)
         };
 
         config.default_min_file_size = if self.min_file_size.is_empty() {
@@ -227,6 +345,104 @@ impl FiltersPanel {
         self.exclude_formats.clear();
         self.max_file_size.clear();
         self.min_file_size.clear();
+        self.clear_format_categories();
+    }
+
+    /// Clear format category selections
+    fn clear_format_categories(&mut self) {
+        self.include_documents = false;
+        self.include_images = false;
+        self.include_audio = false;
+        self.include_video = false;
+        self.include_software = false;
+        self.include_data = false;
+        self.include_web = false;
+        self.include_archives = false;
+        self.include_metadata_formats = false;
+
+        self.exclude_documents = false;
+        self.exclude_images = false;
+        self.exclude_audio = false;
+        self.exclude_video = false;
+        self.exclude_software = false;
+        self.exclude_data = false;
+        self.exclude_web = false;
+        self.exclude_archives = false;
+        self.exclude_metadata_formats = false;
+    }
+
+    /// Get file extensions for selected include categories
+    fn get_selected_include_categories(&self) -> Vec<String> {
+        use crate::file_formats::{FileFormats, FormatCategory};
+        let file_formats = FileFormats::new();
+        let mut extensions = Vec::new();
+
+        if self.include_documents {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Documents));
+        }
+        if self.include_images {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Images));
+        }
+        if self.include_audio {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Audio));
+        }
+        if self.include_video {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Video));
+        }
+        if self.include_software {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Software));
+        }
+        if self.include_data {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Data));
+        }
+        if self.include_web {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Web));
+        }
+        if self.include_archives {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Archives));
+        }
+        if self.include_metadata_formats {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Metadata));
+        }
+
+        extensions
+    }
+
+    /// Get file extensions for selected exclude categories
+    fn get_selected_exclude_categories(&self) -> Vec<String> {
+        use crate::file_formats::{FileFormats, FormatCategory};
+        let file_formats = FileFormats::new();
+        let mut extensions = Vec::new();
+
+        if self.exclude_documents {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Documents));
+        }
+        if self.exclude_images {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Images));
+        }
+        if self.exclude_audio {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Audio));
+        }
+        if self.exclude_video {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Video));
+        }
+        if self.exclude_software {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Software));
+        }
+        if self.exclude_data {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Data));
+        }
+        if self.exclude_web {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Web));
+        }
+        if self.exclude_archives {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Archives));
+        }
+        if self.exclude_metadata_formats {
+            extensions.extend(file_formats.get_formats(&FormatCategory::Metadata));
+        }
+
+        extensions
     }
 
     /// Get current filter settings as strings

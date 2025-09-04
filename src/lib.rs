@@ -60,7 +60,9 @@ pub mod downloader;
 pub mod downloads;
 pub mod enhanced_downloader;
 pub mod error;
+pub mod file_formats;
 pub mod filters;
+pub mod format_help;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod http_client;
@@ -84,6 +86,7 @@ pub use concurrent_simple::{DownloadStats, FileDownloadResult, SimpleConcurrentD
 pub use constants::get_user_agent;
 pub use download_service::{DownloadRequest, DownloadResult, DownloadService, ProgressUpdate};
 pub use downloads::download_files_with_retries;
+pub use file_formats::{FileFormats, FormatCategory};
 pub use filters::{filter_files, format_size, parse_size_string};
 pub use http_client::{ClientConfig, EnhancedHttpClient, HttpClientFactory};
 pub use metadata::{fetch_json_metadata, get_json_url, parse_archive_metadata};

@@ -285,3 +285,120 @@ fn test_filter_files_complex_combinations() {
     assert!(filtered.iter().any(|f| f.name == "image.jpg"));
     assert!(!filtered.iter().any(|f| f.name == "video.mp4")); // derivative source
 }
+
+/// Test file filtering with format categories
+#[test]
+fn test_filter_files_format_categories() {
+    use ia_get::file_formats::{FileFormats, FormatCategory};
+
+    let _files = create_test_files();
+    let file_formats = FileFormats::new();
+
+    // Test that we can find categories for our test files
+    assert_eq!(
+        file_formats.find_category("pdf"),
+        Some(FormatCategory::Documents)
+    );
+    assert_eq!(
+        file_formats.find_category("jpg"),
+        Some(FormatCategory::Images)
+    );
+    assert_eq!(
+        file_formats.find_category("mp3"),
+        Some(FormatCategory::Audio)
+    );
+    assert_eq!(
+        file_formats.find_category("mp4"),
+        Some(FormatCategory::Video)
+    );
+}
+
+/// Test format suggestion functionality
+#[test]
+fn test_format_suggestions() {
+    use ia_get::file_formats::FileFormats;
+
+    let file_formats = FileFormats::new();
+
+    let suggestions = file_formats.suggest_formats("mp");
+    assert!(suggestions.contains(&"mp3".to_string()));
+    assert!(suggestions.contains(&"mp4".to_string()));
+
+    let pdf_suggestions = file_formats.suggest_formats("pd");
+    assert!(pdf_suggestions.contains(&"pdf".to_string()));
+}
+
+/// Test predefined format presets
+#[test]
+fn test_format_presets() {
+    use ia_get::file_formats::FileFormats;
+
+    let presets = FileFormats::get_common_presets();
+    assert!(!presets.is_empty());
+
+    // Check that we have expected presets
+    let preset_names: Vec<String> = presets.iter().map(|(name, _, _)| name.clone()).collect();
+    assert!(preset_names.contains(&"Documents".to_string()));
+    assert!(preset_names.contains(&"Images".to_string()));
+    assert!(preset_names.contains(&"Audio".to_string()));
+    assert!(preset_names.contains(&"Video".to_string()));
+}
+
+/// Test format category completeness
+#[test]
+fn test_format_category_completeness() {
+    use ia_get::file_formats::{FileFormats, FormatCategory};
+
+    let file_formats = FileFormats::new();
+
+    // Check that each category has formats
+    for category in FormatCategory::all() {
+        let formats = file_formats.get_formats(&category);
+        assert!(
+            !formats.is_empty(),
+            "Category {:?} should have formats",
+            category
+        );
+    }
+
+    // Test specific format categorization (considering priority)
+    assert_eq!(
+        file_formats.find_category("pdf"),
+        Some(FormatCategory::Documents)
+    );
+    assert_eq!(
+        file_formats.find_category("jpg"),
+        Some(FormatCategory::Images)
+    );
+    assert_eq!(
+        file_formats.find_category("mp3"),
+        Some(FormatCategory::Audio)
+    );
+    assert_eq!(
+        file_formats.find_category("mp4"),
+        Some(FormatCategory::Video)
+    );
+    assert_eq!(
+        file_formats.find_category("zip"),
+        Some(FormatCategory::Archives)
+    );
+
+    // These have priority-based categorization due to overlaps
+    assert_eq!(
+        file_formats.find_category("xml"),
+        Some(FormatCategory::Metadata)
+    ); // Priority: Metadata > Data/Web
+    assert_eq!(
+        file_formats.find_category("json"),
+        Some(FormatCategory::Metadata)
+    ); // Priority: Metadata > Data
+    assert_eq!(
+        file_formats.find_category("html"),
+        Some(FormatCategory::Web)
+    ); // Web-specific
+    assert_eq!(file_formats.find_category("css"), Some(FormatCategory::Web)); // Web-specific
+
+    // Test that non-existent formats return None
+    assert_eq!(file_formats.find_category("nonexistent"), None);
+    assert_eq!(file_formats.find_category("xyz123"), None);
+}

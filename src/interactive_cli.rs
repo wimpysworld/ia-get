@@ -969,13 +969,143 @@ impl InteractiveCli {
     fn configure_format_filters(&self, request: &mut DownloadRequest) -> Result<()> {
         self.print_subsection("File Format Filters");
 
+        // Offer format categories first
+        println!("Choose filtering method:");
+        println!("  1. Use predefined format categories");
+        println!("  2. Manually specify file extensions");
+        println!("  3. Use both categories and manual extensions");
+        println!("  4. Skip format filtering");
+
+        let choice = self.get_string_input("Enter choice (1-4)", "Default: 4 (skip)")?;
+
+        match choice.trim() {
+            "1" => self.configure_format_categories_only(request)?,
+            "2" => self.configure_manual_extensions_only(request)?,
+            "3" => {
+                self.configure_format_categories_only(request)?;
+                self.configure_manual_extensions_only(request)?;
+            }
+            "4" | "" => {
+                println!("No format filtering configured.");
+                return Ok(());
+            }
+            _ => {
+                println!("Invalid choice, skipping format filtering.");
+                return Ok(());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn configure_format_categories_only(&self, request: &mut DownloadRequest) -> Result<()> {
+        use crate::file_formats::{FileFormats, FormatCategory};
+
+        println!("\n📁 Available Format Categories:");
+        let file_formats = FileFormats::new();
+        for (i, category) in FormatCategory::all().iter().enumerate() {
+            let formats = file_formats.get_formats(category);
+            let sample_formats: Vec<String> = formats.iter().take(3).cloned().collect();
+            println!(
+                "  {}. {} - {} (e.g., {})",
+                i + 1,
+                category.display_name(),
+                category.description(),
+                sample_formats.join(", ")
+            );
+        }
+
+        println!("\nCommon Presets:");
+        let presets = FileFormats::get_common_presets();
+        for (i, (name, description, _)) in presets.iter().enumerate() {
+            println!(
+                "  {}. {} - {}",
+                FormatCategory::all().len() + i + 1,
+                name,
+                description
+            );
+        }
+
+        // Include categories
+        let include = self.get_string_input(
+            "Include categories (numbers or names, comma-separated, e.g., 1,3 or documents,images)",
+            "Leave empty to include all",
+        )?;
+
+        if !include.is_empty() {
+            let mut extensions = Vec::new();
+            for item in include.split(',') {
+                let item = item.trim();
+                if let Ok(num) = item.parse::<usize>() {
+                    if num >= 1 && num <= FormatCategory::all().len() {
+                        let category = &FormatCategory::all()[num - 1];
+                        extensions.extend(file_formats.get_formats(category));
+                    } else if num > FormatCategory::all().len() {
+                        // Handle preset selection
+                        let preset_index = num - FormatCategory::all().len() - 1;
+                        if preset_index < presets.len() {
+                            let (_, _, preset_formats) = &presets[preset_index];
+                            extensions.extend(preset_formats.clone());
+                        }
+                    }
+                } else {
+                    // Try to match by name
+                    let item_lower = item.to_lowercase();
+                    for category in FormatCategory::all() {
+                        if category.display_name().to_lowercase() == item_lower {
+                            extensions.extend(file_formats.get_formats(&category));
+                            break;
+                        }
+                    }
+                }
+            }
+            request.include_formats.extend(extensions);
+        }
+
+        // Exclude categories
+        let exclude = self.get_string_input(
+            "Exclude categories (numbers or names, comma-separated)",
+            "Leave empty to exclude nothing",
+        )?;
+
+        if !exclude.is_empty() {
+            let mut extensions = Vec::new();
+            for item in exclude.split(',') {
+                let item = item.trim();
+                if let Ok(num) = item.parse::<usize>() {
+                    if num >= 1 && num <= FormatCategory::all().len() {
+                        let category = &FormatCategory::all()[num - 1];
+                        extensions.extend(file_formats.get_formats(category));
+                    }
+                } else {
+                    // Try to match by name
+                    let item_lower = item.to_lowercase();
+                    for category in FormatCategory::all() {
+                        if category.display_name().to_lowercase() == item_lower {
+                            extensions.extend(file_formats.get_formats(&category));
+                            break;
+                        }
+                    }
+                }
+            }
+            request.exclude_formats.extend(extensions);
+        }
+
+        Ok(())
+    }
+
+    fn configure_manual_extensions_only(&self, request: &mut DownloadRequest) -> Result<()> {
+        println!("\nManual Extension Configuration:");
+
         let include = self.get_string_input(
             "Include formats (comma-separated, e.g., pdf,txt,mp3)",
             "Leave empty to include all formats",
         )?;
 
         if !include.is_empty() {
-            request.include_formats = include.split(',').map(|s| s.trim().to_string()).collect();
+            let mut extensions: Vec<String> =
+                include.split(',').map(|s| s.trim().to_string()).collect();
+            request.include_formats.append(&mut extensions);
         }
 
         let exclude = self.get_string_input(
@@ -984,7 +1114,9 @@ impl InteractiveCli {
         )?;
 
         if !exclude.is_empty() {
-            request.exclude_formats = exclude.split(',').map(|s| s.trim().to_string()).collect();
+            let mut extensions: Vec<String> =
+                exclude.split(',').map(|s| s.trim().to_string()).collect();
+            request.exclude_formats.append(&mut extensions);
         }
 
         Ok(())

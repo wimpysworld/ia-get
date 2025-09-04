@@ -47,24 +47,43 @@ pub trait FilterOptions {
     fn exclude_ext(&self) -> &Option<String>;
     fn max_file_size(&self) -> &Option<String>;
     fn source_types(&self) -> Vec<SourceType>;
+
+    /// Get resolved extensions to include (combining manual extensions and format categories)
+    fn get_resolved_include_extensions(&self) -> Vec<String> {
+        self.include_ext()
+            .as_ref()
+            .map(|s| s.split(',').map(|ext| ext.trim().to_lowercase()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get resolved extensions to exclude (combining manual extensions and format categories)
+    fn get_resolved_exclude_extensions(&self) -> Vec<String> {
+        self.exclude_ext()
+            .as_ref()
+            .map(|s| s.split(',').map(|ext| ext.trim().to_lowercase()).collect())
+            .unwrap_or_default()
+    }
 }
 
 impl FilterOptions for Commands {
     fn include_ext(&self) -> &Option<String> {
         match self {
             Commands::Download { include_ext, .. } => include_ext,
+            Commands::ListFormats { .. } => &None,
         }
     }
 
     fn exclude_ext(&self) -> &Option<String> {
         match self {
             Commands::Download { exclude_ext, .. } => exclude_ext,
+            Commands::ListFormats { .. } => &None,
         }
     }
 
     fn max_file_size(&self) -> &Option<String> {
         match self {
             Commands::Download { max_file_size, .. } => max_file_size,
+            Commands::ListFormats { .. } => &None,
         }
     }
 
@@ -89,6 +108,14 @@ impl FilterOptions for Cli {
 
     fn source_types(&self) -> Vec<SourceType> {
         self.get_source_types()
+    }
+
+    fn get_resolved_include_extensions(&self) -> Vec<String> {
+        self.get_include_extensions()
+    }
+
+    fn get_resolved_exclude_extensions(&self) -> Vec<String> {
+        self.get_exclude_extensions()
     }
 }
 
@@ -135,15 +162,8 @@ pub fn parse_size_string(size_str: &str) -> Result<u64> {
 
 /// Filter file objects based on CLI criteria  
 pub fn filter_files<T: FilterOptions, F: FileEntry>(files: Vec<F>, options: &T) -> Vec<F> {
-    let include_extensions: Option<Vec<String>> = options
-        .include_ext()
-        .as_ref()
-        .map(|s| s.split(',').map(|ext| ext.trim().to_lowercase()).collect());
-
-    let exclude_extensions: Option<Vec<String>> = options
-        .exclude_ext()
-        .as_ref()
-        .map(|s| s.split(',').map(|ext| ext.trim().to_lowercase()).collect());
+    let include_extensions = options.get_resolved_include_extensions();
+    let exclude_extensions = options.get_resolved_exclude_extensions();
 
     let max_size = options
         .max_file_size()
@@ -172,17 +192,13 @@ pub fn filter_files<T: FilterOptions, F: FileEntry>(files: Vec<F>, options: &T) 
                 .to_lowercase();
 
             // Check include extensions
-            if let Some(ref include_exts) = include_extensions {
-                if !include_exts.contains(&extension) {
-                    return false;
-                }
+            if !include_extensions.is_empty() && !include_extensions.contains(&extension) {
+                return false;
             }
 
             // Check exclude extensions
-            if let Some(ref exclude_exts) = exclude_extensions {
-                if exclude_exts.contains(&extension) {
-                    return false;
-                }
+            if !exclude_extensions.is_empty() && exclude_extensions.contains(&extension) {
+                return false;
             }
 
             // Check file size

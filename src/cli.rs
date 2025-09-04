@@ -61,6 +61,17 @@ pub enum Commands {
         #[arg(long)]
         compress: bool,
     },
+
+    /// List available file format categories and examples
+    ListFormats {
+        /// Show detailed information including all file extensions in each category
+        #[arg(short, long)]
+        detailed: bool,
+
+        /// Show only specific categories (comma-separated)
+        #[arg(short, long, value_delimiter = ',')]
+        categories: Vec<String>,
+    },
 }
 
 /// Command-line interface for ia-get
@@ -102,9 +113,17 @@ pub struct Cli {
     #[arg(long, value_name = "EXTENSIONS")]
     pub include_ext: Option<String>,
 
+    /// Include files by format category (e.g., --include-formats documents,images)
+    #[arg(long, value_delimiter = ',')]
+    pub include_formats: Vec<String>,
+
     /// Exclude files by extension (e.g., --exclude-ext xml,log)
     #[arg(long, value_name = "EXTENSIONS")]
     pub exclude_ext: Option<String>,
+
+    /// Exclude files by format category (e.g., --exclude-formats metadata,archives)
+    #[arg(long, value_delimiter = ',')]
+    pub exclude_formats: Vec<String>,
 
     /// Skip files larger than specified size (e.g., 100MB, 1GB)
     #[arg(long, value_name = "SIZE")]
@@ -217,6 +236,60 @@ impl Cli {
             .and_then(|size| crate::filters::parse_size_string(size).ok())
     }
 
+    /// Get all extensions to include based on both --include-ext and --include-formats  
+    pub fn get_include_extensions(&self) -> Vec<String> {
+        let mut extensions = self.include_extensions();
+
+        // Add extensions from format categories
+        if !self.include_formats.is_empty() {
+            use crate::file_formats::{FileFormats, FormatCategory};
+            let file_formats = FileFormats::new();
+
+            for format_name in &self.include_formats {
+                let format_name_lower = format_name.to_lowercase();
+
+                // Try to match category name
+                for category in FormatCategory::all() {
+                    if category.display_name().to_lowercase() == format_name_lower {
+                        extensions.extend(file_formats.get_formats(&category));
+                        break;
+                    }
+                }
+            }
+        }
+
+        extensions.sort();
+        extensions.dedup();
+        extensions
+    }
+
+    /// Get all extensions to exclude based on both --exclude-ext and --exclude-formats
+    pub fn get_exclude_extensions(&self) -> Vec<String> {
+        let mut extensions = self.exclude_extensions();
+
+        // Add extensions from format categories
+        if !self.exclude_formats.is_empty() {
+            use crate::file_formats::{FileFormats, FormatCategory};
+            let file_formats = FileFormats::new();
+
+            for format_name in &self.exclude_formats {
+                let format_name_lower = format_name.to_lowercase();
+
+                // Try to match category name
+                for category in FormatCategory::all() {
+                    if category.display_name().to_lowercase() == format_name_lower {
+                        extensions.extend(file_formats.get_formats(&category));
+                        break;
+                    }
+                }
+            }
+        }
+
+        extensions.sort();
+        extensions.dedup();
+        extensions
+    }
+
     /// Check if interactive mode should be enabled
     pub fn is_interactive_mode(&self) -> bool {
         self.url.is_none() && self.command.is_none()
@@ -260,7 +333,9 @@ impl Default for Cli {
             concurrent_downloads: 3,
             max_retries: 3,
             include_ext: None,
+            include_formats: vec![],
             exclude_ext: None,
+            exclude_formats: vec![],
             max_file_size: None,
             resume: false,
             compress: false,

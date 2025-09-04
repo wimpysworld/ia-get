@@ -254,6 +254,17 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Check for format listing commands
+    if matches.get_flag("list-formats") {
+        ia_get::format_help::list_format_categories();
+        return Ok(());
+    }
+
+    if matches.get_flag("list-formats-detailed") {
+        ia_get::format_help::show_complete_format_help();
+        return Ok(());
+    }
+
     // Extract arguments - these are now guaranteed to be present due to CLI parsing
     let raw_identifier = matches
         .get_one::<String>("identifier")
@@ -283,10 +294,44 @@ async fn main() -> Result<()> {
         .unwrap_or(4)
         .min(16); // Cap at 16 concurrent downloads
 
-    let include_formats = matches
+    let mut include_formats = matches
         .get_many::<String>("include")
         .map(|values| values.map(|s| s.to_string()).collect::<Vec<_>>())
         .unwrap_or_default();
+
+    // Add formats from format categories
+    if let Some(format_categories) = matches.get_many::<String>("include-formats") {
+        use ia_get::file_formats::{FileFormats, FormatCategory};
+        let file_formats = FileFormats::new();
+
+        for category_name in format_categories {
+            let category_name_lower = category_name.to_lowercase();
+            for category in FormatCategory::all() {
+                if category.display_name().to_lowercase() == category_name_lower {
+                    include_formats.extend(file_formats.get_formats(&category));
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut exclude_formats = Vec::new();
+
+    // Add exclude formats from format categories
+    if let Some(exclude_format_categories) = matches.get_many::<String>("exclude-formats") {
+        use ia_get::file_formats::{FileFormats, FormatCategory};
+        let file_formats = FileFormats::new();
+
+        for category_name in exclude_format_categories {
+            let category_name_lower = category_name.to_lowercase();
+            for category in FormatCategory::all() {
+                if category.display_name().to_lowercase() == category_name_lower {
+                    exclude_formats.extend(file_formats.get_formats(&category));
+                    break;
+                }
+            }
+        }
+    }
 
     let max_file_size = matches.get_one::<String>("max-size").map(|s| s.to_string());
 
@@ -303,7 +348,7 @@ async fn main() -> Result<()> {
         identifier: identifier.clone(),
         output_dir: output_dir.clone(),
         include_formats,
-        exclude_formats: Vec::new(), // CLI doesn't support exclude yet, but unified API does
+        exclude_formats,              // Now we support exclude formats
         min_file_size: String::new(), // CLI doesn't support min size yet, but unified API does
         max_file_size,
         concurrent_downloads,
@@ -568,7 +613,7 @@ fn build_cli() -> Command {
         .arg(
             Arg::new("identifier")
                 .help("Internet Archive identifier")
-                .required_unless_present("api-health")
+                .required_unless_present_any(["api-health", "list-formats", "list-formats-detailed"])
                 .value_name("IDENTIFIER")
                 .index(1)
         )
@@ -607,6 +652,34 @@ fn build_cli() -> Command {
                 .help("Include only files with these formats (can be used multiple times)")
                 .value_name("FORMAT")
                 .action(ArgAction::Append)
+        )
+        .arg(
+            Arg::new("include-formats")
+                .long("include-formats")
+                .help("Include files by format category (documents,images,audio,video,software,data,web,archives,metadata)")
+                .value_name("CATEGORIES")
+                .value_delimiter(',')
+                .action(ArgAction::Append)
+        )
+        .arg(
+            Arg::new("exclude-formats")
+                .long("exclude-formats")
+                .help("Exclude files by format category")
+                .value_name("CATEGORIES")
+                .value_delimiter(',')
+                .action(ArgAction::Append)
+        )
+        .arg(
+            Arg::new("list-formats")
+                .long("list-formats")
+                .help("List available file format categories and exit")
+                .action(ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("list-formats-detailed")
+                .long("list-formats-detailed")
+                .help("List detailed file format information and exit")
+                .action(ArgAction::SetTrue)
         )
         .arg(
             Arg::new("max-size")
