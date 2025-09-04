@@ -9,16 +9,17 @@ use std::sync::{Arc, Mutex};
 use tokio::signal;
 
 use ia_get::{
-    archive_api::{get_archive_servers, ArchiveOrgApiClient},
-    cli::SourceType,
-    constants::get_user_agent,
-    filters::format_size,
-    metadata_storage::{sanitize_filename_for_filesystem, DownloadState},
+    core::session::sanitize_filename_for_filesystem,
+    core::session::DownloadState,
+    infrastructure::api::{get_archive_servers, ArchiveOrgApiClient},
+    interface::cli::SourceType,
+    utilities::common::get_user_agent,
+    utilities::filters::format_size,
     DownloadRequest, DownloadResult, DownloadService,
 };
 
 #[cfg(feature = "gui")]
-use ia_get::gui::IaGetApp;
+use ia_get::interface::gui::IaGetApp;
 
 /// Detect if GUI mode is available and appropriate
 pub fn can_use_gui() -> bool {
@@ -185,7 +186,7 @@ fn load_icon() -> egui::IconData {
 /// Show an interactive menu when no arguments are provided
 async fn show_interactive_menu() -> Result<()> {
     // Use the enhanced interactive CLI directly without creating a new runtime
-    ia_get::interactive_cli::launch_interactive_cli()
+    ia_get::interface::interactive::launch_interactive_cli()
         .await
         .map_err(|e| anyhow::anyhow!("Interactive CLI error: {}", e))
 }
@@ -256,12 +257,12 @@ async fn main() -> Result<()> {
 
     // Check for format listing commands
     if matches.get_flag("list-formats") {
-        ia_get::format_help::list_format_categories();
+        ia_get::utilities::filters::list_format_categories();
         return Ok(());
     }
 
     if matches.get_flag("list-formats-detailed") {
-        ia_get::format_help::show_complete_format_help();
+        ia_get::utilities::filters::show_complete_format_help();
         return Ok(());
     }
 
@@ -271,7 +272,7 @@ async fn main() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Archive identifier is required"))?;
 
     // Normalize the identifier - extract just the identifier portion if it's a URL
-    let identifier = ia_get::url_processing::normalize_archive_identifier(raw_identifier)
+    let identifier = ia_get::utilities::common::normalize_archive_identifier(raw_identifier)
         .context("Failed to normalize archive identifier")?;
 
     let output_dir = matches
@@ -301,7 +302,7 @@ async fn main() -> Result<()> {
 
     // Add formats from format categories
     if let Some(format_categories) = matches.get_many::<String>("include-formats") {
-        use ia_get::file_formats::{FileFormats, FormatCategory};
+        use ia_get::utilities::filters::{FileFormats, FormatCategory};
         let file_formats = FileFormats::new();
 
         for category_name in format_categories {
@@ -319,7 +320,7 @@ async fn main() -> Result<()> {
 
     // Add exclude formats from format categories
     if let Some(exclude_format_categories) = matches.get_many::<String>("exclude-formats") {
-        use ia_get::file_formats::{FileFormats, FormatCategory};
+        use ia_get::utilities::filters::{FileFormats, FormatCategory};
         let file_formats = FileFormats::new();
 
         for category_name in exclude_format_categories {

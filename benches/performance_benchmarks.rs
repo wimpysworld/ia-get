@@ -4,8 +4,8 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use ia_get::{
-    http_client::{EnhancedHttpClient, HttpClientFactory},
-    performance::{AdaptiveBufferManager, PerformanceMonitor},
+    infrastructure::http::http_client::{EnhancedHttpClient, HttpClientFactory},
+    utilities::common::performance::{AdaptiveBufferManager, PerformanceMonitor},
 };
 
 /// Benchmark HTTP client creation with different configurations

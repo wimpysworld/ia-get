@@ -4,8 +4,8 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use ia_get::{
-    concurrent_simple::SimpleConcurrentDownloader,
-    metadata_storage::{ArchiveFile, ArchiveMetadata},
+    core::download::concurrent_simple::SimpleConcurrentDownloader,
+    core::session::metadata_storage::{ArchiveFile, ArchiveMetadata},
 };
 
 /// Mock archive metadata for benchmarking

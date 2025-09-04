@@ -48,54 +48,92 @@
 //! - [`filters`]: File filtering and formatting utilities
 //! - [`gui`]: Cross-platform graphical user interface
 
-pub mod archive_api;
-pub mod archive_metadata;
-pub mod cli;
-pub mod compression;
-pub mod concurrent_simple;
-pub mod config;
-pub mod constants;
-pub mod download_service;
-pub mod downloader;
-pub mod downloads;
-pub mod enhanced_downloader;
+// Organized module structure
+pub mod core;
 pub mod error;
-pub mod file_formats;
-pub mod filters;
-pub mod format_help;
-#[cfg(feature = "gui")]
-pub mod gui;
-pub mod http_client;
-pub mod interactive_cli;
-pub mod interactive_menu;
-pub mod metadata;
-pub mod metadata_storage;
-pub mod network;
-pub mod performance;
-pub mod progress;
-pub mod url_processing;
-pub mod utils;
+pub mod infrastructure;
+pub mod interface;
+pub mod utilities;
 
 // Re-export the error types for convenience
 pub use error::{IaGetError, Result};
 
-// Re-export commonly used functions
-pub use archive_api::{validate_identifier, ApiStats, ArchiveOrgApiClient};
-pub use cli::Cli;
-pub use concurrent_simple::{DownloadStats, FileDownloadResult, SimpleConcurrentDownloader};
-pub use constants::get_user_agent;
-pub use download_service::{DownloadRequest, DownloadResult, DownloadService, ProgressUpdate};
-pub use downloads::download_files_with_retries;
-pub use file_formats::{FileFormats, FormatCategory};
-pub use filters::{filter_files, format_size, parse_size_string};
-pub use http_client::{ClientConfig, EnhancedHttpClient, HttpClientFactory};
-pub use metadata::{fetch_json_metadata, get_json_url, parse_archive_metadata};
-pub use network::{is_transient_error, is_transient_reqwest_error, is_url_accessible};
-pub use performance::{AdaptiveBufferManager, PerformanceMetrics, PerformanceMonitor};
-pub use url_processing::{
-    construct_download_url, construct_metadata_url, extract_identifier_from_url, is_archive_url,
-    normalize_archive_identifier, validate_and_process_url,
+// Re-export commonly used functions from organized modules
+pub use core::archive::{fetch_json_metadata, get_json_url, parse_archive_metadata};
+pub use core::download::{
+    download_files_with_retries, DownloadRequest, DownloadResult, DownloadService, DownloadStats,
+    FileDownloadResult, ProgressUpdate, SimpleConcurrentDownloader,
 };
+pub use core::session::{
+    sanitize_filename_for_filesystem, ArchiveFile, ArchiveMetadata, DownloadConfig,
+    DownloadSession, DownloadState,
+};
+pub use infrastructure::api::{validate_identifier, ApiStats, ArchiveOrgApiClient};
+pub use infrastructure::http::{
+    is_transient_error, is_transient_reqwest_error, is_url_accessible, ClientConfig,
+    EnhancedHttpClient, HttpClientFactory,
+};
+pub use interface::cli::{Cli, SourceType};
+#[cfg(feature = "gui")]
+pub use interface::gui::IaGetApp;
+pub use utilities::common::{
+    construct_download_url, construct_metadata_url, extract_identifier_from_url, get_user_agent,
+    is_archive_url, normalize_archive_identifier, validate_and_process_url, AdaptiveBufferManager,
+    PerformanceMetrics, PerformanceMonitor, StringTruncate,
+};
+pub use utilities::compression::*;
+pub use utilities::filters::{
+    filter_files, format_size, parse_size_string, FileFormats, FormatCategory,
+};
+
+// Legacy compatibility re-exports for external tests and examples
+pub mod metadata {
+    pub use crate::core::archive::*;
+}
+
+pub mod metadata_storage {
+    pub use crate::core::session::*;
+}
+
+pub mod url_processing {
+    pub use crate::utilities::common::*;
+}
+
+pub mod constants {
+    pub use crate::utilities::common::*;
+}
+
+pub mod cli {
+    pub use crate::interface::cli::*;
+}
+
+pub mod archive_metadata {
+    pub use crate::core::archive::*;
+}
+
+pub mod filters {
+    pub use crate::utilities::filters::*;
+}
+
+pub mod file_formats {
+    pub use crate::utilities::filters::*;
+}
+
+pub mod progress {
+    pub use crate::utilities::common::*;
+}
+
+pub mod concurrent_simple {
+    pub use crate::core::download::*;
+}
+
+pub mod enhanced_downloader {
+    pub use crate::core::download::*;
+}
+
+pub mod compression {
+    pub use crate::utilities::compression::*;
+}
 
 /// Detect if GUI mode is available and appropriate
 pub fn can_use_gui() -> bool {
