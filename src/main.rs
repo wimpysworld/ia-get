@@ -250,6 +250,98 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Check for subcommands first
+    match matches.subcommand() {
+        Some(("config", config_matches)) => {
+            use ia_get::interface::cli::commands;
+            match config_matches.subcommand() {
+                Some(("show", _)) => {
+                    commands::handle_config_command(ia_get::interface::cli::ConfigAction::Show)
+                        .await?;
+                }
+                Some(("set", set_matches)) => {
+                    let key = set_matches.get_one::<String>("key").unwrap().clone();
+                    let value = set_matches.get_one::<String>("value").unwrap().clone();
+                    commands::handle_config_command(ia_get::interface::cli::ConfigAction::Set {
+                        key,
+                        value,
+                    })
+                    .await?;
+                }
+                Some(("unset", unset_matches)) => {
+                    let key = unset_matches.get_one::<String>("key").unwrap().clone();
+                    commands::handle_config_command(ia_get::interface::cli::ConfigAction::Unset {
+                        key,
+                    })
+                    .await?;
+                }
+                Some(("location", _)) => {
+                    commands::handle_config_command(ia_get::interface::cli::ConfigAction::Location)
+                        .await?;
+                }
+                Some(("reset", _)) => {
+                    commands::handle_config_command(ia_get::interface::cli::ConfigAction::Reset)
+                        .await?;
+                }
+                Some(("validate", _)) => {
+                    commands::handle_config_command(ia_get::interface::cli::ConfigAction::Validate)
+                        .await?;
+                }
+                _ => {
+                    eprintln!("No config subcommand specified. Use 'ia-get config --help' for available options.");
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+        Some(("history", history_matches)) => {
+            use ia_get::interface::cli::commands;
+            match history_matches.subcommand() {
+                Some(("show", show_matches)) => {
+                    let limit = show_matches
+                        .get_one::<String>("limit")
+                        .unwrap()
+                        .parse()
+                        .unwrap_or(10);
+                    let status = show_matches.get_one::<String>("status").cloned();
+                    let detailed = show_matches.get_flag("detailed");
+                    commands::handle_history_command(ia_get::interface::cli::HistoryAction::Show {
+                        limit,
+                        status,
+                        detailed,
+                    })
+                    .await?;
+                }
+                Some(("clear", clear_matches)) => {
+                    let force = clear_matches.get_flag("force");
+                    commands::handle_history_command(
+                        ia_get::interface::cli::HistoryAction::Clear { force },
+                    )
+                    .await?;
+                }
+                Some(("remove", remove_matches)) => {
+                    let id = remove_matches.get_one::<String>("id").unwrap().clone();
+                    commands::handle_history_command(
+                        ia_get::interface::cli::HistoryAction::Remove { id },
+                    )
+                    .await?;
+                }
+                Some(("stats", _)) => {
+                    commands::handle_history_command(ia_get::interface::cli::HistoryAction::Stats)
+                        .await?;
+                }
+                _ => {
+                    eprintln!("No history subcommand specified. Use 'ia-get history --help' for available options.");
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+        _ => {
+            // Continue with regular download processing
+        }
+    }
+
     // Check for API health command first
     if matches.get_flag("api-health") {
         display_api_health().await?;
@@ -280,10 +372,24 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Extract arguments - these are now guaranteed to be present due to CLI parsing
-    let raw_identifier = matches
-        .get_one::<String>("identifier")
-        .ok_or_else(|| anyhow::anyhow!("Archive identifier is required"))?;
+    // Extract arguments - identifier is only required for download operations
+    let raw_identifier = matches.get_one::<String>("identifier");
+
+    // Check if we have an identifier when we need one
+    if raw_identifier.is_none() {
+        // If no identifier and no flags/subcommands that don't need it, show help
+        if !matches.get_flag("api-health")
+            && !matches.get_flag("list-formats")
+            && !matches.get_flag("list-formats-detailed")
+            && !matches.get_flag("analyze-metadata")
+            && matches.subcommand().is_none()
+        {
+            anyhow::bail!("Archive identifier is required for download operations. Use --help for more information.");
+        }
+        return Ok(()); // This shouldn't be reached due to subcommand handling above
+    }
+
+    let raw_identifier = raw_identifier.unwrap();
 
     // Normalize the identifier - extract just the identifier portion if it's a URL
     let identifier = ia_get::utilities::common::normalize_archive_identifier(raw_identifier)
@@ -691,7 +797,7 @@ fn build_cli() -> Command {
         .arg(
             Arg::new("identifier")
                 .help("Internet Archive identifier")
-                .required_unless_present_any(["api-health", "list-formats", "list-formats-detailed", "analyze-metadata"])
+                .required(false)  // Make identifier optional since subcommands might not need it
                 .value_name("IDENTIFIER")
                 .index(1)
         )
@@ -825,6 +931,102 @@ fn build_cli() -> Command {
                 .long("analyze-metadata")
                 .help("Display enhanced metadata analysis for the specified archive")
                 .action(ArgAction::SetTrue)
+        )
+        // Add subcommands for configuration and history management
+        .subcommand(
+            Command::new("config")
+                .about("Configuration and preference management")
+                .subcommand(
+                    Command::new("show")
+                        .about("Show current configuration and preferences")
+                )
+                .subcommand(
+                    Command::new("set")
+                        .about("Set a configuration value")
+                        .long_about("Set a configuration value. Use 'ia-get config show' to see available keys.")
+                        .arg(Arg::new("key")
+                            .help("Configuration key to set (e.g., concurrent_downloads, default_output_path)")
+                            .required(true))
+                        .arg(Arg::new("value")
+                            .help("Value to set (e.g., 8, /path/to/downloads)")
+                            .required(true))
+                )
+                .subcommand(
+                    Command::new("unset")
+                        .about("Remove a configuration value (reset to default)")
+                        .long_about("Reset a configuration value to its default. Use 'ia-get config show' to see available keys.")
+                        .arg(Arg::new("key")
+                            .help("Configuration key to reset (e.g., concurrent_downloads, default_output_path)")
+                            .required(true))
+                )
+                .subcommand(
+                    Command::new("location")
+                        .about("Show location of configuration file")
+                )
+                .subcommand(
+                    Command::new("reset")
+                        .about("Reset all configuration to defaults")
+                )
+                .subcommand(
+                    Command::new("validate")
+                        .about("Validate current configuration")
+                )
+        )
+        .subcommand(
+            Command::new("history")
+                .about("Download history management")
+                .long_about("Manage download history database. View past downloads, clear history, and get statistics.")
+                .subcommand(
+                    Command::new("show")
+                        .about("Show download history")
+                        .long_about("Display download history with optional filtering and details.")
+                        .arg(
+                            Arg::new("limit")
+                                .short('l')
+                                .long("limit")
+                                .help("Number of recent entries to show (default: 10)")
+                                .default_value("10")
+                        )
+                        .arg(
+                            Arg::new("status")
+                                .short('s')
+                                .long("status")
+                                .help("Filter entries by status: success, failed, in_progress, cancelled, paused")
+                                .value_parser(["success", "failed", "in_progress", "cancelled", "paused"])
+                        )
+                        .arg(
+                            Arg::new("detailed")
+                                .short('d')
+                                .long("detailed")
+                                .help("Show detailed information including file counts and error messages")
+                                .action(ArgAction::SetTrue)
+                        )
+                )
+                .subcommand(
+                    Command::new("clear")
+                        .about("Clear download history")
+                        .long_about("Remove all download history entries. Use --force to skip confirmation.")
+                        .arg(
+                            Arg::new("force")
+                                .short('f')
+                                .long("force")
+                                .help("Clear all entries without confirmation prompt")
+                                .action(ArgAction::SetTrue)
+                        )
+                )
+                .subcommand(
+                    Command::new("remove")
+                        .about("Remove specific entry by ID")
+                        .long_about("Remove a specific download history entry by its ID. Use 'ia-get history show' to see entry IDs.")
+                        .arg(Arg::new("id")
+                            .help("Entry ID to remove (shown in 'ia-get history show' output)")
+                            .required(true))
+                )
+                .subcommand(
+                    Command::new("stats")
+                        .about("Show statistics about downloads")
+                        .long_about("Display comprehensive statistics about download history including success rates and totals.")
+                )
         )
 }
 

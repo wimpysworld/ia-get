@@ -162,6 +162,10 @@ impl DownloadService {
         request: DownloadRequest,
         progress_callback: Option<ProgressCallback>,
     ) -> Result<DownloadResult> {
+        use crate::infrastructure::persistence::download_history::{
+            get_default_history_db_path, DownloadHistory, DownloadHistoryEntry,
+        };
+
         // Validate identifier for Archive.org compliance
         let identifier = if request.identifier.starts_with("http") {
             // Extract identifier from URL
@@ -177,6 +181,10 @@ impl DownloadService {
                 e
             )));
         }
+
+        // Load or create download history
+        let history_path = get_default_history_db_path()?;
+        let mut download_history = DownloadHistory::load_or_create(&history_path)?;
 
         // Send initial status
         if let Some(ref callback) = progress_callback {
@@ -316,6 +324,23 @@ impl DownloadService {
             decompress_formats: request.decompress_formats.clone(),
         };
 
+        // Create history entry for this download
+        let mut history_entry = DownloadHistoryEntry::new(
+            identifier.clone(),
+            request.identifier.clone(),
+            request.output_dir.to_string_lossy().to_string(),
+            download_config.clone(),
+        );
+
+        // Set initial progress information
+        history_entry.total_files = filtered_files.len();
+        history_entry.total_bytes = filtered_files.iter().map(|f| f.size.unwrap_or(0)).sum();
+
+        // Add to history and save
+        let entry_id = history_entry.id.clone();
+        download_history.add_entry(history_entry);
+        download_history.save_to_file(&history_path)?;
+
         // Create session directory
         let session_dir = request.output_dir.join(".ia-get-sessions");
 
@@ -362,13 +387,34 @@ impl DownloadService {
             .await
         {
             Ok(session) => {
+                // Update history with successful completion
+                let progress_summary = session.get_progress_summary();
+                let _ = download_history.update_entry(&entry_id, |entry| {
+                    entry.mark_completed();
+                    entry.update_progress(
+                        progress_summary.completed_files,
+                        progress_summary.failed_files,
+                        progress_summary.downloaded_bytes,
+                    );
+                });
+                let _ = download_history.save_to_file(&history_path);
+
                 let final_api_stats = api_client.get_stats();
                 Ok(DownloadResult::Success(
                     Box::new(session),
                     Some(final_api_stats),
                 ))
             }
-            Err(e) => Ok(DownloadResult::Error(format!("Download failed: {}", e))),
+            Err(e) => {
+                // Update history with failure
+                let error_message = format!("Download failed: {}", e);
+                let _ = download_history.update_entry(&entry_id, |entry| {
+                    entry.mark_failed(e.to_string());
+                });
+                let _ = download_history.save_to_file(&history_path);
+
+                Ok(DownloadResult::Error(error_message))
+            }
         }
     }
 

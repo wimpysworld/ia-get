@@ -5,6 +5,7 @@
 pub mod api;
 pub mod config;
 pub mod http;
+pub mod persistence;
 
 // Re-export commonly used infrastructure types with specific imports to avoid conflicts
 pub use api::{
