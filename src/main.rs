@@ -124,6 +124,13 @@ async fn launch_gui_with_mode_switching() -> Result<()> {
             // Check if we should switch to CLI mode
             if *switch_to_cli.lock().unwrap() {
                 println!("{} Switching to CLI mode...", "🔄".blue());
+
+                // Reset terminal state after GUI closes
+                reset_terminal_for_cli();
+
+                // Give the terminal a moment to reset
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
                 show_interactive_menu().await
             } else {
                 // GUI closed normally
@@ -133,6 +140,10 @@ async fn launch_gui_with_mode_switching() -> Result<()> {
         Err(e) => {
             eprintln!("{} GUI launch failed: {}", "⚠️".yellow(), e);
             eprintln!("{} Falling back to interactive CLI menu...", "🔄".blue());
+
+            // Reset terminal state for CLI fallback
+            reset_terminal_for_cli();
+
             show_interactive_menu().await
         }
     }
@@ -184,12 +195,41 @@ fn load_icon() -> egui::IconData {
     }
 }
 
+/// Reset terminal state for CLI input after GUI closes
+fn reset_terminal_for_cli() {
+    use std::io::{self, Write};
+
+    // Clear any pending output
+    let _ = io::stdout().flush();
+    let _ = io::stderr().flush();
+
+    // Reset terminal to normal mode
+    // This clears the screen and moves cursor to home position
+    print!("\x1B[2J\x1B[H");
+
+    // Reset terminal colors and formatting
+    print!("\x1B[0m");
+
+    // Ensure the reset commands are sent
+    let _ = io::stdout().flush();
+}
+
 /// Show an interactive menu when no arguments are provided
 async fn show_interactive_menu() -> Result<()> {
+    // Add debugging to see if we reach this function
+    eprintln!("{} Launching interactive CLI menu...", "🔄".cyan());
+
     // Use the enhanced interactive CLI directly without creating a new runtime
-    ia_get::interface::interactive::launch_interactive_cli()
-        .await
-        .map_err(|e| anyhow::anyhow!("Interactive CLI error: {}", e))
+    match ia_get::interface::interactive::launch_interactive_cli().await {
+        Ok(()) => {
+            eprintln!("{} Interactive CLI completed successfully", "✅".green());
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("{} Interactive CLI error: {}", "❌".red(), e);
+            Err(anyhow::anyhow!("Interactive CLI error: {}", e))
+        }
+    }
 }
 
 /// Entry point for the ia-get CLI application  
