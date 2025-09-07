@@ -196,6 +196,7 @@ fn load_icon() -> egui::IconData {
 }
 
 /// Reset terminal state for CLI input after GUI closes
+#[cfg(feature = "gui")]
 fn reset_terminal_for_cli() {
     use std::io::{self, Write};
 
