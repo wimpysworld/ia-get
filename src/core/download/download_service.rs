@@ -135,7 +135,7 @@ pub struct ProgressUpdate {
 /// Download operation result
 #[derive(Debug)]
 pub enum DownloadResult {
-    Success(Box<DownloadSession>, Option<ApiStats>),
+    Success(Box<DownloadSession>, Option<ApiStats>, bool), // Third field is dry_run flag
     Error(String),
 }
 
@@ -306,6 +306,7 @@ impl DownloadService {
                         .as_secs(),
                 }),
                 Some(api_stats),
+                true, // This is a dry run
             ));
         }
 
@@ -403,6 +404,7 @@ impl DownloadService {
                 Ok(DownloadResult::Success(
                     Box::new(session),
                     Some(final_api_stats),
+                    false, // This is a real download, not a dry run
                 ))
             }
             Err(e) => {

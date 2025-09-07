@@ -2052,6 +2052,7 @@ dependencies = [
  "indicatif",
  "liblzma",
  "md5",
+ "regex",
  "reqwest",
  "rfd",
  "serde",

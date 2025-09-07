@@ -220,7 +220,7 @@ async fn test_mario_archive_dry_run() {
 
     // Extract the result and verify it's a success
     match result.unwrap() {
-        DownloadResult::Success(session, api_stats) => {
+        DownloadResult::Success(session, api_stats, _is_dry_run) => {
             // Verify basic session data
             assert_eq!(session.identifier, "mario");
             assert!(session.original_url.contains("mario"));
@@ -300,7 +300,7 @@ async fn test_luigi_archive_dry_run() {
 
     // Extract the result and verify it's a success
     match result.unwrap() {
-        DownloadResult::Success(session, api_stats) => {
+        DownloadResult::Success(session, api_stats, _is_dry_run) => {
             // Verify basic session data
             assert_eq!(session.identifier, "luigi");
             assert!(session.original_url.contains("luigi"));

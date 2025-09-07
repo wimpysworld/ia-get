@@ -3,7 +3,9 @@
 //! Provides the main application window and state management for the GUI interface.
 
 use crate::{
-    core::download::download_service::{DownloadRequest, DownloadService, ProgressUpdate},
+    core::download::download_service::{
+        DownloadRequest, DownloadResult, DownloadService, ProgressUpdate,
+    },
     core::session::metadata_storage::sanitize_filename_for_filesystem,
     infrastructure::config::{Config, ConfigManager},
 };
@@ -11,7 +13,9 @@ use egui::{Context, Ui};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
-use super::panels::{ArchiveHealthPanel, ConfigPanel, DownloadPanel, FiltersPanel};
+use super::panels::{
+    ArchiveHealthPanel, ConfigPanel, DownloadPanel, FileBrowserPanel, FiltersPanel,
+};
 
 /// Main application state
 #[derive(Default)]
@@ -35,6 +39,9 @@ pub struct IaGetApp {
     // Progress receiver for updates from download controller
     progress_rx: Option<mpsc::UnboundedReceiver<ProgressUpdate>>,
 
+    // Completion receiver for download results
+    completion_rx: Option<mpsc::UnboundedReceiver<DownloadResult>>,
+
     // Recent operations
     recent_downloads: Vec<String>,
 
@@ -49,6 +56,7 @@ pub struct IaGetApp {
     archive_health_panel: ArchiveHealthPanel,
     config_panel: ConfigPanel,
     download_panel: DownloadPanel,
+    file_browser_panel: FileBrowserPanel,
     filters_panel: FiltersPanel,
 
     // Dialog state
@@ -63,6 +71,7 @@ pub struct IaGetApp {
 enum AppTab {
     #[default]
     Download,
+    FileBrowser,
     Filters,
     Config,
     History,
@@ -97,6 +106,7 @@ impl IaGetApp {
             archive_health_panel: ArchiveHealthPanel::new(),
             config_panel: ConfigPanel::new(config.clone()),
             download_panel: DownloadPanel::new(),
+            file_browser_panel: FileBrowserPanel::new(),
             filters_panel: FiltersPanel::new(),
             config,
             switch_to_cli: false,
@@ -152,6 +162,10 @@ impl IaGetApp {
         // Create progress channel
         let (progress_tx, progress_rx) = mpsc::unbounded_channel();
         self.progress_rx = Some(progress_rx);
+
+        // Create completion channel
+        let (completion_tx, completion_rx) = mpsc::unbounded_channel();
+        self.completion_rx = Some(completion_rx);
 
         // Create download service
         let service = match DownloadService::new() {
@@ -229,7 +243,14 @@ impl IaGetApp {
         if let Some(handle) = &self.rt_handle {
             let ctx_clone = ctx.clone();
             handle.spawn(async move {
-                let _result = service.download(request, Some(progress_callback)).await;
+                let result = service.download(request, Some(progress_callback)).await;
+
+                // Send completion result
+                if let Ok(download_result) = result {
+                    let _ = completion_tx.send(download_result);
+                } else if let Err(e) = result {
+                    let _ = completion_tx.send(DownloadResult::Error(e.to_string()));
+                }
 
                 // Request repaint when done
                 ctx_clone.request_repaint();
@@ -293,6 +314,7 @@ impl IaGetApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.current_tab, AppTab::Download, "Download");
+                ui.selectable_value(&mut self.current_tab, AppTab::FileBrowser, "File Browser");
                 ui.selectable_value(&mut self.current_tab, AppTab::Filters, "Filters");
                 ui.selectable_value(&mut self.current_tab, AppTab::Config, "Settings");
                 ui.selectable_value(&mut self.current_tab, AppTab::History, "History");
@@ -303,6 +325,7 @@ impl IaGetApp {
 
             match self.current_tab {
                 AppTab::Download => self.render_download_tab(ui, ctx),
+                AppTab::FileBrowser => self.render_file_browser_tab(ui),
                 AppTab::Filters => self.render_filters_tab(ui),
                 AppTab::Config => self.render_config_tab(ui),
                 AppTab::History => self.render_history_tab(ui),
@@ -446,6 +469,11 @@ impl IaGetApp {
             // Use the download panel for progress display
             self.download_panel.render(ui);
         }
+    }
+
+    /// Render the file browser tab
+    fn render_file_browser_tab(&mut self, ui: &mut Ui) {
+        self.file_browser_panel.render(ui, &self.config);
     }
 
     /// Render the filters tab
@@ -611,6 +639,61 @@ impl eframe::App for IaGetApp {
                 if update.total_files > 0 {
                     self.download_progress =
                         (update.completed_files as f32 / update.total_files as f32) * 100.0;
+                }
+            }
+        }
+
+        // Handle completion results
+        if let Some(rx) = &mut self.completion_rx {
+            while let Ok(result) = rx.try_recv() {
+                self.is_downloading = false;
+                match result {
+                    DownloadResult::Success(session, _api_stats, is_dry_run) => {
+                        if is_dry_run {
+                            // This was a dry run - display the results
+                            let file_count = session.archive_metadata.files.len();
+                            let total_size: u64 = session
+                                .archive_metadata
+                                .files
+                                .iter()
+                                .map(|f| f.size.unwrap_or(0))
+                                .sum();
+
+                            self.success_message = Some(format!(
+                                "Dry run completed: {} files found (total size: {} bytes)",
+                                file_count, total_size
+                            ));
+                            self.download_status =
+                                format!("Dry run completed - {} files found", file_count);
+                        } else {
+                            // This was a real download
+                            let progress = session.get_progress_summary();
+                            if progress.completed_files == progress.total_files {
+                                self.success_message = Some(format!(
+                                    "Download completed successfully! {} files downloaded",
+                                    progress.completed_files
+                                ));
+                                self.download_status =
+                                    "Download completed successfully".to_string();
+                            } else {
+                                let failed_files = progress.total_files - progress.completed_files;
+                                self.error_message = Some(format!(
+                                    "Download completed with {} failed files. {} of {} files downloaded successfully",
+                                    failed_files, progress.completed_files, progress.total_files
+                                ));
+                                self.download_status =
+                                    format!("Completed with {} failed files", failed_files);
+                            }
+                        }
+                        // Reset progress panel
+                        self.download_panel.reset();
+                    }
+                    DownloadResult::Error(error_msg) => {
+                        self.error_message = Some(format!("Download failed: {}", error_msg));
+                        self.download_status = "Download failed".to_string();
+                        // Reset progress panel
+                        self.download_panel.reset();
+                    }
                 }
             }
         }

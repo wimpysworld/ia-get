@@ -573,7 +573,7 @@ async fn main() -> Result<()> {
 
     // Execute download using unified API
     match service.download(request.clone(), None).await {
-        Ok(DownloadResult::Success(session, api_stats)) => {
+        Ok(DownloadResult::Success(session, api_stats, _is_dry_run)) => {
             if !dry_run {
                 println!("\n{} Download completed successfully!", "✅".green().bold());
                 println!(
