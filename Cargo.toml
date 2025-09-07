@@ -19,7 +19,7 @@ tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "fs", "io
 serde = { version = "1.0.219", features = ["derive"] }
 thiserror = "2.0.16"
 url = "2.5.7"
-clap = { version = "4.5.46", features = ["derive"] }
+clap = { version = "4.5.47", features = ["derive"] }
 ctrlc = "3.4.7"
 colored = "3.0.0"
 chrono = { version = "0.4.41", features = ["serde"] }
@@ -66,6 +66,8 @@ opt-level = 0
 debug = true
 split-debuginfo = "unpacked"  # Faster linking on macOS/Windows
 incremental = true
+# Reduce the number of codegen units to improve build speed for small projects
+codegen-units = 256
 
 [profile.fast-dev]
 # Custom profile for faster development iteration
@@ -73,6 +75,8 @@ inherits = "dev"
 opt-level = 1
 debug = false  # Reduce debug info for faster compilation
 incremental = true
+# Faster compilation with reduced codegen units
+codegen-units = 16
 
 # Profile for CI builds - balance between speed and optimization
 [profile.ci]

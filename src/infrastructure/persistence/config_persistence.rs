@@ -406,11 +406,15 @@ mod tests {
 
     #[test]
     fn test_config_with_sources_apply() {
-        let mut base_config = ConfigWithSources::default();
-        base_config.concurrent_downloads = ConfigValue::new(3, ConfigSource::Default);
+        let mut base_config = ConfigWithSources {
+            concurrent_downloads: ConfigValue::new(3, ConfigSource::Default),
+            ..Default::default()
+        };
 
-        let mut override_config = ConfigWithSources::default();
-        override_config.concurrent_downloads = ConfigValue::new(5, ConfigSource::CommandLine);
+        let override_config = ConfigWithSources {
+            concurrent_downloads: ConfigValue::new(5, ConfigSource::CommandLine),
+            ..Default::default()
+        };
 
         base_config.apply_from(&override_config, false);
 
@@ -432,15 +436,17 @@ mod tests {
             conf_file: config_dir.join("ia-get.conf"),
         };
 
-        let mut config = Config::default();
-        config.concurrent_downloads = 5;
-        config.default_verbose = true;
+        let config = Config {
+            concurrent_downloads: 5,
+            default_verbose: true,
+            ..Default::default()
+        };
 
         persistence.save_config(&config)?;
 
         let loaded_config = persistence.load_config()?;
         assert_eq!(loaded_config.concurrent_downloads, 5);
-        assert_eq!(loaded_config.default_verbose, true);
+        assert!(loaded_config.default_verbose);
 
         Ok(())
     }

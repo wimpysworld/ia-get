@@ -59,14 +59,14 @@ fn test_source_type_functionality() {
 /// Test CLI field setting and getting
 #[test]
 fn test_cli_field_operations() {
-    let mut cli = Cli::default();
-
-    // Test setting various fields
-    cli.url = Some("https://archive.org/details/test".to_string());
-    cli.verbose = true;
-    cli.dry_run = true;
-    cli.concurrent_downloads = 5;
-    cli.include_ext = Some("pdf,txt".to_string());
+    let cli = Cli {
+        url: Some("https://archive.org/details/test".to_string()),
+        verbose: true,
+        dry_run: true,
+        concurrent_downloads: 5,
+        include_ext: Some("pdf,txt".to_string()),
+        ..Default::default()
+    };
 
     // Verify fields are set correctly
     assert_eq!(
@@ -82,10 +82,10 @@ fn test_cli_field_operations() {
 /// Test CLI max retries validation
 #[test]
 fn test_cli_validation_max_retries() {
-    let mut cli = Cli::default();
-
-    // Set concurrent downloads to valid value for overall validation to pass
-    cli.concurrent_downloads = 3;
+    let mut cli = Cli {
+        concurrent_downloads: 3,
+        ..Default::default()
+    };
 
     // Valid max retries
     cli.max_retries = 3;
@@ -135,7 +135,7 @@ fn test_cli_additional_fields() {
 /// Test SourceType vector operations
 #[test]
 fn test_source_type_collections() {
-    let source_types = vec![
+    let source_types = [
         SourceType::Original,
         SourceType::Derivative,
         SourceType::Metadata,

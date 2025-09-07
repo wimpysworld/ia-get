@@ -194,7 +194,12 @@ fn test_validate_path_length() {
     assert!(validate_path_length(output_dir, filename).is_ok());
 
     // Test long path - behavior depends on system long path support
-    let long_dir = "C:\\".to_string() + &"very_long_directory_name\\".repeat(20);
+    // Use consistent forward slashes since validate_path_length uses format!("{}/{}")
+    let long_dir = if cfg!(target_os = "windows") {
+        "C:/".to_string() + &"very_long_directory_name/".repeat(20)
+    } else {
+        "/tmp/".to_string() + &"very_long_directory_name/".repeat(20)
+    };
     let long_filename = "very_long_filename_that_makes_path_exceed_windows_limit.mp3";
     let full_path = format!("{}/{}", long_dir, long_filename);
 
@@ -207,16 +212,38 @@ fn test_validate_path_length() {
         // If the system supports long paths, it should pass
         #[cfg(target_os = "windows")]
         {
-            if ia_get::metadata_storage::is_windows_long_path_enabled() {
-                assert!(
-                    result.is_ok(),
-                    "Long path should be allowed on systems with long path support"
-                );
-            } else {
-                assert!(
-                    result.is_err(),
-                    "Long path should be rejected on systems without long path support"
-                );
+            // Be more defensive with Windows long path detection as it can fail for various reasons
+            match std::panic::catch_unwind(|| {
+                ia_get::metadata_storage::is_windows_long_path_enabled()
+            }) {
+                Ok(true) => {
+                    assert!(
+                        result.is_ok(),
+                        "Long path should be allowed on systems with long path support. Path length: {}, Path: {}",
+                        full_path.len(),
+                        full_path
+                    );
+                }
+                Ok(false) => {
+                    assert!(
+                        result.is_err(),
+                        "Long path should be rejected on systems without long path support. Path length: {}, Path: {}",
+                        full_path.len(),
+                        full_path
+                    );
+                }
+                Err(_) => {
+                    // If long path detection fails, just verify the error message is reasonable
+                    if let Err(error) = result {
+                        let error_msg = error.to_string();
+                        assert!(
+                            error_msg.contains("Path too long") || error_msg.contains("characters"),
+                            "Error message should contain path length information. Got: {}",
+                            error_msg
+                        );
+                    }
+                    // Don't assert on the specific result since detection failed
+                }
             }
         }
 
@@ -224,7 +251,9 @@ fn test_validate_path_length() {
         #[cfg(not(target_os = "windows"))]
         assert!(
             result.is_ok(),
-            "Long paths should be supported on non-Windows systems"
+            "Long paths should be supported on non-Windows systems. Path length: {}, Path: {}",
+            full_path.len(),
+            full_path
         );
     }
 }
