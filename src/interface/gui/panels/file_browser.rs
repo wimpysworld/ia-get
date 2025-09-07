@@ -387,14 +387,13 @@ impl FileBrowserPanel {
                 .iter()
                 .filter(|file| {
                     // Search filter
-                    if !self.search_filter.is_empty() {
-                        if !file
+                    if !self.search_filter.is_empty()
+                        && !file
                             .name
                             .to_lowercase()
                             .contains(&self.search_filter.to_lowercase())
-                        {
-                            return false;
-                        }
+                    {
+                        return false;
                     }
 
                     // Format filter
@@ -484,7 +483,7 @@ impl FileBrowserPanel {
                         size: None,
                     });
 
-                current_node = current_node.children.get_mut(&part.to_string()).unwrap();
+                current_node = current_node.children.get_mut(*part).unwrap();
             }
         }
     }

@@ -755,7 +755,7 @@ impl InteractiveCli {
     ) -> Result<()> {
         const PAGE_SIZE: usize = 20;
         let mut page = 0;
-        let total_pages = (files.len() + PAGE_SIZE - 1) / PAGE_SIZE;
+        let total_pages = files.len().div_ceil(PAGE_SIZE);
 
         loop {
             self.clear_screen();
