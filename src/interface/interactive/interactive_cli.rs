@@ -58,9 +58,9 @@ impl InteractiveCli {
             self.print_main_menu();
 
             #[cfg(feature = "gui")]
-            let max_choice = if crate::can_use_gui() { 7 } else { 6 };
+            let max_choice = if crate::can_use_gui() { 8 } else { 7 };
             #[cfg(not(feature = "gui"))]
-            let max_choice = 6;
+            let max_choice = 7;
 
             match self.get_user_choice("Select an option", max_choice)? {
                 1 => self.download_archive().await?,
@@ -68,7 +68,8 @@ impl InteractiveCli {
                 3 => self.browse_and_download().await?,
                 4 => self.configure_settings().await?,
                 5 => self.view_history().await?,
-                6 => {
+                6 => self.check_api_health().await?,
+                7 => {
                     #[cfg(feature = "gui")]
                     {
                         if crate::can_use_gui() {
@@ -95,7 +96,7 @@ impl InteractiveCli {
                         break;
                     }
                 }
-                7 => {
+                8 => {
                     #[cfg(feature = "gui")]
                     {
                         if crate::can_use_gui() {
@@ -315,13 +316,29 @@ impl InteractiveCli {
             "│                                                                 │".blue()
         );
 
+        println!(
+            "│  {} {} {}{}│",
+            "6.".bright_green().bold(),
+            "🏥".cyan(),
+            "Archive.org Health Status                           ".normal(),
+            " ".blue()
+        );
+        println!(
+            "{}",
+            "│     Check Internet Archive API status and health               │".dimmed()
+        );
+        println!(
+            "{}",
+            "│                                                                 │".blue()
+        );
+
         // Only show GUI option if GUI features are compiled and available
         #[cfg(feature = "gui")]
         {
             if crate::can_use_gui() {
                 println!(
                     "│  {} {} {}{}│",
-                    "6.".bright_green().bold(),
+                    "7.".bright_green().bold(),
                     "🎨".cyan(),
                     "Switch to GUI Mode                                 ".normal(),
                     " ".blue()
@@ -337,7 +354,7 @@ impl InteractiveCli {
 
                 println!(
                     "│  {} {} {}{}│",
-                    "7.".bright_green().bold(),
+                    "8.".bright_green().bold(),
                     "🚪".cyan(),
                     "Exit                                                ".normal(),
                     " ".blue()
@@ -345,7 +362,7 @@ impl InteractiveCli {
             } else {
                 println!(
                     "│  {} {} {}{}│",
-                    "6.".bright_green().bold(),
+                    "7.".bright_green().bold(),
                     "🚪".cyan(),
                     "Exit                                                ".normal(),
                     " ".blue()
@@ -357,7 +374,7 @@ impl InteractiveCli {
         {
             println!(
                 "│  {} {} {}{}│",
-                "6.".bright_green().bold(),
+                "7.".bright_green().bold(),
                 "🚪".cyan(),
                 "Exit                                                ".normal(),
                 " ".blue()
@@ -491,6 +508,107 @@ impl InteractiveCli {
 
         println!("\n{} Starting quick download...", "⚡".bright_yellow());
         self.execute_download_with_progress(request).await
+    }
+
+    async fn check_api_health(&self) -> Result<()> {
+        self.clear_screen();
+        self.print_section_header("Archive.org API Health Status");
+
+        println!("{} Archive.org API Health Status", "🏥".blue().bold());
+        println!();
+
+        // Create a test API client
+        use crate::{
+            infrastructure::api::{get_archive_servers, EnhancedArchiveApiClient},
+            utilities::common::get_user_agent,
+        };
+
+        let client = reqwest::Client::builder()
+            .user_agent(get_user_agent())
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
+
+        let mut api_client = EnhancedArchiveApiClient::new(client);
+
+        // Test basic connectivity with official status endpoint
+        println!("{} Testing Archive.org service status...", "🔗".cyan());
+        match api_client.get_service_status().await {
+            Ok(response) => {
+                let status = response.status();
+                println!("  ✅ Status endpoint successful (HTTP {})", status);
+
+                // Try to parse the status response
+                if let Ok(text) = response.text().await {
+                    if let Ok(status_data) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(status_msg) = status_data.get("status").and_then(|s| s.as_str())
+                        {
+                            println!("  📊 Service Status: {}", status_msg);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                println!("  ❌ Status check failed: {}", e);
+            }
+        }
+
+        // Test metadata API
+        println!("\n{} Testing Metadata API...", "📋".cyan());
+        match api_client.get_metadata("nasa").await {
+            Ok(response) => {
+                println!(
+                    "  ✅ Metadata API successful (status: {})",
+                    response.status()
+                );
+            }
+            Err(e) => {
+                println!("  ❌ Metadata API failed: {}", e);
+            }
+        }
+
+        // Test search API
+        println!("\n{} Testing Search API...", "🔍".cyan());
+        match api_client
+            .search_items("collection:nasa", Some("identifier,title"), Some(1), None)
+            .await
+        {
+            Ok(response) => {
+                println!("  ✅ Search API successful (status: {})", response.status());
+
+                // Parse search results to show functionality
+                if let Ok(text) = response.text().await {
+                    if let Ok(search_data) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(num_found) =
+                            search_data.get("response").and_then(|r| r.get("numFound"))
+                        {
+                            println!(
+                                "  📊 Search returned {} total items in nasa collection",
+                                num_found
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                println!("  ❌ Search API failed: {}", e);
+            }
+        }
+
+        // Display server list
+        println!("\n{} Available Archive.org Servers:", "🌐".green().bold());
+        let servers = get_archive_servers();
+        for (i, server) in servers.iter().enumerate() {
+            println!(
+                "  {:<2} {}",
+                format!("{}.", i + 1).dimmed(),
+                server.bright_blue()
+            );
+        }
+
+        println!("\n{} Health check completed!", "✅".green().bold());
+        self.wait_for_keypress();
+        Ok(())
     }
 
     async fn browse_and_download(&mut self) -> Result<()> {

@@ -377,14 +377,44 @@ async fn main() -> Result<()> {
 
     // Check if we have an identifier when we need one
     if raw_identifier.is_none() {
-        // If no identifier and no flags/subcommands that don't need it, show help
+        // If no identifier and no flags/subcommands that don't need it, launch smart mode detection
         if !matches.get_flag("api-health")
             && !matches.get_flag("list-formats")
             && !matches.get_flag("list-formats-detailed")
             && !matches.get_flag("analyze-metadata")
             && matches.subcommand().is_none()
         {
-            anyhow::bail!("Archive identifier is required for download operations. Use --help for more information.");
+            // No arguments provided that require identifier - use smart detection for best interface mode
+            println!(
+                "{} No archive identifier provided, launching interactive mode...",
+                "🚀".bright_blue()
+            );
+
+            if can_use_gui() {
+                #[cfg(feature = "gui")]
+                {
+                    println!(
+                        "{} GUI environment detected, launching graphical interface...",
+                        "🎨".bright_green()
+                    );
+                    return launch_gui().await;
+                }
+                #[cfg(not(feature = "gui"))]
+                {
+                    println!(
+                        "{} GUI environment detected but GUI features not compiled in.",
+                        "⚠️".yellow()
+                    );
+                    println!("{} Using interactive CLI menu instead...", "📋".blue());
+                    return show_interactive_menu().await;
+                }
+            } else {
+                println!(
+                    "{} Command-line environment detected, using interactive menu...",
+                    "💻".green()
+                );
+                return show_interactive_menu().await;
+            }
         }
         return Ok(()); // This shouldn't be reached due to subcommand handling above
     }
