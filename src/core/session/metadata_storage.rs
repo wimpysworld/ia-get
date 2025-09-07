@@ -871,34 +871,44 @@ pub fn sanitize_filename_for_filesystem(filename: &str) -> String {
 /// Check if Windows long path support is enabled
 #[cfg(target_os = "windows")]
 pub fn is_windows_long_path_enabled() -> bool {
-    // Try to create a file in a path longer than 260 characters to test if long paths work
-    use std::env;
-    use std::fs;
-    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Once;
 
-    let temp_dir = env::temp_dir();
-    let long_dir_name = "a".repeat(220); // Create a long directory name
-    let test_dir = temp_dir.join("ia-get-longpath-test").join(&long_dir_name);
-    let test_file = test_dir.join("testfile.txt");
+    static INIT: Once = Once::new();
+    static LONG_PATH_ENABLED: AtomicBool = AtomicBool::new(false);
 
-    // First, try to create the directory structure
-    if fs::create_dir_all(&test_dir).is_err() {
-        return false;
-    }
+    INIT.call_once(|| {
+        // Try to create a file in a path longer than 260 characters to test if long paths work
+        use std::env;
+        use std::fs;
+        use std::io::Write;
 
-    // Try to create and write a file - this is the real test for long path support
-    let result = match fs::File::create(&test_file) {
-        Ok(mut file) => {
-            // Try to write to the file to ensure it's fully functional
-            file.write_all(b"test").is_ok()
-        }
-        Err(_) => false,
-    };
+        let temp_dir = env::temp_dir();
+        let long_dir_name = "a".repeat(220); // Create a long directory name
+        let test_dir = temp_dir.join("ia-get-longpath-test").join(&long_dir_name);
+        let test_file = test_dir.join("testfile.txt");
 
-    // Clean up the test directory
-    let _ = fs::remove_dir_all(temp_dir.join("ia-get-longpath-test"));
+        // First, try to create the directory structure
+        let result = if fs::create_dir_all(&test_dir).is_err() {
+            false
+        } else {
+            // Try to create and write a file - this is the real test for long path support
+            match fs::File::create(&test_file) {
+                Ok(mut file) => {
+                    // Try to write to the file to ensure it's fully functional
+                    file.write_all(b"test").is_ok()
+                }
+                Err(_) => false,
+            }
+        };
 
-    result
+        // Clean up the test directory
+        let _ = fs::remove_dir_all(temp_dir.join("ia-get-longpath-test"));
+
+        LONG_PATH_ENABLED.store(result, Ordering::SeqCst);
+    });
+
+    LONG_PATH_ENABLED.load(Ordering::SeqCst)
 }
 
 #[cfg(not(target_os = "windows"))]
