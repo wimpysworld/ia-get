@@ -1,6 +1,6 @@
 name: ia_get_mobile
 description: Mobile app for downloading files from the Internet Archive
-version: 1.0.0+1
+version: 1.6.0+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

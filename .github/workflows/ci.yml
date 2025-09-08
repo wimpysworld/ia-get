@@ -401,10 +401,77 @@ jobs:
         
         Write-Host "Cache cleanup completed"
 
+  android-build:
+    name: Android Build (Development)
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v5
+
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'zulu'
+        java-version: '17'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+    - name: Install cargo-ndk
+      run: cargo install cargo-ndk
+
+    - name: Cache Android dependencies
+      uses: actions/cache@v4.2.4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
+          ~/.android
+        key: ${{ runner.os }}-android-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-android-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-android-
+
+    - name: Build Android libraries
+      run: |
+        chmod +x scripts/build-android.sh
+        ./scripts/build-android.sh
+
+    - name: Package Android artifacts
+      run: |
+        mkdir -p android-artifacts
+        # Copy native libraries
+        cp -r target/android android-artifacts/native-libs
+        # Copy documentation
+        cp README.md LICENSE android-artifacts/ || true
+        # Create archive
+        cd android-artifacts
+        tar -czf ../ia-get-android-dev.tar.gz *
+        cd ..
+        # Calculate hash
+        sha256sum ia-get-android-dev.tar.gz > android-dev-hash.txt
+
+    - name: Upload Android artifacts
+      uses: actions/upload-artifact@v4.6.2
+      with:
+        name: ia-get-android-dev
+        path: |
+          ia-get-android-dev.tar.gz
+          android-dev-hash.txt
+        retention-days: 30
+
   release:
     name: Create Development Release
     runs-on: ubuntu-latest
-    needs: [security, test]
+    needs: [security, test, android-build]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     
     steps:
@@ -417,7 +484,7 @@ jobs:
       uses: actions/download-artifact@v5
       with:
         path: release-artifacts
-        pattern: ia-get-*-gui  # Only download GUI artifacts for release
+        pattern: ia-get-*  # Download both GUI and Android artifacts
 
     - name: Prepare release artifacts
       run: |
@@ -436,7 +503,7 @@ jobs:
         echo "" >> ../HASHES.md
         
         # Collect hashes from all hash files
-        for hash_file in ../release-artifacts/*/hashes_*_gui.txt; do
+        for hash_file in ../release-artifacts/*/hashes_*_gui.txt ../release-artifacts/*/android-dev-hash.txt; do
           if [ -f "$hash_file" ]; then
             # Read each line from the hash file and match with files in final-artifacts
             while IFS= read -r line; do
@@ -470,6 +537,16 @@ jobs:
         - **Linux**: \`ia-get-Linux.tar.gz\`
         - **Windows**: \`ia-get-Windows.zip\` 
         - **macOS**: \`ia-get-macOS.tar.gz\`
+        - **🤖 Android**: \`ia-get-android-dev.tar.gz\` (native libraries for app development)
+        
+        ### 📱 Android Development
+        The Android package contains native libraries for all major Android architectures:
+        - **ARM64** (arm64-v8a) - Modern devices
+        - **ARMv7** (armeabi-v7a) - Older devices
+        - **x86_64** - Intel emulators
+        - **x86** - Legacy emulators
+        
+        Perfect for integrating with Flutter, React Native, or native Android apps.
         
         $(cat HASHES.md)
         

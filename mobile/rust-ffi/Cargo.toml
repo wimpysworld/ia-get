@@ -1,6 +1,6 @@
 [package]
 name = "ia_get_mobile"
-version = "0.1.0"
+version = "1.6.0"
 edition = "2021"
 description = "Mobile FFI wrapper for ia-get CLI"
 authors = ["Fork Maintainer <gameaday@users.noreply.github.com>"]
