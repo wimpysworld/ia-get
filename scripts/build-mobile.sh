@@ -3,20 +3,14 @@
 
 set -e
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+# Source common utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
 
-echo -e "${BLUE}Building IA Get Mobile App...${NC}"
+info "Building IA Get Mobile App..."
 
 # Check if we're in the right directory
-if [[ ! -f "Cargo.toml" ]]; then
-    echo -e "${RED}Error: Must be run from the ia-get project root${NC}"
-    exit 1
-fi
+check_project_root
 
 # Configuration
 MOBILE_DIR="mobile"
@@ -32,7 +26,7 @@ ANDROID_TARGETS=(
     "i686-linux-android:x86"
 )
 
-echo -e "${YELLOW}Step 1: Building Rust FFI library for Android...${NC}"
+    echo -e "${YELLOW}Step 1: Building Rust FFI library for Android...${NC}"
 
 # Create output directories
 mkdir -p "$OUTPUT_DIR/android"
@@ -42,17 +36,14 @@ mkdir -p "$FLUTTER_DIR/android/app/src/main/jniLibs"
 for target_pair in "${ANDROID_TARGETS[@]}"; do
     IFS=':' read -r rust_target android_arch <<< "$target_pair"
     
-    echo -e "${BLUE}Building for ${rust_target} (${android_arch})...${NC}"
+    info "Building for $rust_target ($android_arch)..."
     
     # Install target if not already installed
-    if ! rustup target list --installed | grep -q "$rust_target"; then
-        echo -e "${BLUE}Installing target ${rust_target}...${NC}"
-        rustup target add "$rust_target"
-    fi
+    check_rust_target "$rust_target"
     
     # Build the FFI library
     if cargo build --target "$rust_target" --release --features ffi; then
-        echo -e "${GREEN}✓ Successfully built for ${rust_target}${NC}"
+        success "Successfully built for $rust_target"
         
         # Copy to Flutter Android directory
         mkdir -p "$FLUTTER_DIR/android/app/src/main/jniLibs/$android_arch"

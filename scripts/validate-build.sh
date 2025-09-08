@@ -2,31 +2,24 @@
 # Build validation script - catches issues early in the development process
 set -e
 
-echo "🔍 Build Validation Script"
+# Source common utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
+
+info "🔍 Build Validation Script"
 echo "=========================="
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-# Function to print status
+# Function to print status (using common utilities when possible)
 print_status() {
     local status=$1
     local message=$2
     if [ "$status" = "success" ]; then
-        echo -e "${GREEN}✅ $message${NC}"
+        success "✅ $message"
     elif [ "$status" = "warning" ]; then
-        echo -e "${YELLOW}⚠️  $message${NC}"
+        warning "⚠️  $message"
     else
         echo -e "${RED}❌ $message${NC}"
     fi
-}
-
-# Function to check if command exists
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
 }
 
 echo "📋 Checking prerequisites..."

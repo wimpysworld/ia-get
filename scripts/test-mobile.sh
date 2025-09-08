@@ -3,20 +3,14 @@
 
 set -e
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+# Source common utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
 
-echo -e "${BLUE}🧪 IA Get Mobile - Comprehensive Testing Suite${NC}"
+info "🧪 IA Get Mobile - Comprehensive Testing Suite"
 
 # Check if we're in the right directory
-if [[ ! -f "Cargo.toml" ]]; then
-    echo -e "${RED}Error: Must be run from the ia-get project root${NC}"
-    exit 1
-fi
+check_project_root
 
 FLUTTER_DIR="mobile/flutter"
 RESULTS_DIR="target/test-results"

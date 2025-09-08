@@ -2,14 +2,12 @@
 # Build benchmark script - measures compilation times for different configurations
 set -e
 
-echo "🏗️  Build Time Benchmark"
-echo "========================"
+# Source common utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+info "🏗️  Build Time Benchmark"
+echo "========================"
 
 # Function to format time
 format_time() {
