@@ -16,9 +16,14 @@
 
 ### 🚀 Production Releases
 - **🐧 Linux**: [Latest Release](https://github.com/Gameaday/ia-get-cli/releases/latest) (x86_64, ARM, musl)
-- **🪟 Windows**: [Latest Release](https://github.com/Gameaday/ia-get-cli/releases/latest) (x86_64)
+- **🪟 Windows**: [Latest Release](https://github.com/Gameaday/ia-get-cli/releases/latest) (x86_64, code-signed)
 - **🍎 macOS**: [Latest Release](https://github.com/Gameaday/ia-get-cli/releases/latest) (Intel + Apple Silicon)
 - **🤖 Android**: [Latest Release](https://github.com/Gameaday/ia-get-cli/releases/latest) (Native libraries for app development)
+
+### 🔐 Security & Trust
+- **Windows binaries are code-signed** using Azure Trusted Signing to prevent SmartScreen warnings
+- **SHA256 checksums** provided for all releases to verify file integrity
+- **Automated security audits** run on every commit to detect vulnerabilities
 
 ### 🔧 Development Builds
 - **Latest Changes**: [Development Release](https://github.com/Gameaday/ia-get-cli/releases/tag/development) (All platforms + Android)

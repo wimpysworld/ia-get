@@ -269,6 +269,49 @@ jobs:
             DEBIAN_FRONTEND=noninteractive sudo apt-get -y install binutils-aarch64-linux-gnu
           fi
 
+      - name: Sign Windows executable
+        if: matrix.job.target == 'x86_64-pc-windows-msvc' && matrix.job.os == 'windows-latest'
+        uses: azure/trusted-signing@v3
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          code-signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}/target/${{ matrix.job.target }}/release
+          files-folder-filter: exe
+          files-folder-recurse: false
+          files-folder-depth: 1
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify Windows code signature
+        if: matrix.job.target == 'x86_64-pc-windows-msvc' && matrix.job.os == 'windows-latest'
+        shell: powershell
+        run: |
+          $exePath = "target/${{ matrix.job.target }}/release/ia-get.exe"
+          if (Test-Path $exePath) {
+            Write-Host "Verifying code signature for: $exePath"
+            $signature = Get-AuthenticodeSignature -FilePath $exePath
+            Write-Host "Signature Status: $($signature.Status)"
+            Write-Host "Certificate Subject: $($signature.SignerCertificate.Subject)"
+            Write-Host "Certificate Thumbprint: $($signature.SignerCertificate.Thumbprint)"
+            Write-Host "Timestamp: $($signature.TimeStamperCertificate.NotAfter)"
+            
+            if ($signature.Status -eq "Valid") {
+              Write-Host "✅ Code signature verification successful"
+            } else {
+              Write-Host "❌ Code signature verification failed: $($signature.Status)"
+              Write-Host "Status Message: $($signature.StatusMessage)"
+              exit 1
+            }
+          } else {
+            Write-Host "❌ Executable not found at: $exePath"
+            exit 1
+          }
+
       - name: Packaging final binary
         shell: bash
         env:
@@ -280,12 +323,25 @@ jobs:
           # Use the build script for packaging (it will run automatically on release builds)
           # Just ensure artifacts are created and calculate hashes
           mkdir -p artifacts
-          if [ -f "target/${{ matrix.job.target }}/release/$PROJECT_NAME" ]; then
-            cp "target/${{ matrix.job.target }}/release/$PROJECT_NAME" "artifacts/"
-          elif [ -f "target/release/$PROJECT_NAME" ]; then
-            cp "target/release/$PROJECT_NAME" "artifacts/"
+          
+          # Handle Windows vs Unix binary names
+          if [[ "$OS_NAME" == "windows-latest" ]]; then
+            BINARY_NAME="${PROJECT_NAME}.exe"
+          else
+            BINARY_NAME="$PROJECT_NAME"
+          fi
+          
+          if [ -f "target/${{ matrix.job.target }}/release/$BINARY_NAME" ]; then
+            cp "target/${{ matrix.job.target }}/release/$BINARY_NAME" "artifacts/"
+          elif [ -f "target/release/$BINARY_NAME" ]; then
+            cp "target/release/$BINARY_NAME" "artifacts/"
           else
             echo "Binary not found in expected location"
+            echo "Looking for: target/${{ matrix.job.target }}/release/$BINARY_NAME"
+            echo "Alternative: target/release/$BINARY_NAME"
+            ls -la target/${{ matrix.job.target }}/release/ || true
+            ls -la target/release/ || true
+            exit 1
           fi
 
           # Copy documentation
