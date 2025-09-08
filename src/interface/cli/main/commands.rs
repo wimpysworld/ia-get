@@ -17,6 +17,25 @@ use std::io::{self, Write};
 
 use super::{ConfigAction, HistoryAction};
 
+/// Valid configuration keys that can be set/unset
+const VALID_CONFIG_KEYS: &[&str] = &[
+    "default_output_path",
+    "concurrent_downloads",
+    "max_retries",
+    "default_include_ext",
+    "default_exclude_ext",
+    "default_min_file_size",
+    "default_max_file_size",
+    "default_resume",
+    "default_verbose",
+    "default_log_hash_errors",
+    "default_dry_run",
+    "default_compress",
+    "default_decompress",
+    "http_timeout",
+    "user_agent_override",
+];
+
 /// Handle configuration commands
 pub async fn handle_config_command(action: ConfigAction) -> Result<()> {
     let persistence = ConfigPersistence::new()?;
@@ -241,6 +260,13 @@ async fn set_config(persistence: &ConfigPersistence, key: &str, value: &str) -> 
                 Some(value.to_string())
             };
         }
+        "default_min_file_size" => {
+            config.default_min_file_size = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            };
+        }
         "default_max_file_size" => {
             config.default_max_file_size = if value.is_empty() {
                 None
@@ -289,13 +315,7 @@ async fn set_config(persistence: &ConfigPersistence, key: &str, value: &str) -> 
                 "Unknown configuration key: '{}'.\n\n{} Valid keys:\n  {}\n\n{} Use 'ia-get config show' to see current values",
                 key.bright_red(),
                 "💡".bright_yellow(),
-                [
-                    "default_output_path", "concurrent_downloads", "max_retries",
-                    "default_include_ext", "default_exclude_ext", "default_min_file_size",
-                    "default_max_file_size", "default_resume", "default_verbose",
-                    "default_log_hash_errors", "default_dry_run", "default_compress",
-                    "default_decompress", "http_timeout", "user_agent_override"
-                ].join(", ").bright_cyan(),
+                VALID_CONFIG_KEYS.join(", ").bright_cyan(),
                 "💡".bright_yellow()
             )));
         }
@@ -329,6 +349,9 @@ async fn unset_config(persistence: &ConfigPersistence, key: &str) -> Result<()> 
         "max_retries" => config.max_retries = default_config.max_retries,
         "default_include_ext" => config.default_include_ext = default_config.default_include_ext,
         "default_exclude_ext" => config.default_exclude_ext = default_config.default_exclude_ext,
+        "default_min_file_size" => {
+            config.default_min_file_size = default_config.default_min_file_size
+        }
         "default_max_file_size" => {
             config.default_max_file_size = default_config.default_max_file_size
         }
@@ -347,13 +370,7 @@ async fn unset_config(persistence: &ConfigPersistence, key: &str) -> Result<()> 
                 "Unknown configuration key: '{}'.\n\n{} Valid keys:\n  {}\n\n{} Use 'ia-get config show' to see current values",
                 key.bright_red(),
                 "💡".bright_yellow(),
-                [
-                    "default_output_path", "concurrent_downloads", "max_retries",
-                    "default_include_ext", "default_exclude_ext", "default_min_file_size",
-                    "default_max_file_size", "default_resume", "default_verbose",
-                    "default_log_hash_errors", "default_dry_run", "default_compress",
-                    "default_decompress", "http_timeout", "user_agent_override"
-                ].join(", ").bright_cyan(),
+                VALID_CONFIG_KEYS.join(", ").bright_cyan(),
                 "💡".bright_yellow()
             )));
         }
