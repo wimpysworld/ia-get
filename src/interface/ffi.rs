@@ -27,7 +27,12 @@ struct FfiSession {
 }
 
 impl FfiSession {
-    fn new(identifier: String, output_dir: String, concurrent_downloads: u32, auto_decompress: bool) -> Self {
+    fn new(
+        identifier: String,
+        output_dir: String,
+        concurrent_downloads: u32,
+        auto_decompress: bool,
+    ) -> Self {
         Self {
             identifier,
             output_dir,
@@ -90,7 +95,7 @@ pub struct FfiFileInfo {
     pub download_url: *const c_char,
     pub md5: *const c_char,
     pub sha1: *const c_char,
-    pub selected: bool,  // For UI selection state
+    pub selected: bool, // For UI selection state
 }
 
 /// FFI-compatible archive metadata
@@ -111,9 +116,9 @@ pub struct FfiArchiveMetadata {
 #[repr(C)]
 pub struct FfiDownloadProgress {
     pub session_id: i32,
-    pub overall_progress: f64,      // 0.0 to 1.0
+    pub overall_progress: f64, // 0.0 to 1.0
     pub current_file: *const c_char,
-    pub current_file_progress: f64, // 0.0 to 1.0  
+    pub current_file_progress: f64, // 0.0 to 1.0
     pub download_speed: u64,        // bytes per second
     pub eta_seconds: u64,           // estimated time remaining
     pub completed_files: u32,
@@ -249,7 +254,7 @@ pub extern "C" fn ia_get_get_metadata_json(identifier: *const c_char) -> *mut c_
 
 /// Create a new download session
 /// Returns session ID for tracking
-#[no_mangle] 
+#[no_mangle]
 pub extern "C" fn ia_get_create_session(
     identifier: *const c_char,
     config: *const FfiDownloadConfig,
@@ -425,7 +430,7 @@ pub extern "C" fn ia_get_start_download(
 
             // In a real implementation, this would:
             // 1. Get session from SESSIONS map
-            // 2. Create DownloadService with the configuration  
+            // 2. Create DownloadService with the configuration
             // 3. Set up progress reporting callbacks with proper tracking
             // 4. Start the download with proper session management
             // 5. Handle errors and completion with detailed progress info
@@ -433,9 +438,10 @@ pub extern "C" fn ia_get_start_download(
             // Simulate download progress
             for i in 1..=10 {
                 let progress = i as f64 / 10.0;
-                let progress_msg = CString::new(format!("Downloading... {}%", (progress * 100.0) as i32)).unwrap();
+                let progress_msg =
+                    CString::new(format!("Downloading... {}%", (progress * 100.0) as i32)).unwrap();
                 progress_callback(progress, progress_msg.as_ptr(), user_data);
-                
+
                 // Simulate work
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
@@ -540,7 +546,7 @@ pub extern "C" fn ia_get_get_session_info(session_id: c_int) -> *mut c_char {
             "status": "active",
             "created_at": chrono::Utc::now().to_rfc3339()
         });
-        
+
         match serde_json::to_string(&session_info) {
             Ok(json) => {
                 let c_string = CString::new(json).unwrap();
@@ -574,7 +580,7 @@ pub extern "C" fn ia_get_get_available_formats(identifier: *const c_char) -> *mu
             .filter_map(|file| file.format.as_ref())
             .map(|f| f.clone())
             .collect();
-        
+
         formats.sort();
         formats.dedup();
 
@@ -652,9 +658,10 @@ pub extern "C" fn ia_get_validate_urls(
             // For now, simulate validation
             for (i, _file) in files.iter().enumerate() {
                 let progress = (i + 1) as f64 / files.len() as f64;
-                let progress_msg = CString::new(format!("Validating {}/{}", i + 1, files.len())).unwrap();
+                let progress_msg =
+                    CString::new(format!("Validating {}/{}", i + 1, files.len())).unwrap();
                 progress_callback(progress, progress_msg.as_ptr(), user_data);
-                
+
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             }
 
