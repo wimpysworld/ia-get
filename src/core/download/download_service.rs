@@ -15,6 +15,7 @@ use crate::{
     utilities::filters::{format_size, parse_size_string},
     IaGetError, Result,
 };
+use colored::Colorize;
 use reqwest::Client;
 use std::path::PathBuf;
 
@@ -390,15 +391,19 @@ impl DownloadService {
             Ok(session) => {
                 // Update history with successful completion
                 let progress_summary = session.get_progress_summary();
-                let _ = download_history.update_entry(&entry_id, |entry| {
+                if let Err(e) = download_history.update_entry(&entry_id, |entry| {
                     entry.mark_completed();
                     entry.update_progress(
                         progress_summary.completed_files,
                         progress_summary.failed_files,
                         progress_summary.downloaded_bytes,
                     );
-                });
-                let _ = download_history.save_to_file(&history_path);
+                }) {
+                    eprintln!("{} Failed to update download history: {}", "⚠️".yellow(), e);
+                }
+                if let Err(e) = download_history.save_to_file(&history_path) {
+                    eprintln!("{} Failed to save download history: {}", "⚠️".yellow(), e);
+                }
 
                 let final_api_stats = api_client.get_stats();
                 Ok(DownloadResult::Success(
@@ -410,10 +415,14 @@ impl DownloadService {
             Err(e) => {
                 // Update history with failure
                 let error_message = format!("Download failed: {}", e);
-                let _ = download_history.update_entry(&entry_id, |entry| {
+                if let Err(e) = download_history.update_entry(&entry_id, |entry| {
                     entry.mark_failed(e.to_string());
-                });
-                let _ = download_history.save_to_file(&history_path);
+                }) {
+                    eprintln!("{} Failed to update download history: {}", "⚠️".yellow(), e);
+                }
+                if let Err(e) = download_history.save_to_file(&history_path) {
+                    eprintln!("{} Failed to save download history: {}", "⚠️".yellow(), e);
+                }
 
                 Ok(DownloadResult::Error(error_message))
             }
