@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Google Play Services version -->
+    <integer name="google_play_services_version">12451000</integer>
+    
+    <!-- Version codes for different build types -->
+    <integer name="version_code_base">1</integer>
+    <integer name="version_code_dev">10000</integer>
+    <integer name="version_code_staging">20000</integer>
+    <integer name="version_code_production">30000</integer>
+</resources>

@@ -1,0 +1,45 @@
+# Android App Signing Configuration
+# 
+# This file should be placed at mobile/flutter/android/key.properties
+# DO NOT COMMIT THIS FILE - add it to .gitignore
+#
+# For development builds, you can use debug signing (automatically handled)
+# For production/store builds, you need proper keystore files
+
+# Upload Key Configuration (for Google Play App Signing)
+# This key is used to sign the app bundle that you upload to Play Console
+uploadKeyStore=upload-keystore.jks
+uploadKeyAlias=upload
+uploadStorePassword=your-upload-store-password
+uploadKeyPassword=your-upload-key-password
+
+# Release Key Configuration (for direct APK distribution)
+# Only needed if you're distributing APKs directly (not through Play Store)
+storeFile=release-keystore.jks
+keyAlias=release
+storePassword=your-release-store-password
+keyPassword=your-release-key-password
+
+# CI/CD Environment Variables (alternative to file-based config)
+# Set these in your CI/CD system for automated builds:
+#
+# UPLOAD_KEYSTORE_BASE64: Base64 encoded upload keystore file
+# UPLOAD_STORE_PASSWORD: Upload keystore password
+# UPLOAD_KEY_PASSWORD: Upload key password
+# UPLOAD_KEY_ALIAS: Upload key alias
+#
+# RELEASE_KEYSTORE_BASE64: Base64 encoded release keystore file  
+# RELEASE_STORE_PASSWORD: Release keystore password
+# RELEASE_KEY_PASSWORD: Release key password
+# RELEASE_KEY_ALIAS: Release key alias
+
+# Generate Upload Keystore:
+# keytool -genkey -v -keystore upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+
+# Generate Release Keystore (if needed):
+# keytool -genkey -v -keystore release-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release
+
+# For Google Play App Signing:
+# 1. Generate upload keystore (above)
+# 2. Create app bundle: ./scripts/build-mobile.sh --production --appbundle --store-ready
+# 3. Upload to Play Console - Google will manage the release signing key

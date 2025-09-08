@@ -1,8 +1,6 @@
 #!/bin/bash
-# Build script for Android cross-compilation
-# 
-# NOTE: This script builds native libraries only (.so files)
-# For complete Android APK builds, use: ./scripts/build-mobile.sh
+# Build script for Android native libraries only (without Flutter/APK)
+# This is a lightweight alternative to build-mobile.sh for developers who only need the .so files
 
 set -e
 
@@ -10,9 +8,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
-warning "This script builds native libraries only (.so files)"
-info "For complete Android APK builds, use: ./scripts/build-mobile.sh"
-info "Building ia-get for Android targets..."
+info "Building ia-get native libraries for Android targets..."
 
 # Configure Android cross-compilation environment
 configure_android_environment
@@ -56,4 +52,5 @@ else
     warning "cbindgen not found. Install with: cargo install cbindgen"
 fi
 
-success "Build complete!"
+success "Native library build complete!"
+info "Use 'scripts/build-mobile.sh' to build the complete Android APK"

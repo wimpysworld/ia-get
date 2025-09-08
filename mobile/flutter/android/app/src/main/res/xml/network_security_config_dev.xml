@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Network Security Configuration for Development -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- Allow cleartext for local development -->
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">10.0.0.0/8</domain>
+        <domain includeSubdomains="true">192.168.0.0/16</domain>
+        
+        <!-- Internet Archive domains -->
+        <domain includeSubdomains="true">archive.org</domain>
+        <domain includeSubdomains="true">web.archive.org</domain>
+        <domain includeSubdomains="true">ia600000.us.archive.org</domain>
+        <domain includeSubdomains="true">ia800000.us.archive.org</domain>
+        <domain includeSubdomains="true">ia900000.us.archive.org</domain>
+        <domain includeSubdomains="true">ia-items-proxied.archive.org</domain>
+        <domain includeSubdomains="true">ia-download.archive.org</domain>
+    </domain-config>
+    
+    <!-- More permissive base configuration for development -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system"/>
+            <certificates src="user"/>
+        </trust-anchors>
+    </base-config>
+    
+    <!-- Debug overrides for testing -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system"/>
+            <certificates src="user"/>
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Include app preferences -->
+    <include domain="sharedpref" path="."/>
+    
+    <!-- Include downloaded files metadata -->
+    <include domain="file" path="downloads/"/>
+    
+    <!-- Exclude sensitive data -->
+    <exclude domain="sharedpref" path="auth_tokens.xml"/>
+    <exclude domain="file" path="cache/"/>
+    <exclude domain="file" path="temp/"/>
+    
+    <!-- Exclude large files to keep backup size reasonable -->
+    <exclude domain="file" path="downloads/*.mp4"/>
+    <exclude domain="file" path="downloads/*.avi"/>
+    <exclude domain="file" path="downloads/*.iso"/>
+</full-backup-content>

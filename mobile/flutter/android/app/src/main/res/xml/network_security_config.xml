@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Network Security Configuration for Production -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">archive.org</domain>
+        <domain includeSubdomains="true">web.archive.org</domain>
+        <domain includeSubdomains="true">ia600000.us.archive.org</domain>
+        <domain includeSubdomains="true">ia800000.us.archive.org</domain>
+        <domain includeSubdomains="true">ia900000.us.archive.org</domain>
+        
+        <!-- Internet Archive CDN domains -->
+        <domain includeSubdomains="true">ia-items-proxied.archive.org</domain>
+        <domain includeSubdomains="true">ia-download.archive.org</domain>
+        
+        <!-- Pin certificates for Internet Archive (optional, for extra security) -->
+        <pin-set expiration="2026-01-01">
+            <!-- Internet Archive certificate pins - update these periodically -->
+            <pin digest="SHA-256">YLh1dUR9y6Kja30RrAn7JKnbQG/uEtLMkBgFF2Fuihg=</pin>
+            <pin digest="SHA-256">sRHdihwgkaib1P1gxX8HFszlD+7/gTfNvuAybgLPNis=</pin>
+        </pin-set>
+        
+        <trust-anchors>
+            <!-- Trust system certificates -->
+            <certificates src="system"/>
+        </trust-anchors>
+    </domain-config>
+    
+    <!-- Base configuration for all other domains -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+</network-security-config>

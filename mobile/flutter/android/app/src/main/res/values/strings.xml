@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">IA Get</string>
+    <string name="version_name">1.6.0</string>
+    
+    <!-- App description for Play Store -->
+    <string name="app_description">Download files from the Internet Archive with ease. Access millions of books, movies, music, software, and more from archive.org directly on your Android device.</string>
+    
+    <!-- Permission explanations for users -->
+    <string name="permission_storage_title">Storage Access</string>
+    <string name="permission_storage_explanation">IA Get needs storage access to save downloaded files to your device. Files are saved to your Downloads folder.</string>
+    
+    <string name="permission_notification_title">Notifications</string>
+    <string name="permission_notification_explanation">IA Get uses notifications to keep you updated on download progress and completion.</string>
+    
+    <!-- Error messages -->
+    <string name="error_network_unavailable">Network connection unavailable. Please check your internet connection.</string>
+    <string name="error_download_failed">Download failed. Please try again.</string>
+    <string name="error_storage_permission">Storage permission is required to save files.</string>
+    
+    <!-- Download states -->
+    <string name="download_starting">Starting download…</string>
+    <string name="download_in_progress">Downloading: %1$d%%</string>
+    <string name="download_completed">Download completed</string>
+    <string name="download_paused">Download paused</string>
+    <string name="download_cancelled">Download cancelled</string>
+    
+    <!-- Internet Archive specifics -->
+    <string name="ia_collection">Collection</string>
+    <string name="ia_item">Item</string>
+    <string name="ia_file_count">%1$d files</string>
+    <string name="ia_total_size">Total size: %1$s</string>
+</resources>

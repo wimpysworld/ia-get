@@ -402,7 +402,7 @@ jobs:
         Write-Host "Cache cleanup completed"
 
   android-build:
-    name: Android Build (Development)
+    name: Android APK Build (Development)
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     
@@ -418,6 +418,13 @@ jobs:
 
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24.5'
+        channel: 'stable'
+        cache: true
 
     - name: Setup Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -435,21 +442,29 @@ jobs:
           ~/.cargo/git
           target/
           ~/.android
-        key: ${{ runner.os }}-android-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}
+          ~/.pub-cache
+        key: ${{ runner.os }}-android-apk-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}-${{ hashFiles('mobile/**/pubspec.yaml') }}
         restore-keys: |
-          ${{ runner.os }}-android-${{ hashFiles('**/Cargo.lock') }}-
-          ${{ runner.os }}-android-
+          ${{ runner.os }}-android-apk-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}-
+          ${{ runner.os }}-android-apk-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-android-apk-
 
-    - name: Build Android libraries
+    - name: Build Android APK
       run: |
-        chmod +x scripts/build-android.sh
-        ./scripts/build-android.sh
+        chmod +x scripts/build-mobile.sh
+        ./scripts/build-mobile.sh
 
     - name: Package Android artifacts
       run: |
         mkdir -p android-artifacts
-        # Copy native libraries
-        cp -r target/android android-artifacts/native-libs
+        # Copy APK files
+        if [ -d "target/mobile" ]; then
+          cp target/mobile/*.apk android-artifacts/ 2>/dev/null || true
+        fi
+        # Copy native libraries for developers
+        if [ -d "target/android" ]; then
+          cp -r target/android android-artifacts/native-libs
+        fi
         # Copy documentation
         cp README.md LICENSE android-artifacts/ || true
         # Create archive

@@ -11,14 +11,51 @@ if (flutterRoot == null) {
     throw new GradleException("Flutter SDK not found. Define location with flutter.sdk in the local.properties file.")
 }
 
+// Version management with automated build numbers
 def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
-if (flutterVersionCode == null) {
-    flutterVersionCode = '1'
+def flutterVersionName = localProperties.getProperty('flutter.versionName')
+
+// Auto-generate version from git if not specified
+if (flutterVersionCode == null || flutterVersionName == null) {
+    def gitVersionInfo = getGitVersionInfo()
+    if (flutterVersionCode == null) {
+        flutterVersionCode = gitVersionInfo['versionCode']
+    }
+    if (flutterVersionName == null) {
+        flutterVersionName = gitVersionInfo['versionName']
+    }
 }
 
-def flutterVersionName = localProperties.getProperty('flutter.versionName')
-if (flutterVersionName == null) {
-    flutterVersionName = '1.0.0'
+// Function to get version info from git
+def getGitVersionInfo() {
+    def versionName = '1.0.0'
+    def versionCode = '1'
+    
+    try {
+        // Get the latest git tag for version name
+        def tagProcess = 'git describe --tags --abbrev=0'.execute()
+        tagProcess.waitFor()
+        if (tagProcess.exitValue() == 0) {
+            def tag = tagProcess.text.trim()
+            if (tag.startsWith('v')) {
+                versionName = tag.substring(1)
+            } else {
+                versionName = tag
+            }
+        }
+        
+        // Get commit count for version code
+        def commitCountProcess = 'git rev-list --count HEAD'.execute()
+        commitCountProcess.waitFor()
+        if (commitCountProcess.exitValue() == 0) {
+            versionCode = commitCountProcess.text.trim()
+        }
+    } catch (Exception e) {
+        println "Warning: Could not get git version info: ${e.message}"
+        // Fallback to default values
+    }
+    
+    return ['versionName': versionName, 'versionCode': versionCode]
 }
 
 apply plugin: 'com.android.application'
@@ -33,7 +70,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    compileSdkVersion 34
+    compileSdkVersion 36
     ndkVersion flutter.ndkVersion
 
     compileOptions {
@@ -49,36 +86,133 @@ android {
         main.java.srcDirs += 'src/main/kotlin'
     }
 
+    // Product flavors for different environments
+    flavorDimensions "environment"
+    productFlavors {
+        development {
+            dimension "environment"
+            applicationIdSuffix ".dev"
+            versionNameSuffix "-dev"
+            resValue "string", "app_name", "IA Get (Dev)"
+            buildConfigField "String", "ENVIRONMENT", '"development"'
+            buildConfigField "boolean", "DEBUG_MODE", "true"
+            manifestPlaceholders = [
+                appIcon: "@mipmap/ic_launcher_dev",
+                networkSecurityConfig: "@xml/network_security_config_dev"
+            ]
+        }
+        
+        staging {
+            dimension "environment"
+            applicationIdSuffix ".staging"
+            versionNameSuffix "-staging"
+            resValue "string", "app_name", "IA Get (Staging)"
+            buildConfigField "String", "ENVIRONMENT", '"staging"'
+            buildConfigField "boolean", "DEBUG_MODE", "true"
+            manifestPlaceholders = [
+                appIcon: "@mipmap/ic_launcher_staging",
+                networkSecurityConfig: "@xml/network_security_config_staging"
+            ]
+        }
+        
+        production {
+            dimension "environment"
+            resValue "string", "app_name", "IA Get"
+            buildConfigField "String", "ENVIRONMENT", '"production"'
+            buildConfigField "boolean", "DEBUG_MODE", "false"
+            manifestPlaceholders = [
+                appIcon: "@mipmap/ic_launcher",
+                networkSecurityConfig: "@xml/network_security_config"
+            ]
+        }
+    }
+
     defaultConfig {
         applicationId "com.gameaday.ia_get_mobile"
         minSdkVersion 21
-        targetSdkVersion 34
+        targetSdkVersion 36
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
         
         // Enable multidex for large APKs
         multiDexEnabled true
         
-        // Native library architecture
+        // Native library architecture (removed x86 for Play Store compliance)
         ndk {
             abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
         }
+        
+        // Test instrumentation runner
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        
+        // Vector drawables support
+        vectorDrawables.useSupportLibrary true
     }
 
     signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+        
+        upload {
+            if (keystoreProperties['uploadKeyStore']) {
+                keyAlias keystoreProperties['uploadKeyAlias']
+                keyPassword keystoreProperties['uploadKeyPassword']
+                storeFile keystoreProperties['uploadKeyStore'] ? file(keystoreProperties['uploadKeyStore']) : null
+                storePassword keystoreProperties['uploadStorePassword']
+            }
+        }
+        
         release {
             if (keystoreProperties['storeFile']) {
                 keyAlias keystoreProperties['keyAlias']
                 keyPassword keystoreProperties['keyPassword']
                 storeFile keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
                 storePassword keystoreProperties['storePassword']
+            } else {
+                // Fallback to upload key for CI builds
+                keyAlias keystoreProperties['uploadKeyAlias']
+                keyPassword keystoreProperties['uploadKeyPassword']
+                storeFile keystoreProperties['uploadKeyStore'] ? file(keystoreProperties['uploadKeyStore']) : null
+                storePassword keystoreProperties['uploadStorePassword']
             }
         }
     }
 
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+            debuggable true
+            minifyEnabled false
+            shrinkResources false
+            
+            // Build config fields for debugging
+            buildConfigField "String", "VERSION_NAME", "\"${flutterVersionName}\""
+            buildConfigField "int", "VERSION_CODE", "${flutterVersionCode}"
+            buildConfigField "String", "BUILD_TYPE", "\"debug\""
+            buildConfigField "long", "BUILD_TIME", "${System.currentTimeMillis()}L"
+        }
+        
+        profile {
+            signingConfig signingConfigs.debug
+            debuggable false
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            
+            // Build config fields for profiling
+            buildConfigField "String", "VERSION_NAME", "\"${flutterVersionName}\""
+            buildConfigField "int", "VERSION_CODE", "${flutterVersionCode}"
+            buildConfigField "String", "BUILD_TYPE", "\"profile\""
+            buildConfigField "long", "BUILD_TIME", "${System.currentTimeMillis()}L"
+        }
+        
         release {
-            signingConfig signingConfigs.release
+            // Use upload key for CI builds, release key for manual builds
+            signingConfig keystoreProperties['storeFile'] ? signingConfigs.release : signingConfigs.upload
             
             // Production optimizations
             minifyEnabled true
@@ -88,46 +222,47 @@ android {
             // Build config fields
             buildConfigField "String", "VERSION_NAME", "\"${flutterVersionName}\""
             buildConfigField "int", "VERSION_CODE", "${flutterVersionCode}"
+            buildConfigField "String", "BUILD_TYPE", "\"release\""
+            buildConfigField "long", "BUILD_TIME", "${System.currentTimeMillis()}L"
             
             // Disable debugging
             debuggable false
             jniDebuggable false
             renderscriptDebuggable false
-        }
-        
-        debug {
-            signingConfig signingConfigs.debug
-            debuggable true
-            applicationIdSuffix ".debug"
-            versionNameSuffix "-debug"
-        }
-        
-        profile {
-            signingConfig signingConfigs.debug
-            debuggable false
-            applicationIdSuffix ".profile"
-            versionNameSuffix "-profile"
+            
+            // Additional optimizations for Play Store
+            zipAlignEnabled true
+            crunchPngs true
         }
     }
 
-    // App Bundle configuration
+    // App Bundle configuration for Play Store
     bundle {
         language {
-            enableSplit = false
+            // Enable language splits for smaller downloads
+            enableSplit = true
         }
         density {
+            // Enable density splits for smaller downloads  
             enableSplit = true
         }
         abi {
+            // Enable ABI splits for smaller downloads
             enableSplit = true
         }
     }
 
-    // Lint options
+    // Lint options for Play Store compliance
     lintOptions {
-        checkReleaseBuilds false
+        checkReleaseBuilds true
         abortOnError false
-        disable 'InvalidPackage'
+        disable 'InvalidPackage', 'MissingTranslation'
+        warningsAsErrors false
+        xmlReport true
+        htmlReport true
+        
+        // Play Store specific checks
+        enable 'GoogleAppIndexingWarning', 'GoogleAppIndexingUrlError'
     }
 
     // Packaging options
@@ -145,16 +280,31 @@ dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
     implementation 'androidx.multidex:multidex:2.0.1'
     
-    // Core Android libraries
-    implementation 'androidx.core:core-ktx:1.12.0'
-    implementation 'androidx.appcompat:appcompat:1.6.1'
+    // Core Android libraries - Updated for Play Store compliance
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.6'
+    implementation 'androidx.activity:activity-compose:1.9.2'
     
-    // Material Design
-    implementation 'com.google.android.material:material:1.11.0'
+    // Material Design - Latest version
+    implementation 'com.google.android.material:material:1.12.0'
     
-    // File provider
-    implementation 'androidx.core:core:1.12.0'
+    // File provider and storage
+    implementation 'androidx.core:core:1.13.1'
     
-    // Network security
+    // Network security and privacy compliance
     implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+    implementation 'androidx.work:work-runtime-ktx:2.9.1'
+    
+    // Play Core for app updates and feature delivery
+    implementation 'com.google.android.play:core:1.10.3'
+    implementation 'com.google.android.play:core-ktx:1.8.1'
+    
+    // Testing dependencies
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.6.1'
+    
+    // For Play Store compliance and better app performance
+    implementation 'androidx.startup:startup-runtime:1.1.1'
 }

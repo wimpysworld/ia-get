@@ -80,7 +80,7 @@ Required for Play Store - covers data collection, storage, and usage
 ### Version Information
 - **Version Name**: 1.0.0
 - **Version Code**: 1
-- **Target SDK**: 34 (Android 14)
+- **Target SDK**: 36 (Android 15)
 - **Minimum SDK**: 21 (Android 5.0)
 
 ### Signing Configuration

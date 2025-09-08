@@ -18,7 +18,7 @@
 - **🐧 Linux**: [Latest Release](https://github.com/Gameaday/ia-get-cli/releases/latest) (x86_64, ARM, musl)
 - **🪟 Windows**: [Latest Release](https://github.com/Gameaday/ia-get-cli/releases/latest) (x86_64, code-signed)
 - **🍎 macOS**: [Latest Release](https://github.com/Gameaday/ia-get-cli/releases/latest) (Intel + Apple Silicon)
-- **🤖 Android**: [Latest Release](https://github.com/Gameaday/ia-get-cli/releases/latest) (Native libraries for app development)
+- **🤖 Android**: [Latest Release](https://github.com/Gameaday/ia-get-cli/releases/latest) (APK + Native libraries)
 
 ### 🔐 Security & Trust
 - **Windows binaries are code-signed** using Azure Trusted Signing to prevent SmartScreen warnings
@@ -29,13 +29,19 @@
 - **Latest Changes**: [Development Release](https://github.com/Gameaday/ia-get-cli/releases/tag/development) (All platforms + Android)
 
 ### 📱 Android Integration
-The Android package contains optimized native libraries for:
+The Android package now contains both installable APKs and native libraries:
+
+**APK Files:**
+- **Universal APK** - Ready to install on any Android device (API 21+)
+- **Split APKs** - Optimized builds for specific architectures (smaller downloads)
+
+**Native Libraries for Development:**
 - **ARM64** (arm64-v8a) - Modern devices
 - **ARMv7** (armeabi-v7a) - Older devices  
 - **x86_64** - Intel emulators
 - **x86** - Legacy emulators
 
-Perfect for embedding into Flutter, React Native, or native Android apps. See [Mobile Development Guide](docs/MOBILE_DEVELOPMENT_GUIDE.md) for integration instructions.
+The APK provides a ready-to-use mobile app, while the native libraries are perfect for embedding into Flutter, React Native, or native Android apps. See [Mobile Development Guide](docs/MOBILE_DEVELOPMENT_GUIDE.md) for integration instructions.
 
 > **🍴 Fork Notice**: This is a heavily modified fork of the original [`wimpysworld/ia-get`](https://github.com/wimpysworld/ia-get) project. Due to extensive architectural changes and different development directions, changes from this fork will not be pushed back to the upstream repository.
 
@@ -68,7 +74,7 @@ ia-get --help
 
 ### Cross-Platform Support
 - **🖥️ Desktop**: CLI and GUI modes for Linux, Windows, macOS
-- **📱 Mobile**: Native Android libraries for app integration
+- **📱 Mobile**: Android APK app + Native libraries for development
 - **🔧 Development**: Hot-reload support and comprehensive debugging tools
 
 ### User Interfaces
@@ -141,6 +147,27 @@ cargo build --profile fast-dev --no-default-features --features cli
 
 # Optimized release
 cargo build --release --no-default-features --features cli
+
+# Android builds (requires Android NDK)
+./scripts/build-mobile.sh          # Complete APK build  
+./scripts/build-android-libs-only.sh  # Native libraries only
+```
+
+### 📱 Android Development
+
+```shell
+# Prerequisites for Android builds
+export ANDROID_NDK_HOME=/path/to/android/ndk
+export ANDROID_HOME=/path/to/android/sdk
+
+# Install Flutter (for APK builds)
+# See https://flutter.dev/docs/get-started/install
+
+# Build Android APK + Native Libraries
+./scripts/build-mobile.sh
+
+# Build only native libraries (faster, no Flutter required)  
+./scripts/build-android-libs-only.sh
 ```
 
 ### Build Profiles
@@ -200,7 +227,7 @@ The project now includes comprehensive CI/CD processes:
 - **Linux**: x86_64, ARM, musl variants
 - **Windows**: x86_64
 - **macOS**: Intel + Apple Silicon  
-- **Android**: Native libraries for all major architectures
+- **Android**: APK apps + Native libraries for all major architectures
 
 ## 🤖 A.I. Driven Development
 

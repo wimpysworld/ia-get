@@ -5,8 +5,15 @@
     <uses-permission android:name="android.permission.INTERNET" />
     
     <!-- Storage permissions for saving files -->
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" 
+        android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" 
+        android:maxSdkVersion="32" />
+    
+    <!-- Storage permissions for Android 13+ -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     
     <!-- Network state permission for connection monitoring -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -14,17 +21,35 @@
     <!-- Wake lock for background downloads -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     
-    <!-- Android 10+ scoped storage support -->
+    <!-- Foreground service permission for background downloads -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    
+    <!-- Post notifications permission for Android 13+ -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    
+    <!-- Android 10+ scoped storage support (optional) -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" 
-        android:minSdkVersion="30" />
+        android:minSdkVersion="30"
+        tools:ignore="ScopedStorage" />
+
+    <!-- Hardware requirements -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
     <application
-        android:label="IA Get Mobile"
+        android:label="@string/app_name"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="${appIcon}"
         android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:theme="@style/LaunchTheme"
-        android:requestLegacyExternalStorage="true">
+        android:networkSecurityConfig="${networkSecurityConfig}"
+        android:requestLegacyExternalStorage="true"
+        android:largeHeap="true"
+        android:hardwareAccelerated="true"
+        android:supportsRtl="true">
         
         <activity
             android:name=".MainActivity"
@@ -49,6 +74,14 @@
                 <data android:scheme="https"
                       android:host="archive.org" />
             </intent-filter>
+            
+            <!-- Handle custom deep links -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="iaget" />
+            </intent-filter>
         </activity>
         
         <!-- File provider for sharing downloaded files -->
@@ -72,7 +105,12 @@
         <!-- App metadata for store listing -->
         <meta-data
             android:name="com.gameaday.ia_get_mobile.APP_VERSION"
-            android:value="1.0.0" />
+            android:value="@string/version_name" />
+            
+        <!-- Google Play Services metadata -->
+        <meta-data
+            android:name="com.google.android.gms.version"
+            android:value="@integer/google_play_services_version" />
             
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
@@ -83,10 +121,22 @@
     
     <!-- Queries for Intent resolution (Android 11+) -->
     <queries>
+        <!-- Web browsing -->
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="http" />
+        </intent>
+        
+        <!-- File sharing -->
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="*/*" />
         </intent>
     </queries>
 </manifest>

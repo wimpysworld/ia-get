@@ -57,7 +57,7 @@ jobs:
             use-cross: true
 
   android-release:
-    name: Android Release Build
+    name: Android APK Release Build
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
 
@@ -73,6 +73,13 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.5'
+          channel: 'stable'
+          cache: true
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -90,15 +97,22 @@ jobs:
             ~/.cargo/git
             target/
             ~/.android
-          key: ${{ runner.os }}-android-release-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}
+            ~/.pub-cache
+          key: ${{ runner.os }}-android-release-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}-${{ hashFiles('mobile/**/pubspec.yaml') }}
           restore-keys: |
+            ${{ runner.os }}-android-release-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}-
             ${{ runner.os }}-android-release-${{ hashFiles('**/Cargo.lock') }}-
             ${{ runner.os }}-android-release-
 
-      - name: Build Android libraries
+      - name: Build Android APK and App Bundle
         run: |
-          chmod +x scripts/build-android.sh
-          ./scripts/build-android.sh
+          chmod +x scripts/build-mobile.sh
+          
+          # Build production App Bundle for Play Store
+          ./scripts/build-mobile.sh --production --appbundle --store-ready
+          
+          # Also build production APK for direct distribution
+          ./scripts/build-mobile.sh --production --store-ready
 
       - name: Package Android artifacts
         shell: bash
@@ -109,11 +123,35 @@ jobs:
           TAG_NAME=${GITHUB_REF#refs/tags/}
           mkdir -p android-release-artifacts
           
-          # Copy native libraries with proper structure
-          cp -r target/android android-release-artifacts/native-libs
+          # Copy App Bundle files (priority for Play Store)
+          if [ -d "target/mobile" ]; then
+            cp target/mobile/*.aab android-release-artifacts/ 2>/dev/null || true
+            cp target/mobile/*.apk android-release-artifacts/ 2>/dev/null || true
+            
+            # Copy split APKs if they exist
+            if [ -d "target/mobile/apk-variants-production" ]; then
+              mkdir -p android-release-artifacts/split-apks
+              cp target/mobile/apk-variants-production/* android-release-artifacts/split-apks/ 2>/dev/null || true
+            fi
+          fi
           
-          # Copy documentation
+          # Copy native libraries for developers
+          if [ -d "target/mobile/android" ]; then
+            cp -r target/mobile/android android-release-artifacts/native-libs
+          fi
+          
+          # Copy documentation and metadata
           cp README.md LICENSE android-release-artifacts/ || true
+          
+          # Create store submission package
+          if [ -f "android-release-artifacts/ia-get-mobile-production.aab" ]; then
+            mkdir -p android-release-artifacts/play-store
+            cp android-release-artifacts/ia-get-mobile-production.aab android-release-artifacts/play-store/
+            echo "# Google Play Store Submission Package" > android-release-artifacts/play-store/README.md
+            echo "" >> android-release-artifacts/play-store/README.md
+            echo "This App Bundle (.aab) is ready for submission to Google Play Store." >> android-release-artifacts/play-store/README.md
+            echo "Upload this file to Google Play Console for distribution." >> android-release-artifacts/play-store/README.md
+          fi
           
           # Create versioned archive
           cd android-release-artifacts
@@ -123,7 +161,19 @@ jobs:
           # Calculate hashes
           sha256sum "${PACKAGE_NAME}-${TAG_NAME}.tar.gz" > "ANDROID_HASHES_${TAG_NAME}.txt"
           
+          # Add individual file hashes for important files
+          if [ -f "android-release-artifacts/ia-get-mobile-production.aab" ]; then
+            echo "" >> "ANDROID_HASHES_${TAG_NAME}.txt"
+            echo "# Individual File Hashes" >> "ANDROID_HASHES_${TAG_NAME}.txt"
+            sha256sum android-release-artifacts/ia-get-mobile-production.aab >> "ANDROID_HASHES_${TAG_NAME}.txt"
+          fi
+          if [ -f "android-release-artifacts/ia-get-mobile-production.apk" ]; then
+            sha256sum android-release-artifacts/ia-get-mobile-production.apk >> "ANDROID_HASHES_${TAG_NAME}.txt"
+          fi
+          
           echo "Android release artifact created: ${PACKAGE_NAME}-${TAG_NAME}.tar.gz"
+          echo "Contents:"
+          tar -tzf "${PACKAGE_NAME}-${TAG_NAME}.tar.gz" | head -20
 
       - name: Upload Android release artifacts
         uses: softprops/action-gh-release@v2
