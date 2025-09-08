@@ -1339,6 +1339,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "embed-manifest"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41cd446c890d6bed1d8b53acef5f240069ebef91d6fae7c5f52efe61fe8b5eae"
+
+[[package]]
 name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2038,6 +2044,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_extras",
+ "embed-manifest",
  "env_logger",
  "flate2",
  "futures",

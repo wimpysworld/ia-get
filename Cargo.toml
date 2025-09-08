@@ -51,6 +51,9 @@ crate-type = ["rlib", "cdylib"]  # Support both static linking and dynamic libra
 tempfile = "3.0"
 criterion = { version = "0.7.0", features = ["html_reports"] }
 
+[target.'cfg(windows)'.build-dependencies]
+embed-manifest = "1.4.0"
+
 [features]
 default = ["cli"]
 cli = []
