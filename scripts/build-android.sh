@@ -7,9 +7,84 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}Building ia-get for Android targets...${NC}"
+
+# Check for Android NDK
+if [[ -z "$ANDROID_NDK_HOME" ]]; then
+    echo -e "${RED}Error: ANDROID_NDK_HOME environment variable is not set${NC}"
+    echo -e "${YELLOW}Please install Android NDK and set ANDROID_NDK_HOME${NC}"
+    echo -e "${YELLOW}Example: export ANDROID_NDK_HOME=\$ANDROID_HOME/ndk/27.3.13750724${NC}"
+    exit 1
+fi
+
+if [[ ! -d "$ANDROID_NDK_HOME" ]]; then
+    echo -e "${RED}Error: Android NDK directory not found: $ANDROID_NDK_HOME${NC}"
+    exit 1
+fi
+
+# Set Android API level (minimum supported version)
+ANDROID_API_LEVEL=${ANDROID_API_LEVEL:-21}
+NDK_BIN_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+if [[ ! -d "$NDK_BIN_DIR" ]]; then
+    echo -e "${RED}Error: NDK toolchain directory not found: $NDK_BIN_DIR${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✓ Using Android NDK: $ANDROID_NDK_HOME${NC}"
+echo -e "${GREEN}✓ Android API level: $ANDROID_API_LEVEL${NC}"
+
+# Configure cross-compilation environment variables
+export CC_aarch64_linux_android="$NDK_BIN_DIR/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+export CC_armv7_linux_androideabi="$NDK_BIN_DIR/armv7a-linux-androideabi${ANDROID_API_LEVEL}-clang"
+export CC_x86_64_linux_android="$NDK_BIN_DIR/x86_64-linux-android${ANDROID_API_LEVEL}-clang"
+export CC_i686_linux_android="$NDK_BIN_DIR/i686-linux-android${ANDROID_API_LEVEL}-clang"
+
+export CXX_aarch64_linux_android="$NDK_BIN_DIR/aarch64-linux-android${ANDROID_API_LEVEL}-clang++"
+export CXX_armv7_linux_androideabi="$NDK_BIN_DIR/armv7a-linux-androideabi${ANDROID_API_LEVEL}-clang++"
+export CXX_x86_64_linux_android="$NDK_BIN_DIR/x86_64-linux-android${ANDROID_API_LEVEL}-clang++"
+export CXX_i686_linux_android="$NDK_BIN_DIR/i686-linux-android${ANDROID_API_LEVEL}-clang++"
+
+export AR_aarch64_linux_android="$NDK_BIN_DIR/llvm-ar"
+export AR_armv7_linux_androideabi="$NDK_BIN_DIR/llvm-ar"
+export AR_x86_64_linux_android="$NDK_BIN_DIR/llvm-ar"
+export AR_i686_linux_android="$NDK_BIN_DIR/llvm-ar"
+
+# Configure linkers (Rust uses these for final linking)
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN_DIR/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDK_BIN_DIR/armv7a-linux-androideabi${ANDROID_API_LEVEL}-clang"
+export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_BIN_DIR/x86_64-linux-android${ANDROID_API_LEVEL}-clang"
+export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$NDK_BIN_DIR/i686-linux-android${ANDROID_API_LEVEL}-clang"
+
+# Verify compilers exist
+for target in aarch64 armv7a x86_64 i686; do
+    case "$target" in
+        "aarch64")
+            compiler="$NDK_BIN_DIR/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+            ;;
+        "armv7a")
+            compiler="$NDK_BIN_DIR/armv7a-linux-androideabi${ANDROID_API_LEVEL}-clang"
+            ;;
+        "x86_64")
+            compiler="$NDK_BIN_DIR/x86_64-linux-android${ANDROID_API_LEVEL}-clang"
+            ;;
+        "i686")
+            compiler="$NDK_BIN_DIR/i686-linux-android${ANDROID_API_LEVEL}-clang"
+            ;;
+    esac
+    
+    if [[ ! -f "$compiler" ]]; then
+        echo -e "${RED}Error: Compiler not found: $compiler${NC}"
+        echo -e "${YELLOW}Available compilers in NDK:${NC}"
+        ls -1 "$NDK_BIN_DIR"/*clang | head -10
+        exit 1
+    fi
+done
+
+echo -e "${GREEN}✓ All required NDK compilers found${NC}"
 
 # Android targets to build for
 TARGETS=(
