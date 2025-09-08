@@ -27,7 +27,37 @@ fi
 
 # Set Android API level (minimum supported version)
 ANDROID_API_LEVEL=${ANDROID_API_LEVEL:-21}
-NDK_BIN_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+# Detect host platform and architecture for NDK prebuilt toolchain
+HOST_OS="$(uname -s)"
+HOST_ARCH="$(uname -m)"
+case "$HOST_OS" in
+    Linux)
+        if [[ "$HOST_ARCH" == "x86_64" ]]; then
+            NDK_HOST="linux-x86_64"
+        elif [[ "$HOST_ARCH" == "aarch64" || "$HOST_ARCH" == "arm64" ]]; then
+            NDK_HOST="linux-arm64"
+        else
+            echo -e "${RED}Error: Unsupported Linux architecture: $HOST_ARCH${NC}"
+            exit 1
+        fi
+        ;;
+    Darwin)
+        if [[ "$HOST_ARCH" == "x86_64" ]]; then
+            NDK_HOST="darwin-x86_64"
+        elif [[ "$HOST_ARCH" == "arm64" ]]; then
+            NDK_HOST="darwin-arm64"
+        else
+            echo -e "${RED}Error: Unsupported macOS architecture: $HOST_ARCH${NC}"
+            exit 1
+        fi
+        ;;
+    *)
+        echo -e "${RED}Error: Unsupported host OS: $HOST_OS${NC}"
+        exit 1
+        ;;
+esac
+NDK_BIN_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST/bin"
 
 if [[ ! -d "$NDK_BIN_DIR" ]]; then
     echo -e "${RED}Error: NDK toolchain directory not found: $NDK_BIN_DIR${NC}"
