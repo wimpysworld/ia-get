@@ -30,4 +30,31 @@
     <string name="ia_item">Item</string>
     <string name="ia_file_count">%1$d files</string>
     <string name="ia_total_size">Total size: %1$s</string>
+    
+    <!-- Download notifications -->
+    <string name="notification_channel_downloads">Downloads</string>
+    <string name="notification_channel_downloads_description">Internet Archive download progress</string>
+    <string name="notification_downloading">Downloading %s</string>
+    <string name="notification_download_complete">Download completed</string>
+    <string name="notification_download_failed">Download failed</string>
+    
+    <!-- Actions -->
+    <string name="action_pause">Pause</string>
+    <string name="action_resume">Resume</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_share">Share</string>
+    <string name="action_open">Open</string>
+    
+    <!-- Additional errors -->
+    <string name="error_share_failed">Failed to share file</string>
+    <string name="error_open_failed">Failed to open file</string>
+    <string name="error_no_app_found">No app found to open this file type</string>
+    <string name="error_invalid_identifier">Invalid archive identifier</string>
+    <string name="error_unknown">Unknown error occurred</string>
+    
+    <!-- Progress messages -->
+    <string name="progress_initializing">Initializing download…</string>
+    <string name="progress_fetching_metadata">Fetching archive metadata…</string>
+    <string name="progress_validating_urls">Validating download URLs…</string>
+    <string name="progress_complete">Download completed</string>
 </resources>

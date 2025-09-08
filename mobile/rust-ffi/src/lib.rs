@@ -6,6 +6,10 @@
 // Re-export all FFI functions from the main library
 pub use ia_get::interface::ffi::*;
 
+// JNI bridge for Android integration
+#[cfg(target_os = "android")]
+pub mod jni_bridge;
+
 /// Initialize the mobile library
 /// Simplified initialization for mobile platforms
 #[no_mangle]

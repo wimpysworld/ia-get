@@ -1,0 +1,428 @@
+//! JNI Bridge for Android Integration
+//!
+//! This module provides JNI bindings that bridge the Kotlin code to the Rust FFI implementation.
+//! It allows the Android app to call Rust functions through JNI.
+
+use jni::{
+    objects::{JClass, JObject, JString, JValue},
+    sys::{jboolean, jdouble, jint, jlong, jobject, JNI_TRUE, JNI_FALSE},
+    JNIEnv,
+};
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
+
+// Re-export the core FFI functions
+use ia_get::interface::ffi::*;
+
+/// Convert Java string to Rust String
+fn jstring_to_string(env: &JNIEnv, jstr: JString) -> Result<String, Box<dyn std::error::Error>> {
+    let java_str = env.get_string(jstr)?;
+    Ok(java_str.into())
+}
+
+/// Convert Rust String to Java string
+fn string_to_jstring(env: &JNIEnv, string: &str) -> Result<JString, Box<dyn std::error::Error>> {
+    Ok(env.new_string(string)?)
+}
+
+/// Initialize the ia-get library
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetInit(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    ia_get_init() as jint
+}
+
+/// Cleanup the ia-get library
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetCleanup(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    ia_get_cleanup();
+}
+
+/// Fetch metadata for an archive
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetFetchMetadata(
+    env: JNIEnv,
+    _class: JClass,
+    identifier: JString,
+    progress_callback: JObject,
+    completion_callback: JObject,
+) -> jint {
+    let identifier_str = match jstring_to_string(&env, identifier) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let identifier_cstr = match CString::new(identifier_str) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    // Create callback wrappers that call back to Kotlin
+    extern "C" fn progress_cb(progress: f64, message: *const c_char, _user_data: usize) {
+        // TODO: Implement JNI callback to Kotlin
+        println!("Progress: {:.1}% - {:?}", progress * 100.0, unsafe {
+            if message.is_null() {
+                "".to_string()
+            } else {
+                CStr::from_ptr(message).to_str().unwrap_or("").to_string()
+            }
+        });
+    }
+
+    extern "C" fn completion_cb(success: bool, error_message: *const c_char, _user_data: usize) {
+        // TODO: Implement JNI callback to Kotlin
+        if success {
+            println!("Metadata fetch completed successfully");
+        } else {
+            let error = unsafe {
+                if error_message.is_null() {
+                    "Unknown error".to_string()
+                } else {
+                    CStr::from_ptr(error_message).to_str().unwrap_or("Unknown error").to_string()
+                }
+            };
+            println!("Metadata fetch failed: {}", error);
+        }
+    }
+
+    ia_get_fetch_metadata(
+        identifier_cstr.as_ptr(),
+        progress_cb,
+        completion_cb,
+        0,
+    )
+}
+
+/// Get cached metadata as JSON
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetGetMetadataJson(
+    env: JNIEnv,
+    _class: JClass,
+    identifier: JString,
+) -> jobject {
+    let identifier_str = match jstring_to_string(&env, identifier) {
+        Ok(s) => s,
+        Err(_) => return JObject::null().into_inner(),
+    };
+
+    let identifier_cstr = match CString::new(identifier_str) {
+        Ok(s) => s,
+        Err(_) => return JObject::null().into_inner(),
+    };
+
+    let result_ptr = ia_get_get_metadata_json(identifier_cstr.as_ptr());
+    
+    if result_ptr.is_null() {
+        return JObject::null().into_inner();
+    }
+
+    let result_str = unsafe {
+        let cstr = CStr::from_ptr(result_ptr);
+        cstr.to_str().unwrap_or("")
+    };
+
+    match string_to_jstring(&env, result_str) {
+        Ok(jstr) => {
+            // Free the C string
+            ia_get_free_string(result_ptr as *mut c_char);
+            jstr.into_inner()
+        }
+        Err(_) => {
+            ia_get_free_string(result_ptr as *mut c_char);
+            JObject::null().into_inner()
+        }
+    }
+}
+
+/// Filter files based on criteria
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetFilterFiles(
+    env: JNIEnv,
+    _class: JClass,
+    metadata_json: JString,
+    include_formats: JString,
+    exclude_formats: JString,
+    max_size_str: JString,
+) -> jobject {
+    let metadata_str = match jstring_to_string(&env, metadata_json) {
+        Ok(s) => s,
+        Err(_) => return JObject::null().into_inner(),
+    };
+
+    let metadata_cstr = match CString::new(metadata_str) {
+        Ok(s) => s,
+        Err(_) => return JObject::null().into_inner(),
+    };
+
+    // Handle optional parameters
+    let include_cstr = if include_formats.is_null() {
+        std::ptr::null()
+    } else {
+        match jstring_to_string(&env, include_formats).and_then(|s| CString::new(s).map_err(|e| e.into())) {
+            Ok(s) => s.as_ptr(),
+            Err(_) => std::ptr::null(),
+        }
+    };
+
+    let exclude_cstr = if exclude_formats.is_null() {
+        std::ptr::null()
+    } else {
+        match jstring_to_string(&env, exclude_formats).and_then(|s| CString::new(s).map_err(|e| e.into())) {
+            Ok(s) => s.as_ptr(),
+            Err(_) => std::ptr::null(),
+        }
+    };
+
+    let max_size_cstr = if max_size_str.is_null() {
+        std::ptr::null()
+    } else {
+        match jstring_to_string(&env, max_size_str).and_then(|s| CString::new(s).map_err(|e| e.into())) {
+            Ok(s) => s.as_ptr(),
+            Err(_) => std::ptr::null(),
+        }
+    };
+
+    let result_ptr = ia_get_filter_files(
+        metadata_cstr.as_ptr(),
+        include_cstr,
+        exclude_cstr,
+        max_size_cstr,
+    );
+
+    if result_ptr.is_null() {
+        return JObject::null().into_inner();
+    }
+
+    let result_str = unsafe {
+        let cstr = CStr::from_ptr(result_ptr);
+        cstr.to_str().unwrap_or("")
+    };
+
+    match string_to_jstring(&env, result_str) {
+        Ok(jstr) => {
+            ia_get_free_string(result_ptr as *mut c_char);
+            jstr.into_inner()
+        }
+        Err(_) => {
+            ia_get_free_string(result_ptr as *mut c_char);
+            JObject::null().into_inner()
+        }
+    }
+}
+
+/// Create a download session
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetCreateSession(
+    env: JNIEnv,
+    _class: JClass,
+    identifier: JString,
+    config_json: JString,
+) -> jint {
+    let identifier_str = match jstring_to_string(&env, identifier) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let config_str = match jstring_to_string(&env, config_json) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let identifier_cstr = match CString::new(identifier_str) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    // Parse config JSON and create FfiDownloadConfig
+    // For simplicity, using default config here
+    let config = FfiDownloadConfig {
+        concurrent_downloads: 4,
+        max_file_size: 0,
+        output_directory: std::ptr::null(),
+        include_formats: std::ptr::null(),
+        exclude_formats: std::ptr::null(),
+        dry_run: false,
+        verbose: false,
+        auto_decompress: false,
+        resume_downloads: true,
+        verify_checksums: true,
+    };
+
+    ia_get_create_session(identifier_cstr.as_ptr(), &config)
+}
+
+/// Start a download
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetStartDownload(
+    env: JNIEnv,
+    _class: JClass,
+    session_id: jint,
+    files_json: JString,
+    progress_callback: JObject,
+    completion_callback: JObject,
+) -> jint {
+    let files_str = match jstring_to_string(&env, files_json) {
+        Ok(s) => s,
+        Err(_) => return IaGetErrorCode::InvalidInput as jint,
+    };
+
+    let files_cstr = match CString::new(files_str) {
+        Ok(s) => s,
+        Err(_) => return IaGetErrorCode::InvalidInput as jint,
+    };
+
+    extern "C" fn progress_cb(progress: f64, message: *const c_char, _user_data: usize) {
+        // TODO: Implement JNI callback to Kotlin
+        println!("Download Progress: {:.1}%", progress * 100.0);
+    }
+
+    extern "C" fn completion_cb(success: bool, error_message: *const c_char, _user_data: usize) {
+        // TODO: Implement JNI callback to Kotlin
+        if success {
+            println!("Download completed successfully");
+        } else {
+            println!("Download failed");
+        }
+    }
+
+    ia_get_start_download(
+        session_id,
+        files_cstr.as_ptr(),
+        progress_cb,
+        completion_cb,
+        0,
+    ) as jint
+}
+
+/// Pause a download
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetPauseDownload(
+    _env: JNIEnv,
+    _class: JClass,
+    session_id: jint,
+) -> jint {
+    ia_get_pause_download(session_id) as jint
+}
+
+/// Resume a download
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetResumeDownload(
+    _env: JNIEnv,
+    _class: JClass,
+    session_id: jint,
+) -> jint {
+    ia_get_resume_download(session_id) as jint
+}
+
+/// Cancel a download
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetCancelDownload(
+    _env: JNIEnv,
+    _class: JClass,
+    session_id: jint,
+) -> jint {
+    ia_get_cancel_download(session_id) as jint
+}
+
+/// Get download progress
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetGetDownloadProgress(
+    env: JNIEnv,
+    _class: JClass,
+    session_id: jint,
+) -> jobject {
+    let mut progress = FfiDownloadProgress {
+        session_id: 0,
+        overall_progress: 0.0,
+        current_file: std::ptr::null(),
+        current_file_progress: 0.0,
+        download_speed: 0,
+        eta_seconds: 0,
+        completed_files: 0,
+        total_files: 0,
+        downloaded_bytes: 0,
+        total_bytes: 0,
+    };
+
+    let result = ia_get_get_download_progress(session_id, &mut progress);
+    
+    if result as i32 != IaGetErrorCode::Success as i32 {
+        return JObject::null().into_inner();
+    }
+
+    // Create DownloadProgressInfo object
+    let class = match env.find_class("com/gameaday/ia_get_mobile/IaGetNativeWrapper$DownloadProgressInfo") {
+        Ok(cls) => cls,
+        Err(_) => return JObject::null().into_inner(),
+    };
+
+    let current_file_str = unsafe {
+        if progress.current_file.is_null() {
+            "".to_string()
+        } else {
+            CStr::from_ptr(progress.current_file).to_str().unwrap_or("").to_string()
+        }
+    };
+
+    let current_file_jstr = match string_to_jstring(&env, &current_file_str) {
+        Ok(s) => s,
+        Err(_) => return JObject::null().into_inner(),
+    };
+
+    let constructor_sig = "(IDLjava/lang/String;DJJIIJJ)V";
+    
+    let args = [
+        JValue::Int(progress.session_id),
+        JValue::Double(progress.overall_progress),
+        JValue::Object(current_file_jstr.into()),
+        JValue::Double(progress.current_file_progress),
+        JValue::Long(progress.download_speed as jlong),
+        JValue::Long(progress.eta_seconds as jlong),
+        JValue::Int(progress.completed_files as jint),
+        JValue::Int(progress.total_files as jint),
+        JValue::Long(progress.downloaded_bytes as jlong),
+        JValue::Long(progress.total_bytes as jlong),
+    ];
+
+    match env.new_object(class, constructor_sig, &args) {
+        Ok(obj) => obj.into_inner(),
+        Err(_) => JObject::null().into_inner(),
+    }
+}
+
+/// Calculate total size of files
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetCalculateTotalSize(
+    env: JNIEnv,
+    _class: JClass,
+    files_json: JString,
+) -> jlong {
+    let files_str = match jstring_to_string(&env, files_json) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    let files_cstr = match CString::new(files_str) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    ia_get_calculate_total_size(files_cstr.as_ptr()) as jlong
+}
+
+/// Free a native string
+#[no_mangle]
+pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetFreeString(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) {
+    if ptr != 0 {
+        ia_get_free_string(ptr as *mut c_char);
+    }
+}
