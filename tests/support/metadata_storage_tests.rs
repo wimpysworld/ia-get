@@ -126,6 +126,25 @@ fn test_generate_session_filename_uniqueness() {
 }
 
 #[test]
+fn test_generate_session_filename_no_collisions_rapid_calls() {
+    let identifier = "test-archive";
+    let mut filenames = std::collections::HashSet::new();
+
+    // Generate multiple filenames in rapid succession to test for collisions
+    for _ in 0..100 {
+        let filename = generate_session_filename(identifier);
+        // Each filename should be unique (no collisions)
+        assert!(
+            filenames.insert(filename),
+            "Collision detected: duplicate filename generated"
+        );
+    }
+
+    // Should have generated 100 unique filenames
+    assert_eq!(filenames.len(), 100);
+}
+
+#[test]
 fn test_windows_filename_edge_cases() {
     // Test filenames ending with periods
     let result = sanitize_filename_for_filesystem("test_file...");

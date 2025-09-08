@@ -232,8 +232,15 @@ fn test_session_filename_consistency() {
     let filename1 = generate_session_filename(identifier);
     let filename2 = generate_session_filename(identifier);
 
-    // Same identifier should produce same filename
-    assert_eq!(filename1, filename2);
+    // Each session should have a unique filename to prevent collisions
+    // even with the same identifier
+    assert_ne!(filename1, filename2);
+
+    // But both should have the same prefix pattern
+    assert!(filename1.starts_with("ia-get-session-test-archive-123-"));
+    assert!(filename2.starts_with("ia-get-session-test-archive-123-"));
+    assert!(filename1.ends_with(".json"));
+    assert!(filename2.ends_with(".json"));
 }
 
 #[test]

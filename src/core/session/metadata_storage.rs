@@ -781,7 +781,7 @@ pub fn generate_session_filename(identifier: &str) -> String {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs();
+        .as_nanos();
     let sanitized_identifier = sanitize_identifier_for_filesystem(identifier);
     format!("ia-get-session-{}-{}.json", sanitized_identifier, timestamp)
 }
