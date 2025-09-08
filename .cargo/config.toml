@@ -1,0 +1,19 @@
+# Cargo configuration for Android cross-compilation
+[build]
+rustflags = ["-C", "link-arg=-s"]  # Strip symbols for smaller binaries
+
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android28-clang"
+
+[target.armv7-linux-androideabi]
+linker = "armv7a-linux-androideabi28-clang"
+
+[target.x86_64-linux-android]
+linker = "x86_64-linux-android28-clang"
+
+[target.i686-linux-android]
+linker = "i686-linux-android28-clang"
+
+# Environment variable configuration
+[env]
+ANDROID_NDK_HOME = { value = "/opt/android-ndk", relative = false }

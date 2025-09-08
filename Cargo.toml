@@ -35,6 +35,7 @@ tar = "0.4"
 zip = "4.6.0"
 futures = "0.3.31"
 bytes = "1.0"
+lazy_static = "1.4"
 # GUI dependencies (optional)
 eframe = { version = "0.32.1", optional = true }
 egui = { version = "0.32.1", optional = true }
@@ -42,7 +43,9 @@ egui_extras = { version = "0.32.1", features = ["default"], optional = true }
 rfd = { version = "0.15.0", optional = true }
 env_logger = { version = "0.11.0", optional = true }
 
-[build-dependencies]
+[lib]
+name = "ia_get"
+crate-type = ["rlib", "cdylib"]  # Support both static linking and dynamic library
 embed-manifest = "1.4"
 
 [dev-dependencies]
@@ -53,6 +56,7 @@ criterion = { version = "0.7.0", features = ["html_reports"] }
 default = ["cli"]
 cli = []
 gui = ["eframe", "egui", "egui_extras", "rfd", "env_logger"]
+ffi = []  # Foreign Function Interface for mobile platforms
 
 [profile.release]
 strip = true  # Automatically strip symbols from the binary.
