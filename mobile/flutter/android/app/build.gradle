@@ -1,23 +1,14 @@
+plugins {
+    id 'com.android.application'
+    id 'kotlin-android'
+    id 'dev.flutter.flutter-gradle-plugin'
+}
+
 def localProperties = new Properties()
 def localPropertiesFile = rootProject.file('local.properties')
 if (localPropertiesFile.exists()) {
     localPropertiesFile.withReader('UTF-8') { reader ->
         localProperties.load(reader)
-    }
-}
-
-// Version management with automated build numbers
-def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
-def flutterVersionName = localProperties.getProperty('flutter.versionName')
-
-// Auto-generate version from git if not specified
-if (flutterVersionCode == null || flutterVersionName == null) {
-    def gitVersionInfo = getGitVersionInfo()
-    if (flutterVersionCode == null) {
-        flutterVersionCode = gitVersionInfo['versionCode']
-    }
-    if (flutterVersionName == null) {
-        flutterVersionName = gitVersionInfo['versionName']
     }
 }
 
@@ -53,10 +44,19 @@ def getGitVersionInfo() {
     return ['versionName': versionName, 'versionCode': versionCode]
 }
 
-plugins {
-    id 'com.android.application'
-    id 'kotlin-android'
-    id 'dev.flutter.flutter-gradle-plugin'
+// Version management with automated build numbers
+def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
+def flutterVersionName = localProperties.getProperty('flutter.versionName')
+
+// Auto-generate version from git if not specified
+if (flutterVersionCode == null || flutterVersionName == null) {
+    def gitVersionInfo = getGitVersionInfo()
+    if (flutterVersionCode == null) {
+        flutterVersionCode = gitVersionInfo['versionCode']
+    }
+    if (flutterVersionName == null) {
+        flutterVersionName = gitVersionInfo['versionName']
+    }
 }
 
 // Load keystore properties for release builds
