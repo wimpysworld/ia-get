@@ -24,10 +24,10 @@ fn jstring_to_string(
 }
 
 /// Convert Rust String to Java string
-fn string_to_jstring<'a>(
-    env: &'a mut JNIEnv<'a>,
+fn string_to_jstring<'local>(
+    env: &mut JNIEnv<'local>,
     string: &str,
-) -> Result<JString<'a>, Box<dyn std::error::Error>> {
+) -> Result<JString<'local>, Box<dyn std::error::Error>> {
     Ok(env.new_string(string)?)
 }
 
@@ -320,7 +320,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     _class: JClass,
     session_id: jint,
 ) -> jint {
-    unsafe { ia_get_pause_download(session_id) as jint }
+    ia_get_pause_download(session_id) as jint
 }
 
 /// Resume a download
@@ -330,7 +330,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     _class: JClass,
     session_id: jint,
 ) -> jint {
-    unsafe { ia_get_resume_download(session_id) as jint }
+    ia_get_resume_download(session_id) as jint
 }
 
 /// Cancel a download
@@ -340,7 +340,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     _class: JClass,
     session_id: jint,
 ) -> jint {
-    unsafe { ia_get_cancel_download(session_id) as jint }
+    ia_get_cancel_download(session_id) as jint
 }
 
 /// Get download progress
@@ -395,10 +395,12 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
     let constructor_sig = "(IDLjava/lang/String;DJJIIJJ)V";
 
+    // Create a binding to avoid temporary value issue
+    let current_file_jobject = current_file_jstr.into();
     let args = [
         JValue::Int(progress.session_id),
         JValue::Double(progress.overall_progress),
-        JValue::Object(&current_file_jstr.into()),
+        JValue::Object(&current_file_jobject),
         JValue::Double(progress.current_file_progress),
         JValue::Long(progress.download_speed as jlong),
         JValue::Long(progress.eta_seconds as jlong),
