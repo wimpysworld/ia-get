@@ -8,8 +8,6 @@
     
     <!-- Exclude sensitive data -->
     <exclude domain="sharedpref" path="auth_tokens.xml"/>
-    <exclude domain="file" path="cache/"/>
-    <exclude domain="file" path="temp/"/>
     
     <!-- Exclude large files to keep backup size reasonable -->
     <exclude domain="file" path="downloads/*.mp4"/>
