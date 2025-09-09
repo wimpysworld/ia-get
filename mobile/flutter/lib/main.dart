@@ -37,8 +37,8 @@ class IAGetMobileApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider(
-          create: (_) => IAGetService(),
+        ChangeNotifierProvider<IaGetService>(
+          create: (_) => IaGetService(),
           lazy: false, // Initialize immediately for better startup performance
         ),
       ],
