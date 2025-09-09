@@ -9,9 +9,6 @@ use reqwest::{Client, Response};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
-/// Minimum delay between requests to respect Archive.org rate limits (milliseconds)
-const MIN_REQUEST_DELAY_MS: u64 = 2000; // 2 seconds between requests
-
 /// Internet Archive API compliance manager
 #[derive(Debug)]
 pub struct ArchiveOrgApiClient {

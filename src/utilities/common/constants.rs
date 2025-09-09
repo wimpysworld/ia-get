@@ -32,7 +32,8 @@ pub const HTTP_TIMEOUT: u64 = 60;
 pub const MAX_CONCURRENT_CONNECTIONS: usize = 5;
 
 /// Minimum delay between requests to same server (milliseconds)
-pub const MIN_REQUEST_DELAY_MS: u64 = 100;
+/// Set to 2 seconds for Internet Archive API compliance and politeness
+pub const MIN_REQUEST_DELAY_MS: u64 = 2000;
 
 /// Default retry delay for transient errors (seconds)
 pub const DEFAULT_RETRY_DELAY_SECS: u64 = 30;
