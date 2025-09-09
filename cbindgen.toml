@@ -8,6 +8,7 @@ line_length = 100
 tab_width = 4
 documentation = true
 documentation_style = "doxy"
+cpp_compat = true
 
 [export]
 include = ["FfiDownloadConfig", "FfiFileInfo", "FfiArchiveMetadata", "IaGetErrorCode"]
@@ -15,6 +16,3 @@ include = ["FfiDownloadConfig", "FfiFileInfo", "FfiArchiveMetadata", "IaGetError
 [parse]
 parse_deps = false
 include = ["ia-get"]
-
-[cpp_compat]
-enable = true

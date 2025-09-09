@@ -15,13 +15,19 @@ use std::os::raw::c_char;
 use ia_get::interface::ffi::*;
 
 /// Convert Java string to Rust String
-fn jstring_to_string(env: &JNIEnv, jstr: &JString) -> Result<String, Box<dyn std::error::Error>> {
+fn jstring_to_string(
+    env: &mut JNIEnv,
+    jstr: &JString,
+) -> Result<String, Box<dyn std::error::Error>> {
     let java_str = env.get_string(jstr)?;
     Ok(java_str.into())
 }
 
 /// Convert Rust String to Java string
-fn string_to_jstring<'a>(env: &'a JNIEnv<'a>, string: &str) -> Result<JString<'a>, Box<dyn std::error::Error>> {
+fn string_to_jstring<'a>(
+    env: &'a mut JNIEnv<'a>,
+    string: &str,
+) -> Result<JString<'a>, Box<dyn std::error::Error>> {
     Ok(env.new_string(string)?)
 }
 
@@ -46,13 +52,13 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 /// Fetch metadata for an archive
 #[no_mangle]
 pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetFetchMetadata(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     identifier: JString,
     _progress_callback: JObject,
     _completion_callback: JObject,
 ) -> jint {
-    let identifier_str = match jstring_to_string(&env, &identifier) {
+    let identifier_str = match jstring_to_string(&mut env, &identifier) {
         Ok(s) => s,
         Err(_) => return -1,
     };
@@ -83,29 +89,27 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
                 if error_message.is_null() {
                     "Unknown error".to_string()
                 } else {
-                    CStr::from_ptr(error_message).to_str().unwrap_or("Unknown error").to_string()
+                    CStr::from_ptr(error_message)
+                        .to_str()
+                        .unwrap_or("Unknown error")
+                        .to_string()
                 }
             };
             println!("Metadata fetch failed: {}", error);
         }
     }
 
-    ia_get_fetch_metadata(
-        identifier_cstr.as_ptr(),
-        progress_cb,
-        completion_cb,
-        0,
-    )
+    unsafe { ia_get_fetch_metadata(identifier_cstr.as_ptr(), progress_cb, completion_cb, 0) }
 }
 
 /// Get cached metadata as JSON
 #[no_mangle]
 pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetGetMetadataJson(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     identifier: JString,
 ) -> jobject {
-    let identifier_str = match jstring_to_string(&env, &identifier) {
+    let identifier_str = match jstring_to_string(&mut env, &identifier) {
         Ok(s) => s,
         Err(_) => return JObject::null().as_raw(),
     };
@@ -116,7 +120,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     };
 
     let result_ptr = unsafe { ia_get_get_metadata_json(identifier_cstr.as_ptr()) };
-    
+
     if result_ptr.is_null() {
         return JObject::null().as_raw();
     }
@@ -126,7 +130,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
         cstr.to_str().unwrap_or("")
     };
 
-    match string_to_jstring(&env, result_str) {
+    match string_to_jstring(&mut env, result_str) {
         Ok(jstr) => {
             // Free the C string
             unsafe { ia_get_free_string(result_ptr as *mut c_char) };
@@ -142,14 +146,14 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 /// Filter files based on criteria
 #[no_mangle]
 pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetFilterFiles(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     metadata_json: JString,
     include_formats: JString,
     exclude_formats: JString,
     max_size_str: JString,
 ) -> jobject {
-    let metadata_str = match jstring_to_string(&env, &metadata_json) {
+    let metadata_str = match jstring_to_string(&mut env, &metadata_json) {
         Ok(s) => s,
         Err(_) => return JObject::null().as_raw(),
     };
@@ -163,7 +167,9 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     let include_cstr = if include_formats.is_null() {
         std::ptr::null()
     } else {
-        match jstring_to_string(&env, &include_formats).and_then(|s| CString::new(s).map_err(|e| e.into())) {
+        match jstring_to_string(&mut env, &include_formats)
+            .and_then(|s| CString::new(s).map_err(|e| e.into()))
+        {
             Ok(s) => s.as_ptr(),
             Err(_) => std::ptr::null(),
         }
@@ -172,7 +178,9 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     let exclude_cstr = if exclude_formats.is_null() {
         std::ptr::null()
     } else {
-        match jstring_to_string(&env, &exclude_formats).and_then(|s| CString::new(s).map_err(|e| e.into())) {
+        match jstring_to_string(&mut env, &exclude_formats)
+            .and_then(|s| CString::new(s).map_err(|e| e.into()))
+        {
             Ok(s) => s.as_ptr(),
             Err(_) => std::ptr::null(),
         }
@@ -181,18 +189,22 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     let max_size_cstr = if max_size_str.is_null() {
         std::ptr::null()
     } else {
-        match jstring_to_string(&env, &max_size_str).and_then(|s| CString::new(s).map_err(|e| e.into())) {
+        match jstring_to_string(&mut env, &max_size_str)
+            .and_then(|s| CString::new(s).map_err(|e| e.into()))
+        {
             Ok(s) => s.as_ptr(),
             Err(_) => std::ptr::null(),
         }
     };
 
-    let result_ptr = ia_get_filter_files(
-        metadata_cstr.as_ptr(),
-        include_cstr,
-        exclude_cstr,
-        max_size_cstr,
-    );
+    let result_ptr = unsafe {
+        ia_get_filter_files(
+            metadata_cstr.as_ptr(),
+            include_cstr,
+            exclude_cstr,
+            max_size_cstr,
+        )
+    };
 
     if result_ptr.is_null() {
         return JObject::null().as_raw();
@@ -203,13 +215,13 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
         cstr.to_str().unwrap_or("")
     };
 
-    match string_to_jstring(&env, result_str) {
+    match string_to_jstring(&mut env, result_str) {
         Ok(jstr) => {
-            ia_get_free_string(result_ptr as *mut c_char);
+            unsafe { ia_get_free_string(result_ptr as *mut c_char) };
             jstr.as_raw()
         }
         Err(_) => {
-            ia_get_free_string(result_ptr as *mut c_char);
+            unsafe { ia_get_free_string(result_ptr as *mut c_char) };
             JObject::null().as_raw()
         }
     }
@@ -218,17 +230,17 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 /// Create a download session
 #[no_mangle]
 pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetCreateSession(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     identifier: JString,
     config_json: JString,
 ) -> jint {
-    let identifier_str = match jstring_to_string(&env, &identifier) {
+    let identifier_str = match jstring_to_string(&mut env, &identifier) {
         Ok(s) => s,
         Err(_) => return -1,
     };
 
-    let _config_str = match jstring_to_string(&env, &config_json) {
+    let _config_str = match jstring_to_string(&mut env, &config_json) {
         Ok(s) => s,
         Err(_) => return -1,
     };
@@ -253,20 +265,20 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
         verify_checksums: true,
     };
 
-    ia_get_create_session(identifier_cstr.as_ptr(), &config)
+    unsafe { ia_get_create_session(identifier_cstr.as_ptr(), &config) }
 }
 
 /// Start a download
 #[no_mangle]
 pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetStartDownload(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     session_id: jint,
     files_json: JString,
     _progress_callback: JObject,
     _completion_callback: JObject,
 ) -> jint {
-    let files_str = match jstring_to_string(&env, &files_json) {
+    let files_str = match jstring_to_string(&mut env, &files_json) {
         Ok(s) => s,
         Err(_) => return IaGetErrorCode::InvalidInput as jint,
     };
@@ -290,13 +302,15 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
         }
     }
 
-    ia_get_start_download(
-        session_id,
-        files_cstr.as_ptr(),
-        progress_cb,
-        completion_cb,
-        0,
-    ) as jint
+    unsafe {
+        ia_get_start_download(
+            session_id,
+            files_cstr.as_ptr(),
+            progress_cb,
+            completion_cb,
+            0,
+        ) as jint
+    }
 }
 
 /// Pause a download
@@ -306,7 +320,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     _class: JClass,
     session_id: jint,
 ) -> jint {
-    ia_get_pause_download(session_id) as jint
+    unsafe { ia_get_pause_download(session_id) as jint }
 }
 
 /// Resume a download
@@ -316,7 +330,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     _class: JClass,
     session_id: jint,
 ) -> jint {
-    ia_get_resume_download(session_id) as jint
+    unsafe { ia_get_resume_download(session_id) as jint }
 }
 
 /// Cancel a download
@@ -326,13 +340,13 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     _class: JClass,
     session_id: jint,
 ) -> jint {
-    ia_get_cancel_download(session_id) as jint
+    unsafe { ia_get_cancel_download(session_id) as jint }
 }
 
 /// Get download progress
 #[no_mangle]
 pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetGetDownloadProgress(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     session_id: jint,
 ) -> jobject {
@@ -349,14 +363,16 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
         total_bytes: 0,
     };
 
-    let result = ia_get_get_download_progress(session_id, &mut progress);
-    
+    let result = unsafe { ia_get_get_download_progress(session_id, &mut progress) };
+
     if result as i32 != IaGetErrorCode::Success as i32 {
         return JObject::null().as_raw();
     }
 
     // Create DownloadProgressInfo object
-    let class = match env.find_class("com/gameaday/ia_get_mobile/IaGetNativeWrapper$DownloadProgressInfo") {
+    let class = match env
+        .find_class("com/gameaday/ia_get_mobile/IaGetNativeWrapper$DownloadProgressInfo")
+    {
         Ok(cls) => cls,
         Err(_) => return JObject::null().as_raw(),
     };
@@ -365,21 +381,24 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
         if progress.current_file.is_null() {
             "".to_string()
         } else {
-            CStr::from_ptr(progress.current_file).to_str().unwrap_or("").to_string()
+            CStr::from_ptr(progress.current_file)
+                .to_str()
+                .unwrap_or("")
+                .to_string()
         }
     };
 
-    let current_file_jstr = match string_to_jstring(&env, &current_file_str) {
+    let current_file_jstr = match string_to_jstring(&mut env, &current_file_str) {
         Ok(s) => s,
         Err(_) => return JObject::null().as_raw(),
     };
 
     let constructor_sig = "(IDLjava/lang/String;DJJIIJJ)V";
-    
+
     let args = [
         JValue::Int(progress.session_id),
         JValue::Double(progress.overall_progress),
-        JValue::Object(current_file_jstr.into()),
+        JValue::Object(&current_file_jstr.into()),
         JValue::Double(progress.current_file_progress),
         JValue::Long(progress.download_speed as jlong),
         JValue::Long(progress.eta_seconds as jlong),
@@ -398,11 +417,11 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 /// Calculate total size of files
 #[no_mangle]
 pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetCalculateTotalSize(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     files_json: JString,
 ) -> jlong {
-    let files_str = match jstring_to_string(&env, &files_json) {
+    let files_str = match jstring_to_string(&mut env, &files_json) {
         Ok(s) => s,
         Err(_) => return 0,
     };
@@ -412,7 +431,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
         Err(_) => return 0,
     };
 
-    ia_get_calculate_total_size(files_cstr.as_ptr()) as jlong
+    unsafe { ia_get_calculate_total_size(files_cstr.as_ptr()) as jlong }
 }
 
 /// Free a native string
@@ -423,6 +442,6 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     ptr: jlong,
 ) {
     if ptr != 0 {
-        ia_get_free_string(ptr as *mut c_char);
+        unsafe { ia_get_free_string(ptr as *mut c_char) };
     }
 }
