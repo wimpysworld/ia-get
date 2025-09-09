@@ -1,5 +1,4 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.gameaday.ia_get_mobile">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
     
     <!-- Internet permission for downloading files -->
     <uses-permission android:name="android.permission.INTERNET" />

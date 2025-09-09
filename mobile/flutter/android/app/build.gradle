@@ -6,11 +6,6 @@ if (localPropertiesFile.exists()) {
     }
 }
 
-def flutterRoot = localProperties.getProperty('flutter.sdk')
-if (flutterRoot == null) {
-    throw new GradleException("Flutter SDK not found. Define location with flutter.sdk in the local.properties file.")
-}
-
 // Version management with automated build numbers
 def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
 def flutterVersionName = localProperties.getProperty('flutter.versionName')
@@ -58,9 +53,11 @@ def getGitVersionInfo() {
     return ['versionName': versionName, 'versionCode': versionCode]
 }
 
-apply plugin: 'com.android.application'
-apply plugin: 'kotlin-android'
-apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
+plugins {
+    id 'com.android.application'
+    id 'kotlin-android'
+    id 'dev.flutter.flutter-gradle-plugin'
+}
 
 // Load keystore properties for release builds
 def keystoreProperties = new Properties()
@@ -70,6 +67,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
+    namespace 'com.gameaday.ia_get_mobile'
     compileSdkVersion 36
     ndkVersion flutter.ndkVersion
 
@@ -272,29 +270,25 @@ android {
     }
 }
 
-flutter {
-    source '../..'
-}
-
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
     implementation 'androidx.multidex:multidex:2.0.1'
     
     // Core Android libraries - Updated for Play Store compliance
-    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.core:core-ktx:1.15.0'
     implementation 'androidx.appcompat:appcompat:1.7.0'
-    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.6'
-    implementation 'androidx.activity:activity-compose:1.9.2'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7'
+    implementation 'androidx.activity:activity-compose:1.9.3'
     
     // Material Design - Latest version
     implementation 'com.google.android.material:material:1.12.0'
     
     // File provider and storage
-    implementation 'androidx.core:core:1.13.1'
+    implementation 'androidx.core:core:1.15.0'
     
     // Network security and privacy compliance
     implementation 'androidx.security:security-crypto:1.1.0-alpha06'
-    implementation 'androidx.work:work-runtime-ktx:2.9.1'
+    implementation 'androidx.work:work-runtime-ktx:2.10.0'
     
     // Play Core for app updates and feature delivery
     implementation 'com.google.android.play:core:1.10.3'
@@ -306,5 +300,5 @@ dependencies {
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.6.1'
     
     // For Play Store compliance and better app performance
-    implementation 'androidx.startup:startup-runtime:1.1.1'
+    implementation 'androidx.startup:startup-runtime:1.2.0'
 }
