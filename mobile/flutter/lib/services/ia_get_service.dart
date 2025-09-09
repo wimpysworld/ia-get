@@ -170,8 +170,8 @@ class IaGetService extends ChangeNotifier {
     
     try {
       // Create progress and completion callbacks
-      final progressCallback = Pointer.fromFunction<IaGetFFI.ProgressCallbackNative>(_progressCallback);
-      final completionCallback = Pointer.fromFunction<IaGetFFI.CompletionCallbackNative>(_completionCallback);
+      final progressCallback = Pointer.fromFunction<ProgressCallbackNative>(_progressCallback);
+      final completionCallback = Pointer.fromFunction<CompletionCallbackNative>(_completionCallback);
       
       // Start metadata fetch
       final requestId = IaGetFFI.fetchMetadata(
