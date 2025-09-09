@@ -95,7 +95,8 @@ android {
             buildConfigField "String", "ENVIRONMENT", '"development"'
             buildConfigField "boolean", "DEBUG_MODE", "true"
             manifestPlaceholders = [
-                appIcon: "@mipmap/ic_launcher_dev",
+                applicationName: "io.flutter.app.FlutterApplication",
+                appIcon: "@android:drawable/ic_menu_gallery",
                 networkSecurityConfig: "@xml/network_security_config_dev"
             ]
         }
@@ -108,7 +109,8 @@ android {
             buildConfigField "String", "ENVIRONMENT", '"staging"'
             buildConfigField "boolean", "DEBUG_MODE", "true"
             manifestPlaceholders = [
-                appIcon: "@mipmap/ic_launcher_staging",
+                applicationName: "io.flutter.app.FlutterApplication",
+                appIcon: "@android:drawable/ic_menu_gallery",
                 networkSecurityConfig: "@xml/network_security_config_staging"
             ]
         }
@@ -119,7 +121,8 @@ android {
             buildConfigField "String", "ENVIRONMENT", '"production"'
             buildConfigField "boolean", "DEBUG_MODE", "false"
             manifestPlaceholders = [
-                appIcon: "@mipmap/ic_launcher",
+                applicationName: "io.flutter.app.FlutterApplication",
+                appIcon: "@android:drawable/ic_menu_gallery",
                 networkSecurityConfig: "@xml/network_security_config"
             ]
         }
