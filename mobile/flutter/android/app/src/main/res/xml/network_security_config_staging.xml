@@ -22,12 +22,4 @@
             <certificates src="system"/>
         </trust-anchors>
     </base-config>
-    
-    <!-- Debug overrides for staging testing -->
-    <debug-overrides>
-        <trust-anchors>
-            <certificates src="system"/>
-            <certificates src="user"/>
-        </trust-anchors>
-    </debug-overrides>
 </network-security-config>
