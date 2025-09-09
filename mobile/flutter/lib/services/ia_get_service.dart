@@ -6,6 +6,10 @@ import 'package:flutter/foundation.dart';
 import '../models/archive_metadata.dart';
 import '../models/download_progress.dart';
 
+// Callback function types
+typedef ProgressCallbackNative = Void Function(Double, Pointer<Utf8>, IntPtr);
+typedef CompletionCallbackNative = Void Function(Bool, Pointer<Utf8>, IntPtr);
+
 /// FFI bindings for ia-get native library
 class IaGetFFI {
   static DynamicLibrary? _dylib;
@@ -50,10 +54,6 @@ class IaGetFFI {
   static final _iaGetCalculateTotalSize = dylib.lookupFunction<
       Uint64 Function(Pointer<Utf8>),
       int Function(Pointer<Utf8>)>('ia_get_calculate_total_size');
-  
-  // Callback function types
-  typedef ProgressCallbackNative = Void Function(Double, Pointer<Utf8>, IntPtr);
-  typedef CompletionCallbackNative = Void Function(Bool, Pointer<Utf8>, IntPtr);
   
   /// Initialize the FFI library
   static int init() {
