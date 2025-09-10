@@ -203,11 +203,11 @@ jobs:
           
           # Create versioned archive
           cd android-release-artifacts
-          tar -czf "../${PACKAGE_NAME}-${TAG_NAME}.tar.gz" *
+          zip -r "../${PACKAGE_NAME}-${TAG_NAME}.zip" *
           cd ..
           
           # Validate archive size
-          ARCHIVE_SIZE=$(stat -c%s "${PACKAGE_NAME}-${TAG_NAME}.tar.gz" 2>/dev/null || stat -f%z "${PACKAGE_NAME}-${TAG_NAME}.tar.gz" 2>/dev/null || echo "0")
+          ARCHIVE_SIZE=$(stat -c%s "${PACKAGE_NAME}-${TAG_NAME}.zip" 2>/dev/null || stat -f%z "${PACKAGE_NAME}-${TAG_NAME}.zip" 2>/dev/null || echo "0")
           ARCHIVE_SIZE_KB=$((ARCHIVE_SIZE / 1024))
           echo "📏 Archive size: ${ARCHIVE_SIZE_KB}KB"
           
@@ -216,7 +216,7 @@ jobs:
           fi
           
           # Calculate hashes
-          sha256sum "${PACKAGE_NAME}-${TAG_NAME}.tar.gz" > "ANDROID_HASHES_${TAG_NAME}.txt"
+          sha256sum "${PACKAGE_NAME}-${TAG_NAME}.zip" > "ANDROID_HASHES_${TAG_NAME}.txt"
           
           # Add individual file hashes for important files
           if [ -f "android-release-artifacts/ia-get-mobile-production.aab" ]; then
@@ -228,16 +228,16 @@ jobs:
             sha256sum android-release-artifacts/ia-get-mobile-production.apk >> "ANDROID_HASHES_${TAG_NAME}.txt"
           fi
           
-          echo "✓ Android release artifact created: ${PACKAGE_NAME}-${TAG_NAME}.tar.gz (${ARCHIVE_SIZE_KB}KB)"
+          echo "✓ Android release artifact created: ${PACKAGE_NAME}-${TAG_NAME}.zip (${ARCHIVE_SIZE_KB}KB)"
           echo "Contents:"
-          tar -tzf "${PACKAGE_NAME}-${TAG_NAME}.tar.gz" | head -20
+          unzip -l "${PACKAGE_NAME}-${TAG_NAME}.zip" | head -20
 
       - name: Upload Android release artifacts
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
         with:
           files: |
-            ia-get-android-*.tar.gz
+            ia-get-android-*.zip
             ANDROID_HASHES_*.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -460,7 +460,7 @@ jobs:
           if [[ "$OS_NAME" == "windows-latest" ]]; then
             7z a "${PACKAGE_NAME}-${GITHUB_REF/refs\/tags\//}-${TARGET}.zip" * || zip -r "${PACKAGE_NAME}-${GITHUB_REF/refs\/tags\//}-${TARGET}.zip" *
           else
-            tar czf "${PACKAGE_NAME}-${GITHUB_REF/refs\/tags\//}-${TARGET}.tar.gz" *
+            zip -r "${PACKAGE_NAME}-${GITHUB_REF/refs\/tags\//}-${TARGET}.zip" *
           fi
 
           # Calculate hashes
@@ -529,11 +529,11 @@ jobs:
           ## 📥 Downloads
           
           ### Quick Downloads
-          - **Linux (x86_64)**: [ia-get-${TAG_NAME}-x86_64-unknown-linux-gnu.tar.gz](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-x86_64-unknown-linux-gnu.tar.gz)
+          - **Linux (x86_64)**: [ia-get-${TAG_NAME}-x86_64-unknown-linux-gnu.zip](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-x86_64-unknown-linux-gnu.zip)
           - **Windows (x86_64)**: [ia-get-${TAG_NAME}-x86_64-pc-windows-msvc.zip](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-x86_64-pc-windows-msvc.zip)
-          - **macOS (x86_64)**: [ia-get-${TAG_NAME}-x86_64-apple-darwin.tar.gz](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-x86_64-apple-darwin.tar.gz)
-          - **macOS (ARM64)**: [ia-get-${TAG_NAME}-aarch64-apple-darwin.tar.gz](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-aarch64-apple-darwin.tar.gz)
-          - **🤖 Android**: [ia-get-android-${TAG_NAME}.tar.gz](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-android-${TAG_NAME}.tar.gz)
+          - **macOS (x86_64)**: [ia-get-${TAG_NAME}-x86_64-apple-darwin.zip](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-x86_64-apple-darwin.zip)
+          - **macOS (ARM64)**: [ia-get-${TAG_NAME}-aarch64-apple-darwin.zip](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-aarch64-apple-darwin.zip)
+          - **🤖 Android**: [ia-get-android-${TAG_NAME}.zip](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-android-${TAG_NAME}.zip)
           
           ### All Platforms
           See the **Assets** section below for all supported platforms including Linux ARM, musl variants, .deb packages, and Android native libraries.

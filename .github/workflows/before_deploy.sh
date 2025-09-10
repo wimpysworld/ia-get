@@ -44,12 +44,12 @@ pack() {
         echo "$hash  $package_name.zip" >> RELEASE_HASHES.txt
         echo "✅ Archive created: $package_name.zip (SHA256: $hash)"
     else
-        tar czf "$out_dir/$package_name.tar.gz" "$package_name"/*
+        zip -r "$out_dir/$package_name.zip" "$package_name"/*
         cd "$out_dir"
         # Calculate and display hash without creating separate file
-        hash=$(sha256sum "$package_name.tar.gz" | cut -d' ' -f1)
-        echo "$hash  $package_name.tar.gz" >> RELEASE_HASHES.txt
-        echo "✅ Archive created: $package_name.tar.gz (SHA256: $hash)"
+        hash=$(sha256sum "$package_name.zip" | cut -d' ' -f1)
+        echo "$hash  $package_name.zip" >> RELEASE_HASHES.txt
+        echo "✅ Archive created: $package_name.zip (SHA256: $hash)"
     fi
     popd
     rm -r "$tempdir"

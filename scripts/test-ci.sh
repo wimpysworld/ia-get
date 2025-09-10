@@ -39,16 +39,16 @@ PACKAGE_NAME="ia-get-${COMMIT_SHA}-${TARGET}"
 
 cp "target/release/${PROJECT_NAME}" "artifacts/${PROJECT_NAME}-${TARGET}"
 cd artifacts
-tar czf "${PACKAGE_NAME}.tar.gz" "${PROJECT_NAME}-${TARGET}"
+zip "${PACKAGE_NAME}.zip" "${PROJECT_NAME}-${TARGET}"
 
 # Calculate SHA256 hashes
-sha256sum "${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.tar.gz.sha256"
+sha256sum "${PACKAGE_NAME}.zip" > "${PACKAGE_NAME}.zip.sha256"
 cd ..
-echo "✅ Artifact created: ${PACKAGE_NAME}.tar.gz"
-echo "✅ SHA256 hash: $(cat "artifacts/${PACKAGE_NAME}.tar.gz.sha256" | cut -d' ' -f1)"
+echo "✅ Artifact created: ${PACKAGE_NAME}.zip"
+echo "✅ SHA256 hash: $(cat "artifacts/${PACKAGE_NAME}.zip.sha256" | cut -d' ' -f1)"
 
 echo ""
 echo "🎉 Local CI simulation completed successfully!"
-echo "📦 Artifact location: artifacts/${PACKAGE_NAME}.tar.gz"
+echo "📦 Artifact location: artifacts/${PACKAGE_NAME}.zip"
 echo "📊 Binary size: $(du -h artifacts/${PROJECT_NAME}-${TARGET} | cut -f1)"
-echo "📊 Archive size: $(du -h artifacts/${PACKAGE_NAME}.tar.gz | cut -f1)"
+echo "📊 Archive size: $(du -h artifacts/${PACKAGE_NAME}.zip | cut -f1)"

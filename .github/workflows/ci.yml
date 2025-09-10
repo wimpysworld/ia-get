@@ -281,14 +281,14 @@ jobs:
         
         # Create compressed archive for distribution
         PACKAGE_NAME="ia-get-${{ runner.os }}"
-        echo "📦 Creating distribution archive: ${PACKAGE_NAME}.tar.gz"
-        tar -czf "${PACKAGE_NAME}.tar.gz" -C artifacts .
+        echo "📦 Creating distribution archive: ${PACKAGE_NAME}.zip"
+        cd artifacts && zip -r "../${PACKAGE_NAME}.zip" . && cd ..
         
         # Verify archive was created
-        if [ -f "${PACKAGE_NAME}.tar.gz" ]; then
-          archive_size=$(stat -f%z "${PACKAGE_NAME}.tar.gz" 2>/dev/null || stat -c%s "${PACKAGE_NAME}.tar.gz" 2>/dev/null || echo "0")
+        if [ -f "${PACKAGE_NAME}.zip" ]; then
+          archive_size=$(stat -f%z "${PACKAGE_NAME}.zip" 2>/dev/null || stat -c%s "${PACKAGE_NAME}.zip" 2>/dev/null || echo "0")
           archive_size_mb=$((archive_size / 1024 / 1024))
-          echo "✅ Archive created: ${PACKAGE_NAME}.tar.gz (${archive_size_mb}MB)"
+          echo "✅ Archive created: ${PACKAGE_NAME}.zip (${archive_size_mb}MB)"
         else
           echo "❌ Failed to create archive"
           exit 1
@@ -379,7 +379,7 @@ jobs:
         path: |
           artifacts/*
           hashes_${{ runner.os }}_${{ matrix.features }}.txt
-          ia-get-${{ runner.os }}.*
+          ia-get-${{ runner.os }}.zip
         retention-days: 30
 
     - name: Cache cleanup and optimization
@@ -507,11 +507,11 @@ jobs:
         
         # Create archive
         cd android-artifacts
-        tar -czf ../ia-get-android-dev.tar.gz *
+        zip -r ../ia-get-android-dev.zip *
         cd ..
         
         # Validate archive size
-        ARCHIVE_SIZE=$(stat -c%s "ia-get-android-dev.tar.gz" 2>/dev/null || stat -f%z "ia-get-android-dev.tar.gz" 2>/dev/null || echo "0")
+        ARCHIVE_SIZE=$(stat -c%s "ia-get-android-dev.zip" 2>/dev/null || stat -f%z "ia-get-android-dev.zip" 2>/dev/null || echo "0")
         ARCHIVE_SIZE_KB=$((ARCHIVE_SIZE / 1024))
         echo "📏 Archive size: ${ARCHIVE_SIZE_KB}KB"
         
@@ -520,15 +520,15 @@ jobs:
         fi
         
         # Calculate hash
-        sha256sum ia-get-android-dev.tar.gz > android-dev-hash.txt
-        echo "✓ Created development Android artifact: ia-get-android-dev.tar.gz (${ARCHIVE_SIZE_KB}KB)"
+        sha256sum ia-get-android-dev.zip > android-dev-hash.txt
+        echo "✓ Created development Android artifact: ia-get-android-dev.zip (${ARCHIVE_SIZE_KB}KB)"
 
     - name: Upload Android artifacts
       uses: actions/upload-artifact@v4.6.2
       with:
         name: ia-get-android-dev
         path: |
-          ia-get-android-dev.tar.gz
+          ia-get-android-dev.zip
           android-dev-hash.txt
         retention-days: 30
 
@@ -598,10 +598,10 @@ jobs:
         ## 📥 Downloads
         
         Choose your platform:
-        - **Linux**: \`ia-get-Linux.tar.gz\`
+        - **Linux**: \`ia-get-Linux.zip\`
         - **Windows**: \`ia-get-Windows.zip\` 
-        - **macOS**: \`ia-get-macOS.tar.gz\`
-        - **🤖 Android**: \`ia-get-android-dev.tar.gz\` (native libraries for app development)
+        - **macOS**: \`ia-get-macOS.zip\`
+        - **🤖 Android**: \`ia-get-android-dev.zip\` (native libraries for app development)
         
         ### 📱 Android Development
         The Android package contains native libraries for all major Android architectures:
