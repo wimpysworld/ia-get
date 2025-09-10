@@ -161,9 +161,16 @@ android {
         upload {
             if (keystoreProperties['uploadKeyStore']) {
                 keyAlias keystoreProperties['uploadKeyAlias']
-                keyPassword keystoreProperties['uploadKeyPassword']
-                storeFile keystoreProperties['uploadKeyStore'] ? file(keystoreProperties['uploadKeyStore']) : null
+                keyPassword keystoreProperties['uploadKeyPassword'] 
+                storeFile file(keystoreProperties['uploadKeyStore'])
                 storePassword keystoreProperties['uploadStorePassword']
+            } else {
+                // Fallback to debug keystore if upload keystore not available
+                storeFile file('debug.keystore')
+                storePassword 'android'
+                keyAlias 'androiddebugkey'
+                keyPassword 'android'
+                println "Warning: Upload keystore not found, using debug keystore for upload signing"
             }
         }
         
@@ -171,14 +178,22 @@ android {
             if (keystoreProperties['storeFile']) {
                 keyAlias keystoreProperties['keyAlias']
                 keyPassword keystoreProperties['keyPassword']
-                storeFile keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
+                storeFile file(keystoreProperties['storeFile'])
                 storePassword keystoreProperties['storePassword']
-            } else {
-                // Fallback to upload key for CI builds
+            } else if (keystoreProperties['uploadKeyStore']) {
+                // Fallback to upload keystore
                 keyAlias keystoreProperties['uploadKeyAlias']
                 keyPassword keystoreProperties['uploadKeyPassword']
-                storeFile keystoreProperties['uploadKeyStore'] ? file(keystoreProperties['uploadKeyStore']) : null
+                storeFile file(keystoreProperties['uploadKeyStore'])
                 storePassword keystoreProperties['uploadStorePassword']
+                println "Warning: Release keystore not found, using upload keystore for release signing"
+            } else {
+                // Final fallback to debug keystore for CI builds
+                storeFile file('debug.keystore')
+                storePassword 'android'
+                keyAlias 'androiddebugkey'
+                keyPassword 'android'
+                println "Warning: No production keystore found, using debug keystore for release signing (CI build)"
             }
         }
     }
@@ -212,8 +227,8 @@ android {
         }
         
         release {
-            // Use upload key for CI builds, release key for manual builds
-            signingConfig keystoreProperties['storeFile'] ? signingConfigs.release : signingConfigs.upload
+            // Use release signing config (which handles fallback internally)
+            signingConfig signingConfigs.release
             
             // Production optimizations
             minifyEnabled true

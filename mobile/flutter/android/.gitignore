@@ -5,9 +5,10 @@
 /captures/
 /local.properties
 
-# Keystore files (keep template)
+# Keystore files (keep template and debug keystore)
 /key.properties
 *.keystore
+!debug.keystore
 *.jks
 
 # IDE files
