@@ -116,3 +116,32 @@
     java.lang.Object writeReplace();
     java.lang.Object readResolve();
 }
+
+# Google Tink Crypto Library Rules - Handle optional HTTP dependencies
+-dontwarn com.google.api.client.http.**
+-dontwarn com.google.api.client.util.**
+-dontwarn com.google.api.client.googleapis.**
+-dontwarn com.google.api.client.json.**
+-dontwarn com.google.api.client.extensions.**
+
+# Tink KeysDownloader is optional and not used in offline crypto operations  
+-dontwarn com.google.crypto.tink.util.KeysDownloader
+-dontwarn com.google.crypto.tink.integration.gcpkms.**
+-dontwarn com.google.crypto.tink.integration.awskms.**
+
+# Additional Google API Client classes referenced by Tink
+-dontwarn com.google.api.client.http.GenericUrl
+-dontwarn com.google.api.client.http.HttpHeaders
+-dontwarn com.google.api.client.http.HttpRequest
+-dontwarn com.google.api.client.http.HttpRequestFactory
+-dontwarn com.google.api.client.http.HttpResponse
+-dontwarn com.google.api.client.http.HttpTransport
+-dontwarn com.google.api.client.http.javanet.NetHttpTransport$Builder
+
+# Keep Tink core crypto functionality that we do use
+-keep class com.google.crypto.tink.** { *; }
+-keep class com.google.crypto.tink.proto.** { *; }
+
+# Security-crypto specific rules
+-keep class androidx.security.crypto.** { *; }
+-dontwarn androidx.security.crypto.**

@@ -290,7 +290,7 @@ dependencies {
     implementation 'androidx.core:core:1.15.0'
     
     // Network security and privacy compliance
-    implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+    implementation 'androidx.security:security-crypto:1.1.0'
     implementation 'androidx.work:work-runtime-ktx:2.10.0'
     
     // Play Core for app updates and feature delivery

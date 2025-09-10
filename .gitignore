@@ -51,9 +51,7 @@ mobile/flutter/build/
 mobile/flutter/android/.gradle/
 mobile/flutter/android/app/build/
 mobile/flutter/android/local.properties
-mobile/flutter/android/gradlew
-mobile/flutter/android/gradlew.bat
-mobile/flutter/android/gradle/wrapper/gradle-wrapper.jar
+# Note: gradlew files should be committed for reproducible builds
 mobile/flutter/.flutter-plugins
 mobile/flutter/.flutter-plugins-dependencies
 mobile/flutter/pubspec.lock
