@@ -111,7 +111,7 @@ jobs:
           # Build production App Bundle for Play Store
           ./scripts/build-mobile.sh --production --appbundle --store-ready
           
-          # Also build production APK for direct distribution
+          # Also build production APK for direct distribution (as requested in issue)
           ./scripts/build-mobile.sh --production --store-ready
 
       - name: Package Android artifacts
@@ -123,27 +123,74 @@ jobs:
           TAG_NAME=${GITHUB_REF#refs/tags/}
           mkdir -p android-release-artifacts
           
-          # Copy App Bundle files (priority for Play Store)
+          # Track what we actually package
+          FOUND_ITEMS=0
+          
+          # Copy App Bundle and APK files with validation
           if [ -d "target/mobile" ]; then
-            cp target/mobile/*.aab android-release-artifacts/ 2>/dev/null || true
-            cp target/mobile/*.apk android-release-artifacts/ 2>/dev/null || true
+            echo "✓ Found target/mobile directory"
+            ls -la target/mobile/
+            
+            # Copy App Bundle files
+            if ls target/mobile/*.aab 1> /dev/null 2>&1; then
+              cp target/mobile/*.aab android-release-artifacts/
+              AAB_COUNT=$(ls target/mobile/*.aab | wc -l)
+              echo "✓ Copied $AAB_COUNT App Bundle file(s)"
+              FOUND_ITEMS=$((FOUND_ITEMS + AAB_COUNT))
+            else
+              echo "⚠ No App Bundle (.aab) files found"
+            fi
+            
+            # Copy APK files  
+            if ls target/mobile/*.apk 1> /dev/null 2>&1; then
+              cp target/mobile/*.apk android-release-artifacts/
+              APK_COUNT=$(ls target/mobile/*.apk | wc -l)
+              echo "✓ Copied $APK_COUNT APK file(s)"
+              FOUND_ITEMS=$((FOUND_ITEMS + APK_COUNT))
+            else
+              echo "⚠ No APK files found"
+            fi
             
             # Copy split APKs if they exist
             if [ -d "target/mobile/apk-variants-production" ]; then
               mkdir -p android-release-artifacts/split-apks
-              cp target/mobile/apk-variants-production/* android-release-artifacts/split-apks/ 2>/dev/null || true
+              if ls target/mobile/apk-variants-production/* 1> /dev/null 2>&1; then
+                cp target/mobile/apk-variants-production/* android-release-artifacts/split-apks/
+                SPLIT_COUNT=$(ls target/mobile/apk-variants-production/* | wc -l)
+                echo "✓ Copied $SPLIT_COUNT split APK file(s)"
+                FOUND_ITEMS=$((FOUND_ITEMS + SPLIT_COUNT))
+              fi
             fi
+          else
+            echo "❌ ERROR: target/mobile directory not found!"
+            echo "Build may have failed. Check build logs above."
+            exit 1
           fi
           
           # Copy native libraries for developers
           if [ -d "target/mobile/android" ]; then
             cp -r target/mobile/android android-release-artifacts/native-libs
+            echo "✓ Copied native libraries"
+            FOUND_ITEMS=$((FOUND_ITEMS + 1))
+          else
+            echo "⚠ No native libraries found at target/mobile/android"
           fi
           
           # Copy documentation and metadata
           cp README.md LICENSE android-release-artifacts/ || true
           
-          # Create store submission package
+          # Validate we have meaningful content
+          if [ $FOUND_ITEMS -eq 0 ]; then
+            echo "❌ ERROR: No Android release artifacts were found!"
+            echo "Expected to find APK/AAB files in target/mobile/"
+            exit 1
+          fi
+          
+          echo "📦 Android release artifacts summary:"
+          ls -la android-release-artifacts/
+          echo "Total artifacts found: $FOUND_ITEMS"
+          
+          # Create store submission package for App Bundle
           if [ -f "android-release-artifacts/ia-get-mobile-production.aab" ]; then
             mkdir -p android-release-artifacts/play-store
             cp android-release-artifacts/ia-get-mobile-production.aab android-release-artifacts/play-store/
@@ -151,12 +198,22 @@ jobs:
             echo "" >> android-release-artifacts/play-store/README.md
             echo "This App Bundle (.aab) is ready for submission to Google Play Store." >> android-release-artifacts/play-store/README.md
             echo "Upload this file to Google Play Console for distribution." >> android-release-artifacts/play-store/README.md
+            echo "✓ Created Play Store submission package"
           fi
           
           # Create versioned archive
           cd android-release-artifacts
           tar -czf "../${PACKAGE_NAME}-${TAG_NAME}.tar.gz" *
           cd ..
+          
+          # Validate archive size
+          ARCHIVE_SIZE=$(stat -c%s "${PACKAGE_NAME}-${TAG_NAME}.tar.gz" 2>/dev/null || stat -f%z "${PACKAGE_NAME}-${TAG_NAME}.tar.gz" 2>/dev/null || echo "0")
+          ARCHIVE_SIZE_KB=$((ARCHIVE_SIZE / 1024))
+          echo "📏 Archive size: ${ARCHIVE_SIZE_KB}KB"
+          
+          if [ $ARCHIVE_SIZE -lt 100000 ]; then  # Less than 100KB for production seems too small
+            echo "⚠ WARNING: Production archive seems small (${ARCHIVE_SIZE_KB}KB)"
+          fi
           
           # Calculate hashes
           sha256sum "${PACKAGE_NAME}-${TAG_NAME}.tar.gz" > "ANDROID_HASHES_${TAG_NAME}.txt"
@@ -171,7 +228,7 @@ jobs:
             sha256sum android-release-artifacts/ia-get-mobile-production.apk >> "ANDROID_HASHES_${TAG_NAME}.txt"
           fi
           
-          echo "Android release artifact created: ${PACKAGE_NAME}-${TAG_NAME}.tar.gz"
+          echo "✓ Android release artifact created: ${PACKAGE_NAME}-${TAG_NAME}.tar.gz (${ARCHIVE_SIZE_KB}KB)"
           echo "Contents:"
           tar -tzf "${PACKAGE_NAME}-${TAG_NAME}.tar.gz" | head -20
 

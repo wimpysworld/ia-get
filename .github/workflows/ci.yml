@@ -452,27 +452,76 @@ jobs:
     - name: Build Android APK
       run: |
         chmod +x scripts/build-mobile.sh
-        ./scripts/build-mobile.sh
+        ./scripts/build-mobile.sh --development
 
     - name: Package Android artifacts
       run: |
         mkdir -p android-artifacts
-        # Copy APK files
+        
+        # Track what we actually find
+        FOUND_ITEMS=0
+        
+        # Copy APK files with validation
         if [ -d "target/mobile" ]; then
-          cp target/mobile/*.apk android-artifacts/ 2>/dev/null || true
+          echo "✓ Found target/mobile directory"
+          ls -la target/mobile/
+          if ls target/mobile/*.apk 1> /dev/null 2>&1; then
+            cp target/mobile/*.apk android-artifacts/
+            APK_COUNT=$(ls target/mobile/*.apk | wc -l)
+            echo "✓ Copied $APK_COUNT APK file(s)"
+            FOUND_ITEMS=$((FOUND_ITEMS + APK_COUNT))
+          else
+            echo "⚠ No APK files found in target/mobile/"
+          fi
+        else
+          echo "✗ target/mobile directory not found"
         fi
-        # Copy native libraries for developers
-        if [ -d "target/android" ]; then
+        
+        # Copy native libraries for developers (check both possible locations)
+        if [ -d "target/mobile/android" ]; then
+          cp -r target/mobile/android android-artifacts/native-libs
+          echo "✓ Copied native libraries from target/mobile/android"
+          FOUND_ITEMS=$((FOUND_ITEMS + 1))
+        elif [ -d "target/android" ]; then
           cp -r target/android android-artifacts/native-libs
+          echo "✓ Copied native libraries from target/android"
+          FOUND_ITEMS=$((FOUND_ITEMS + 1))
+        else
+          echo "⚠ No native libraries found (checked target/mobile/android and target/android)"
         fi
+        
         # Copy documentation
-        cp README.md LICENSE android-artifacts/ || true
+        cp README.md LICENSE android-artifacts/ 2>/dev/null || true
+        
+        # Validate we have meaningful content
+        if [ $FOUND_ITEMS -eq 0 ]; then
+          echo "❌ ERROR: No Android build artifacts were found!"
+          echo "Expected to find APK files in target/mobile/ or native libraries"
+          echo "Build may have failed. Check build logs above."
+          exit 1
+        fi
+        
+        echo "📦 Android artifacts summary:"
+        ls -la android-artifacts/
+        echo "Total artifacts found: $FOUND_ITEMS"
+        
         # Create archive
         cd android-artifacts
         tar -czf ../ia-get-android-dev.tar.gz *
         cd ..
+        
+        # Validate archive size
+        ARCHIVE_SIZE=$(stat -c%s "ia-get-android-dev.tar.gz" 2>/dev/null || stat -f%z "ia-get-android-dev.tar.gz" 2>/dev/null || echo "0")
+        ARCHIVE_SIZE_KB=$((ARCHIVE_SIZE / 1024))
+        echo "📏 Archive size: ${ARCHIVE_SIZE_KB}KB"
+        
+        if [ $ARCHIVE_SIZE -lt 50000 ]; then  # Less than 50KB indicates likely empty/minimal content
+          echo "⚠ WARNING: Archive seems small (${ARCHIVE_SIZE_KB}KB). Expected larger size for Android build."
+        fi
+        
         # Calculate hash
         sha256sum ia-get-android-dev.tar.gz > android-dev-hash.txt
+        echo "✓ Created development Android artifact: ia-get-android-dev.tar.gz (${ARCHIVE_SIZE_KB}KB)"
 
     - name: Upload Android artifacts
       uses: actions/upload-artifact@v4.6.2
