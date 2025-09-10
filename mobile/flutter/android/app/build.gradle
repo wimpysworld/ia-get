@@ -152,7 +152,7 @@ android {
 
     signingConfigs {
         debug {
-            storeFile file('debug.keystore')
+            storeFile file('../debug.keystore')
             storePassword 'android'
             keyAlias 'androiddebugkey'
             keyPassword 'android'
@@ -166,7 +166,7 @@ android {
                 storePassword keystoreProperties['uploadStorePassword']
             } else {
                 // Fallback to debug keystore if upload keystore not available
-                storeFile file('debug.keystore')
+                storeFile file('../debug.keystore')
                 storePassword 'android'
                 keyAlias 'androiddebugkey'
                 keyPassword 'android'
@@ -189,7 +189,7 @@ android {
                 println "Warning: Release keystore not found, using upload keystore for release signing"
             } else {
                 // Final fallback to debug keystore for CI builds
-                storeFile file('debug.keystore')
+                storeFile file('../debug.keystore')
                 storePassword 'android'
                 keyAlias 'androiddebugkey'
                 keyPassword 'android'
