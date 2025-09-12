@@ -216,7 +216,13 @@ if [[ "$BUILD_TYPE" == "appbundle" ]]; then
         # Copy App Bundle to output directory with environment suffix
         mkdir -p "../../../$OUTPUT_DIR"
         AAB_NAME="ia-get-mobile-${ENVIRONMENT}.aab"
-        cp "build/app/outputs/bundle/${FLAVOR}${ENVIRONMENT^}/${BUILD_MODE}/app-${FLAVOR}-${BUILD_MODE}.aab" \
+        
+        # Android Gradle output format: build/app/outputs/bundle/{flavor}{BuildType}/app-{flavor}-{buildType}.aab
+        GRADLE_BUILD_TYPE="${BUILD_MODE^}"  # Capitalize first letter (debug -> Debug)
+        FLUTTER_OUTPUT_DIR="${FLAVOR}${GRADLE_BUILD_TYPE}"
+        
+        # Try the correct path first, then fallback paths
+        cp "build/app/outputs/bundle/${FLUTTER_OUTPUT_DIR}/app-${FLAVOR}-${BUILD_MODE}.aab" \
            "../../../$OUTPUT_DIR/${AAB_NAME}" 2>/dev/null || \
         cp "build/app/outputs/bundle/${FLAVOR}Release/app-${FLAVOR}-release.aab" \
            "../../../$OUTPUT_DIR/${AAB_NAME}" 2>/dev/null || \
@@ -289,8 +295,8 @@ fi
 # Validate native libraries
 echo -e "${BLUE}Validating native libraries...${NC}"
 ARCHS_FOUND=0
-for target_pair in "${ANDROID_TARGETS[@]}"; do
-    IFS=':' read -r rust_target android_arch <<< "$target_pair"
+for target_name in "${TARGET_NAMES[@]}"; do
+    android_arch=$(get_android_abi "$target_name")
     
     if [[ -f "$FLUTTER_DIR/android/app/src/main/jniLibs/$android_arch/libia_get.so" ]]; then
         LIB_SIZE=$(du -h "$FLUTTER_DIR/android/app/src/main/jniLibs/$android_arch/libia_get.so" | cut -f1)
@@ -301,10 +307,10 @@ for target_pair in "${ANDROID_TARGETS[@]}"; do
     fi
 done
 
-if [[ $ARCHS_FOUND -eq ${#ANDROID_TARGETS[@]} ]]; then
-    echo -e "${GREEN}✓ All ${#ANDROID_TARGETS[@]} architectures present${NC}"
+if [[ $ARCHS_FOUND -eq ${#TARGET_NAMES[@]} ]]; then
+    echo -e "${GREEN}✓ All ${#TARGET_NAMES[@]} architectures present${NC}"
 else
-    echo -e "${YELLOW}⚠ Only $ARCHS_FOUND/${#ANDROID_TARGETS[@]} architectures found${NC}"
+    echo -e "${YELLOW}⚠ Only $ARCHS_FOUND/${#TARGET_NAMES[@]} architectures found${NC}"
 fi
 
 echo -e "${GREEN}✅ Mobile app build completed successfully!${NC}"
