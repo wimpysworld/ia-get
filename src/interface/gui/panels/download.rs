@@ -23,11 +23,7 @@ impl DownloadPanel {
 
         if self.total_files > 0 {
             // Overall progress
-            let progress = if self.total_files > 0 {
-                self.completed_files as f32 / self.total_files as f32
-            } else {
-                0.0
-            };
+            let progress = self.completed_files as f32 / self.total_files as f32;
 
             ui.add(
                 egui::ProgressBar::new(progress)

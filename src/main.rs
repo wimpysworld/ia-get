@@ -94,11 +94,13 @@ async fn launch_gui_with_mode_switching() -> Result<()> {
         eprintln!("Warning: Failed to initialize logger: {}", e);
     }
 
-    // Configure GUI options
+    // Configure GUI options with better responsiveness
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 700.0])
-            .with_min_inner_size([800.0, 600.0])
+            .with_inner_size([1200.0, 800.0])
+            .with_min_inner_size([900.0, 700.0])
+            .with_max_inner_size([2000.0, 1200.0])
+            .with_resizable(true)
             .with_title("ia-get - Internet Archive Downloader")
             .with_icon(load_icon()),
         ..Default::default()

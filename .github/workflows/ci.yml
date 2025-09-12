@@ -402,7 +402,7 @@ jobs:
         Write-Host "Cache cleanup completed"
 
   android-build:
-    name: Android APK Build (Development)
+    name: Android APK & App Bundle Build (Development)
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     
@@ -449,9 +449,14 @@ jobs:
           ${{ runner.os }}-android-apk-${{ hashFiles('**/Cargo.lock') }}-
           ${{ runner.os }}-android-apk-
 
-    - name: Build Android APK
+    - name: Build Android APK and App Bundle
       run: |
         chmod +x scripts/build-mobile.sh
+        
+        # Build development App Bundle for testing Play Store format
+        ./scripts/build-mobile.sh --development --appbundle
+        
+        # Also build development APK for direct installation
         ./scripts/build-mobile.sh --development
 
     - name: Package Android artifacts
@@ -465,6 +470,8 @@ jobs:
         if [ -d "target/mobile" ]; then
           echo "✓ Found target/mobile directory"
           ls -la target/mobile/
+          
+          # Copy APK files
           if ls target/mobile/*.apk 1> /dev/null 2>&1; then
             cp target/mobile/*.apk android-artifacts/
             APK_COUNT=$(ls target/mobile/*.apk | wc -l)
@@ -472,6 +479,16 @@ jobs:
             FOUND_ITEMS=$((FOUND_ITEMS + APK_COUNT))
           else
             echo "⚠ No APK files found in target/mobile/"
+          fi
+          
+          # Copy App Bundle files (AAB)
+          if ls target/mobile/*.aab 1> /dev/null 2>&1; then
+            cp target/mobile/*.aab android-artifacts/
+            AAB_COUNT=$(ls target/mobile/*.aab | wc -l)
+            echo "✓ Copied $AAB_COUNT App Bundle file(s)"
+            FOUND_ITEMS=$((FOUND_ITEMS + AAB_COUNT))
+          else
+            echo "⚠ No App Bundle (.aab) files found in target/mobile/"
           fi
         else
           echo "✗ target/mobile directory not found"
@@ -496,7 +513,7 @@ jobs:
         # Validate we have meaningful content
         if [ $FOUND_ITEMS -eq 0 ]; then
           echo "❌ ERROR: No Android build artifacts were found!"
-          echo "Expected to find APK files in target/mobile/ or native libraries"
+          echo "Expected to find APK/AAB files in target/mobile/ or native libraries"
           echo "Build may have failed. Check build logs above."
           exit 1
         fi
@@ -601,16 +618,19 @@ jobs:
         - **Linux**: \`ia-get-Linux.zip\`
         - **Windows**: \`ia-get-Windows.zip\` 
         - **macOS**: \`ia-get-macOS.zip\`
-        - **🤖 Android**: \`ia-get-android-dev.zip\` (native libraries for app development)
+        - **🤖 Android**: \`ia-get-android-dev.zip\` (complete APK & App Bundle for testing)
         
         ### 📱 Android Development
-        The Android package contains native libraries for all major Android architectures:
-        - **ARM64** (arm64-v8a) - Modern devices
-        - **ARMv7** (armeabi-v7a) - Older devices
-        - **x86_64** - Intel emulators
-        - **x86** - Legacy emulators
+        The Android package contains complete development artifacts:
+        - **Development APK**: Ready to install on devices for testing (\`ia-get-mobile-development.apk\`)
+        - **Development App Bundle**: Play Store format for testing upload flow (\`ia-get-mobile-development.aab\`)
+        - **Native Libraries**: FFI libraries for all major Android architectures
+          - **ARM64** (arm64-v8a) - Modern devices
+          - **ARMv7** (armeabi-v7a) - Older devices
+          - **x86_64** - Intel emulators
+          - **x86** - Legacy emulators
         
-        Perfect for integrating with Flutter, React Native, or native Android apps.
+        Perfect for testing both direct installation (APK) and Play Store submission flow (AAB) before production release.
         
         $(cat HASHES.md)
         

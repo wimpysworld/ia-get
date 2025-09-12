@@ -323,42 +323,61 @@ impl IaGetApp {
 
             ui.separator();
 
-            match self.current_tab {
-                AppTab::Download => self.render_download_tab(ui, ctx),
-                AppTab::FileBrowser => self.render_file_browser_tab(ui),
-                AppTab::Filters => self.render_filters_tab(ui),
-                AppTab::Config => self.render_config_tab(ui),
-                AppTab::History => self.render_history_tab(ui),
-                AppTab::ArchiveHealth => self.render_archive_health_tab(ui),
-            }
+            // Add scrollable area for all tab content to prevent UI elements from being hidden
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| match self.current_tab {
+                    AppTab::Download => self.render_download_tab(ui, ctx),
+                    AppTab::FileBrowser => self.render_file_browser_tab(ui),
+                    AppTab::Filters => self.render_filters_tab(ui),
+                    AppTab::Config => self.render_config_tab(ui),
+                    AppTab::History => self.render_history_tab(ui),
+                    AppTab::ArchiveHealth => self.render_archive_health_tab(ui),
+                });
         });
 
         // Error/Success messages
         let show_error = self.error_message.is_some();
         if show_error {
             let error_msg = self.error_message.clone().unwrap();
-            egui::Window::new("Error")
+            egui::Window::new("❌ Error")
                 .collapsible(false)
-                .resizable(false)
+                .resizable(true)
+                .default_width(400.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.colored_label(egui::Color32::RED, &error_msg);
-                    if ui.button("OK").clicked() {
-                        self.error_message = None;
-                    }
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new(&error_msg).color(egui::Color32::LIGHT_RED));
+                    ui.add_space(15.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("OK").clicked() {
+                                self.error_message = None;
+                            }
+                        });
+                    });
                 });
         }
 
         let show_success = self.success_message.is_some();
         if show_success {
             let success_msg = self.success_message.clone().unwrap();
-            egui::Window::new("Success")
+            egui::Window::new("✅ Success")
                 .collapsible(false)
-                .resizable(false)
+                .resizable(true)
+                .default_width(400.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.colored_label(egui::Color32::GREEN, &success_msg);
-                    if ui.button("OK").clicked() {
-                        self.success_message = None;
-                    }
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new(&success_msg).color(egui::Color32::LIGHT_GREEN));
+                    ui.add_space(15.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("OK").clicked() {
+                                self.success_message = None;
+                            }
+                        });
+                    });
                 });
         }
     }
@@ -447,14 +466,14 @@ impl IaGetApp {
         // Download button
         ui.horizontal(|ui| {
             if ui
-                .add_sized([100.0, 30.0], egui::Button::new("Download"))
+                .add(egui::Button::new("📥 Download").min_size(egui::vec2(120.0, 32.0)))
                 .clicked()
                 && !self.is_downloading
             {
                 self.start_download(ctx);
             }
 
-            if self.is_downloading && ui.button("Cancel").clicked() {
+            if self.is_downloading && ui.button("❌ Cancel").clicked() {
                 self.is_downloading = false;
                 self.download_status = "Cancelled".to_string();
             }
@@ -566,12 +585,14 @@ impl IaGetApp {
                         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
                         ui.add_space(10.0);
                         ui.label("High-performance file downloader for Internet Archive");
+                        ui.add_space(5.0);
+                        ui.label("Maintained by Gameaday");
                         ui.add_space(10.0);
                         ui.hyperlink_to(
                             "GitHub Repository",
                             "https://github.com/Gameaday/ia-get-cli",
                         );
-                        ui.add_space(10.0);
+                        ui.add_space(5.0);
                         ui.label("Built with Rust and egui");
                         ui.add_space(20.0);
 
