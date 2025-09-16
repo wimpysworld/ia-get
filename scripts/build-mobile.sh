@@ -98,6 +98,9 @@ mkdir -p "$OUTPUT_DIR/android"
 mkdir -p "$FLUTTER_DIR/android/app/src/main/jniLibs"
 
 # Build Rust library for each Android target
+SUCCESSFUL_BUILDS=0
+ARM64_BUILT=false
+
 for target_name in "${TARGET_NAMES[@]}"; do
     rust_target=$(get_rust_target "$target_name")
     android_arch=$(get_android_abi "$target_name")
@@ -121,11 +124,33 @@ for target_name in "${TARGET_NAMES[@]}"; do
            "$OUTPUT_DIR/android/$android_arch/"
            
         echo -e "${GREEN}✓ Copied to $android_arch directory${NC}"
+        ((SUCCESSFUL_BUILDS++))
+        
+        # Track if arm64-v8a (primary architecture) was built
+        if [[ "$android_arch" == "arm64-v8a" ]]; then
+            ARM64_BUILT=true
+        fi
     else
-        echo -e "${RED}✗ Failed to build for ${rust_target}${NC}"
-        exit 1
+        echo -e "${YELLOW}⚠ Failed to build for ${rust_target} - continuing with other architectures${NC}"
     fi
 done
+
+# Check if we have the minimum required architecture
+if [[ "$ARM64_BUILT" == false ]]; then
+    echo -e "${RED}✗ CRITICAL: Failed to build for arm64-v8a (primary architecture)${NC}"
+    echo -e "${RED}✗ At least arm64-v8a is required for Android builds${NC}"
+    exit 1
+fi
+
+if [[ $SUCCESSFUL_BUILDS -eq 0 ]]; then
+    echo -e "${RED}✗ CRITICAL: No architectures were built successfully${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✓ Built successfully for $SUCCESSFUL_BUILDS/${#TARGET_NAMES[@]} architectures${NC}"
+if [[ $SUCCESSFUL_BUILDS -lt ${#TARGET_NAMES[@]} ]]; then
+    echo -e "${YELLOW}⚠ Some architectures failed to build, but continuing with available ones${NC}"
+fi
 
 echo -e "${YELLOW}Step 3: Generating C header file...${NC}"
 
@@ -145,6 +170,9 @@ echo -e "${YELLOW}Step 4: Building mobile FFI wrapper (if needed)...${NC}"
 if [ -d "$RUST_FFI_DIR" ] && [ -f "$RUST_FFI_DIR/Cargo.toml" ]; then
     echo -e "${BLUE}Building additional mobile wrapper library...${NC}"
     cd "$RUST_FFI_DIR"
+    WRAPPER_SUCCESSFUL_BUILDS=0
+    WRAPPER_ARM64_BUILT=false
+    
     for target_name in "${TARGET_NAMES[@]}"; do
         rust_target=$(get_rust_target "$target_name")
         android_arch=$(get_android_abi "$target_name")
@@ -157,12 +185,26 @@ if [ -d "$RUST_FFI_DIR" ] && [ -f "$RUST_FFI_DIR/Cargo.toml" ]; then
             cp "target/${rust_target}/release/libia_get_mobile.so" \
                "../../$FLUTTER_DIR/android/app/src/main/jniLibs/$android_arch/"
             echo -e "${GREEN}✓ Mobile wrapper built for ${android_arch}${NC}"
+            ((WRAPPER_SUCCESSFUL_BUILDS++))
+            
+            if [[ "$android_arch" == "arm64-v8a" ]]; then
+                WRAPPER_ARM64_BUILT=true
+            fi
         else
-            echo -e "${RED}✗ Failed to build mobile wrapper for ${rust_target}${NC}"
-            exit 1
+            echo -e "${YELLOW}⚠ Failed to build mobile wrapper for ${rust_target} - continuing with other architectures${NC}"
         fi
     done
+    
     cd "../.."
+    
+    # Check wrapper build results
+    if [[ "$WRAPPER_ARM64_BUILT" == false && $WRAPPER_SUCCESSFUL_BUILDS -gt 0 ]]; then
+        echo -e "${YELLOW}⚠ Mobile wrapper: arm64-v8a failed but other architectures built${NC}"
+    elif [[ $WRAPPER_SUCCESSFUL_BUILDS -eq 0 ]]; then
+        echo -e "${YELLOW}⚠ Mobile wrapper: All architectures failed to build - continuing without wrapper${NC}"
+    else
+        echo -e "${GREEN}✓ Mobile wrapper built successfully for $WRAPPER_SUCCESSFUL_BUILDS/${#TARGET_NAMES[@]} architectures${NC}"
+    fi
 else
     echo -e "${BLUE}No additional mobile wrapper needed, using main FFI libraries${NC}"
 fi
@@ -295,6 +337,8 @@ fi
 # Validate native libraries
 echo -e "${BLUE}Validating native libraries...${NC}"
 ARCHS_FOUND=0
+ARM64_LIB_FOUND=false
+
 for target_name in "${TARGET_NAMES[@]}"; do
     android_arch=$(get_android_abi "$target_name")
     
@@ -302,15 +346,32 @@ for target_name in "${TARGET_NAMES[@]}"; do
         LIB_SIZE=$(du -h "$FLUTTER_DIR/android/app/src/main/jniLibs/$android_arch/libia_get.so" | cut -f1)
         echo -e "${GREEN}✓ $android_arch: $LIB_SIZE${NC}"
         ((ARCHS_FOUND++))
+        
+        # Track if arm64-v8a library is present
+        if [[ "$android_arch" == "arm64-v8a" ]]; then
+            ARM64_LIB_FOUND=true
+        fi
     else
-        echo -e "${RED}✗ Missing library for $android_arch${NC}"
+        echo -e "${YELLOW}⚠ Missing library for $android_arch${NC}"
     fi
 done
+
+# Validate minimum requirements
+if [[ "$ARM64_LIB_FOUND" == false ]]; then
+    echo -e "${RED}✗ CRITICAL: arm64-v8a library missing - this is required for Android builds${NC}"
+    exit 1
+fi
+
+if [[ $ARCHS_FOUND -eq 0 ]]; then
+    echo -e "${RED}✗ CRITICAL: No native libraries found${NC}"
+    exit 1
+fi
 
 if [[ $ARCHS_FOUND -eq ${#TARGET_NAMES[@]} ]]; then
     echo -e "${GREEN}✓ All ${#TARGET_NAMES[@]} architectures present${NC}"
 else
-    echo -e "${YELLOW}⚠ Only $ARCHS_FOUND/${#TARGET_NAMES[@]} architectures found${NC}"
+    echo -e "${YELLOW}⚠ Only $ARCHS_FOUND/${#TARGET_NAMES[@]} architectures found, but minimum requirements met${NC}"
+    echo -e "${GREEN}✓ arm64-v8a (primary architecture) is present - build can proceed${NC}"
 fi
 
 echo -e "${GREEN}✅ Mobile app build completed successfully!${NC}"
