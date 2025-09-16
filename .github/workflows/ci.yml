@@ -461,19 +461,32 @@ jobs:
 
     - name: Package Android artifacts
       run: |
-        mkdir -p android-artifacts
+        set -x  # Enable debug mode to see exactly where script fails
+        
+        # Create artifacts directory with error checking
+        echo "🔍 Creating android-artifacts directory..."
+        if ! mkdir -p android-artifacts; then
+          echo "❌ ERROR: Failed to create android-artifacts directory"
+          exit 1
+        fi
         
         # Track what we actually find
         FOUND_ITEMS=0
         
         # Copy APK files with validation
+        echo "🔍 Checking for target/mobile directory..."
         if [ -d "target/mobile" ]; then
           echo "✓ Found target/mobile directory"
           ls -la target/mobile/
           
-          # Copy APK files
+          # Copy APK files with error checking
+          echo "🔍 Checking for APK files..."
           if ls target/mobile/*.apk 1> /dev/null 2>&1; then
-            cp target/mobile/*.apk android-artifacts/
+            echo "🔍 Copying APK files..."
+            if ! cp target/mobile/*.apk android-artifacts/; then
+              echo "❌ ERROR: Failed to copy APK files"
+              exit 1
+            fi
             APK_COUNT=$(ls target/mobile/*.apk | wc -l)
             echo "✓ Copied $APK_COUNT APK file(s)"
             FOUND_ITEMS=$((FOUND_ITEMS + APK_COUNT))
@@ -481,9 +494,14 @@ jobs:
             echo "⚠ No APK files found in target/mobile/"
           fi
           
-          # Copy App Bundle files (AAB)
+          # Copy App Bundle files (AAB) with error checking
+          echo "🔍 Checking for AAB files..."
           if ls target/mobile/*.aab 1> /dev/null 2>&1; then
-            cp target/mobile/*.aab android-artifacts/
+            echo "🔍 Copying AAB files..."
+            if ! cp target/mobile/*.aab android-artifacts/; then
+              echo "❌ ERROR: Failed to copy AAB files"
+              exit 1
+            fi
             AAB_COUNT=$(ls target/mobile/*.aab | wc -l)
             echo "✓ Copied $AAB_COUNT App Bundle file(s)"
             FOUND_ITEMS=$((FOUND_ITEMS + AAB_COUNT))
@@ -495,40 +513,91 @@ jobs:
         fi
         
         # Copy native libraries for developers (check both possible locations)
+        echo "🔍 Checking for native libraries..."
         if [ -d "target/mobile/android" ]; then
-          cp -r target/mobile/android android-artifacts/native-libs
+          echo "🔍 Copying native libraries from target/mobile/android..."
+          if ! cp -r target/mobile/android android-artifacts/native-libs; then
+            echo "❌ ERROR: Failed to copy native libraries from target/mobile/android"
+            exit 1
+          fi
           echo "✓ Copied native libraries from target/mobile/android"
           FOUND_ITEMS=$((FOUND_ITEMS + 1))
         elif [ -d "target/android" ]; then
-          cp -r target/android android-artifacts/native-libs
+          echo "🔍 Copying native libraries from target/android..."
+          if ! cp -r target/android android-artifacts/native-libs; then
+            echo "❌ ERROR: Failed to copy native libraries from target/android"
+            exit 1
+          fi
           echo "✓ Copied native libraries from target/android"
           FOUND_ITEMS=$((FOUND_ITEMS + 1))
         else
           echo "⚠ No native libraries found (checked target/mobile/android and target/android)"
         fi
         
-        # Copy documentation
-        cp README.md LICENSE android-artifacts/ 2>/dev/null || true
+        # Copy documentation with better error handling
+        echo "🔍 Copying documentation files..."
+        for doc_file in README.md LICENSE; do
+          if [ -f "$doc_file" ]; then
+            if cp "$doc_file" android-artifacts/; then
+              echo "✓ Copied $doc_file"
+            else
+              echo "❌ WARNING: Failed to copy $doc_file (non-critical)"
+            fi
+          else
+            echo "⚠ WARNING: $doc_file not found in current directory"
+          fi
+        done
         
         # Validate we have meaningful content
         if [ $FOUND_ITEMS -eq 0 ]; then
           echo "❌ ERROR: No Android build artifacts were found!"
           echo "Expected to find APK/AAB files in target/mobile/ or native libraries"
           echo "Build may have failed. Check build logs above."
+          echo "🔍 Current directory contents:"
+          ls -la
+          echo "🔍 Current working directory: $(pwd)"
           exit 1
         fi
         
         echo "📦 Android artifacts summary:"
-        ls -la android-artifacts/
+        if ! ls -la android-artifacts/; then
+          echo "❌ ERROR: Failed to list android-artifacts directory"
+          exit 1
+        fi
         echo "Total artifacts found: $FOUND_ITEMS"
         
-        # Create archive
-        cd android-artifacts
-        zip -r ../ia-get-android-dev.zip *
-        cd ..
+        # Create archive with error checking
+        echo "🔍 Creating archive..."
+        if ! cd android-artifacts; then
+          echo "❌ ERROR: Failed to change to android-artifacts directory"
+          exit 1
+        fi
+        
+        if ! zip -r ../ia-get-android-dev.zip *; then
+          echo "❌ ERROR: Failed to create zip archive"
+          cd ..
+          exit 1
+        fi
+        
+        if ! cd ..; then
+          echo "❌ ERROR: Failed to return to parent directory"
+          exit 1
+        fi
+        
+        # Validate archive was created
+        echo "🔍 Validating archive..."
+        if [ ! -f "ia-get-android-dev.zip" ]; then
+          echo "❌ ERROR: Archive file was not created"
+          exit 1
+        fi
         
         # Validate archive size
         ARCHIVE_SIZE=$(stat -c%s "ia-get-android-dev.zip" 2>/dev/null || stat -f%z "ia-get-android-dev.zip" 2>/dev/null || echo "0")
+        if [ "$ARCHIVE_SIZE" = "0" ]; then
+          echo "❌ ERROR: Failed to determine archive size or archive is empty"
+          exit 1
+        fi
+        
         ARCHIVE_SIZE_KB=$((ARCHIVE_SIZE / 1024))
         echo "📏 Archive size: ${ARCHIVE_SIZE_KB}KB"
         
@@ -536,9 +605,15 @@ jobs:
           echo "⚠ WARNING: Archive seems small (${ARCHIVE_SIZE_KB}KB). Expected larger size for Android build."
         fi
         
-        # Calculate hash
-        sha256sum ia-get-android-dev.zip > android-dev-hash.txt
+        # Calculate hash with error checking
+        echo "🔍 Calculating SHA256 hash..."
+        if ! sha256sum ia-get-android-dev.zip > android-dev-hash.txt; then
+          echo "❌ ERROR: Failed to calculate SHA256 hash"
+          exit 1
+        fi
+        
         echo "✓ Created development Android artifact: ia-get-android-dev.zip (${ARCHIVE_SIZE_KB}KB)"
+        echo "✓ Package Android artifacts step completed successfully"
 
     - name: Upload Android artifacts
       uses: actions/upload-artifact@v4.6.2
