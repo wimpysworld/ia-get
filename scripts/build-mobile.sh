@@ -256,7 +256,7 @@ if [[ "$BUILD_TYPE" == "appbundle" ]]; then
         echo -e "${GREEN}✓ Flutter App Bundle built successfully${NC}"
         
         # Copy App Bundle to output directory with environment suffix
-        mkdir -p "../../../$OUTPUT_DIR"
+        mkdir -p "../../$OUTPUT_DIR"
         AAB_NAME="ia-get-mobile-${ENVIRONMENT}.aab"
         
         # Android Gradle output format: build/app/outputs/bundle/{flavor}{BuildType}/app-{flavor}-{buildType}.aab
@@ -265,11 +265,11 @@ if [[ "$BUILD_TYPE" == "appbundle" ]]; then
         
         # Try the correct path first, then fallback paths
         cp "build/app/outputs/bundle/${FLUTTER_OUTPUT_DIR}/app-${FLAVOR}-${BUILD_MODE}.aab" \
-           "../../../$OUTPUT_DIR/${AAB_NAME}" 2>/dev/null || \
+           "../../$OUTPUT_DIR/${AAB_NAME}" 2>/dev/null || \
         cp "build/app/outputs/bundle/${FLAVOR}Release/app-${FLAVOR}-release.aab" \
-           "../../../$OUTPUT_DIR/${AAB_NAME}" 2>/dev/null || \
+           "../../$OUTPUT_DIR/${AAB_NAME}" 2>/dev/null || \
         cp "build/app/outputs/bundle/release/app-release.aab" \
-           "../../../$OUTPUT_DIR/${AAB_NAME}"
+           "../../$OUTPUT_DIR/${AAB_NAME}"
         echo -e "${GREEN}✓ App Bundle copied to $OUTPUT_DIR/${AAB_NAME}${NC}"
     else
         echo -e "${RED}✗ Failed to build Flutter App Bundle${NC}"
@@ -286,8 +286,8 @@ else
             echo -e "${GREEN}✓ Split APKs built successfully${NC}"
             
             # Copy all APK variants
-            mkdir -p "../../../$OUTPUT_DIR/apk-variants-${ENVIRONMENT}"
-            cp build/app/outputs/flutter-apk/*.apk "../../../$OUTPUT_DIR/apk-variants-${ENVIRONMENT}/"
+            mkdir -p "../../$OUTPUT_DIR/apk-variants-${ENVIRONMENT}"
+            cp build/app/outputs/flutter-apk/*.apk "../../$OUTPUT_DIR/apk-variants-${ENVIRONMENT}/"
             echo -e "${GREEN}✓ APK variants copied to $OUTPUT_DIR/apk-variants-${ENVIRONMENT}/${NC}"
         else
             echo -e "${RED}✗ Failed to build split APKs${NC}"
@@ -300,14 +300,14 @@ else
         echo -e "${GREEN}✓ Universal APK built successfully${NC}"
         
         # Copy APK to output directory with environment suffix
-        mkdir -p "../../../$OUTPUT_DIR"
+        mkdir -p "../../$OUTPUT_DIR"
         APK_NAME="ia-get-mobile-${ENVIRONMENT}.apk"
         cp "build/app/outputs/flutter-apk/app-${FLAVOR}-${BUILD_MODE}.apk" \
-           "../../../$OUTPUT_DIR/${APK_NAME}" 2>/dev/null || \
+           "../../$OUTPUT_DIR/${APK_NAME}" 2>/dev/null || \
         cp "build/app/outputs/flutter-apk/app-${BUILD_MODE}.apk" \
-           "../../../$OUTPUT_DIR/${APK_NAME}" 2>/dev/null || \
+           "../../$OUTPUT_DIR/${APK_NAME}" 2>/dev/null || \
         cp "build/app/outputs/flutter-apk/app-release.apk" \
-           "../../../$OUTPUT_DIR/${APK_NAME}"
+           "../../$OUTPUT_DIR/${APK_NAME}"
         echo -e "${GREEN}✓ APK copied to $OUTPUT_DIR/${APK_NAME}${NC}"
     else
         echo -e "${RED}✗ Failed to build Flutter APK${NC}"
