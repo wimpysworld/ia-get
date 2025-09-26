@@ -740,7 +740,7 @@ impl AdvancedMetadataProcessor {
             let mut sorted_sizes = sizes.to_vec();
             sorted_sizes.sort();
             let mid = sorted_sizes.len() / 2;
-            if sorted_sizes.len() % 2 == 0 {
+            if sorted_sizes.len().is_multiple_of(2) {
                 (sorted_sizes[mid - 1] + sorted_sizes[mid]) / 2
             } else {
                 sorted_sizes[mid]
