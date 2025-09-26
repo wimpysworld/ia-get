@@ -1,8 +1,8 @@
 [package]
 name = "ia-get"
 categories = ["command-line-utilities"]
-description = "High-performance file downloader for archive.org (heavily modified fork)"
-keywords = ["cli", "archive", "internet-archive", "download", "json-api"]
+description = "Internet Archive Helper - High-performance file downloader for archive.org"
+keywords = ["cli", "archive", "internet-archive", "download", "helper"]
 authors = ["Fork Maintainer <gameaday@users.noreply.github.com>", "Original Author: Martin Wimpress <code@wimpress.io>"]
 repository = "https://github.com/Gameaday/ia-get-cli"
 readme = "README.md"

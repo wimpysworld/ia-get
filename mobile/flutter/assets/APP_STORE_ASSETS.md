@@ -1,4 +1,4 @@
-# App Store Assets for IA Get Mobile
+# App Store Assets for Internet Archive Helper
 
 This directory contains all assets required for Google Play Store submission and app distribution.
 

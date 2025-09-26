@@ -1,4 +1,4 @@
-package com.gameaday.ia_get_mobile
+package com.gameaday.internet_archive_helper
 
 /**
  * JNI wrapper for the Rust FFI library

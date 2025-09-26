@@ -7,6 +7,7 @@ import '../widgets/file_list_widget.dart';
 import '../widgets/filter_controls_widget.dart';
 import '../widgets/download_controls_widget.dart';
 import 'download_screen.dart';
+import 'help_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -28,8 +29,17 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('IA Get Mobile'),
+        title: const Text('Internet Archive Helper'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.help_outline),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const HelpScreen()),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.download_rounded),
             onPressed: () {

@@ -1,5 +1,5 @@
-name: ia_get_mobile
-description: Mobile app for downloading files from the Internet Archive
+name: internet_archive_helper
+description: Internet Archive Helper - Mobile app for downloading files from the Internet Archive
 version: 1.6.0+1
 
 environment:
@@ -31,6 +31,7 @@ dependencies:
   # Utilities
   intl: ^0.20.0
   shared_preferences: ^2.3.2
+  url_launcher: ^6.3.1
 
 dev_dependencies:
   flutter_test:

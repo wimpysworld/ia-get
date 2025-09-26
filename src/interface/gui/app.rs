@@ -575,16 +575,16 @@ impl IaGetApp {
     fn render_dialogs(&mut self, ctx: &Context) {
         // About dialog
         if self.show_about_dialog {
-            egui::Window::new("About ia-get")
+            egui::Window::new("About Internet Archive Helper")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.heading("ia-get");
+                        ui.heading("Internet Archive Helper");
                         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
                         ui.add_space(10.0);
-                        ui.label("High-performance file downloader for Internet Archive");
+                        ui.label("Your comprehensive companion for accessing Internet Archive content");
                         ui.add_space(5.0);
                         ui.label("Maintained by Gameaday");
                         ui.add_space(10.0);
@@ -593,7 +593,7 @@ impl IaGetApp {
                             "https://github.com/Gameaday/ia-get-cli",
                         );
                         ui.add_space(5.0);
-                        ui.label("Built with Rust and egui");
+                        ui.label("Built with Rust and egui • Made with ❤️ for the Internet Archive community");
                         ui.add_space(20.0);
 
                         if ui.button("Close").clicked() {

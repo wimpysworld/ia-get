@@ -1,16 +1,16 @@
 <h1 align="center">
-  <img src="assets/ia-get.png" width="256" height="256" alt="ia-get">
+  <img src="assets/ia-get.png" width="256" height="256" alt="Internet Archive Helper">
   <br />
-  ia-get
+  Internet Archive Helper
 </h1>
 
-<p align="center"><b>High-performance file downloader for archive.org</b></p>
+<p align="center"><b>Your comprehensive companion for accessing Internet Archive content</b></p>
 <p align="center">
 <img alt="GitHub Downloads" src="https://img.shields.io/github/downloads/Gameaday/ia-get-cli/total?logo=github&label=Downloads">
 <img alt="CI Status" src="https://img.shields.io/github/actions/workflow/status/Gameaday/ia-get-cli/ci.yml?branch=main&logo=github&label=CI">
 </p>
 
-<p align="center">Made with 💝 by 🤖</p>
+<p align="center">Built with ❤️ for the Internet Archive community</p>
 
 ## 📥 Quick Download
 
@@ -28,26 +28,33 @@
 ### 🔧 Development Builds
 - **Latest Changes**: [Development Release](https://github.com/Gameaday/ia-get-cli/releases/tag/development) (All platforms + Android)
 
-### 📱 Android Integration
-The Android package now contains both installable APKs and native libraries:
+### 📱 Mobile App
+The Internet Archive Helper mobile app provides a premium Android experience:
 
-**APK Files:**
-- **Universal APK** - Ready to install on any Android device (API 21+)
-- **Split APKs** - Optimized builds for specific architectures (smaller downloads)
+**Android App Features:**
+- **Material 3 Design** - Modern, accessible interface aligned with Android standards
+- **Intuitive Touch Interface** - Optimized for mobile browsing and downloading
+- **Background Downloads** - Continue downloads even when the app is closed
+- **Deep Link Support** - Open archive.org links directly in the app
 
-**Native Libraries for Development:**
-- **ARM64** (arm64-v8a) - Modern devices
-- **ARMv7** (armeabi-v7a) - Older devices  
+**For Developers:**
+The project also provides native libraries for embedding into other applications:
+- **ARM64** (arm64-v8a) - Modern Android devices
+- **ARMv7** (armeabi-v7a) - Older Android devices  
 - **x86_64** - Intel emulators
 - **x86** - Legacy emulators
 
-The APK provides a ready-to-use mobile app, while the native libraries are perfect for embedding into Flutter, React Native, or native Android apps. See [Mobile Development Guide](docs/MOBILE_DEVELOPMENT_GUIDE.md) for integration instructions.
+See [Mobile Development Guide](docs/MOBILE_DEVELOPMENT_GUIDE.md) for integration instructions.
 
-> **🍴 Fork Notice**: This is a heavily modified fork of the original [`wimpysworld/ia-get`](https://github.com/wimpysworld/ia-get) project. Due to extensive architectural changes and different development directions, changes from this fork will not be pushed back to the upstream repository.
+## 🌟 Project Vision
+
+Internet Archive Helper is designed to be your comprehensive companion for accessing the vast resources of the Internet Archive. Whether you're a researcher, student, archivist, or simply someone who loves exploring historical digital content, this tool provides both powerful command-line capabilities and an intuitive mobile experience.
+
+**Our Mission**: Make Internet Archive content more accessible, discoverable, and useful for everyone.
 
 ## ⚡ Quick Start
 
-ia-get provides both CLI and GUI interfaces with smart auto-detection:
+Internet Archive Helper provides both CLI and GUI interfaces with smart auto-detection:
 
 ```shell
 # Auto-detect best mode (GUI if available, menu otherwise)
@@ -56,11 +63,11 @@ ia-get
 # Download directly from command line
 ia-get https://archive.org/details/<identifier>
 
-# Show help
+# Show help and available options
 ia-get --help
 ```
 
-**Smart Mode Detection**: Automatically chooses GUI when display is available, falls back to interactive menu or CLI mode.
+**Smart Interface Detection**: Automatically chooses the best interface - GUI when display is available, falls back to interactive menu or CLI mode based on your environment.
 
 ## 🎯 Features
 
@@ -109,17 +116,7 @@ All releases include SHA256 checksums for security verification:
 # Download and verify (example for Linux x86_64)
 curl -LO https://github.com/Gameaday/ia-get-cli/releases/latest/download/RELEASE_HASHES.txt
 sha256sum -c RELEASE_HASHES.txt
-## 🍴 Fork Information
-
-This is a **heavily modified fork** of [`wimpysworld/ia-get`](https://github.com/wimpysworld/ia-get) with extensive architectural changes:
-
-- **🔄 Complete API Migration**: Modern JSON APIs replace legacy XML
-- **⚡ Enhanced Architecture**: Rebuilt concurrent downloader with session tracking  
-- **🧪 Extensive Testing**: Full test suite with 81+ tests (all passing)
-- **📦 CI/CD Pipeline**: Automated builds for all platforms including Android
-- **🗜️ Compression Support**: HTTP compression and automatic decompression
-
-**~80-90% of the codebase has been rewritten** for modern performance and reliability.
+```
 
 ## 🗜️ Compression & Decompression
 
@@ -229,15 +226,25 @@ The project now includes comprehensive CI/CD processes:
 - **macOS**: Intel + Apple Silicon  
 - **Android**: APK apps + Native libraries for all major architectures
 
-## 🤖 A.I. Driven Development
+## 🏗️ Modern Architecture & Development
 
-This fork represents a major evolution in AI-assisted development, building upon [`wimpysworld/ia-get`](https://github.com/wimpysworld/ia-get):
+Internet Archive Helper is built with modern software development principles:
 
-- **🗑️ Complete Architectural Rewrite**: Migration from XML to JSON-first APIs
-- **⚡ Enhanced Performance**: Rebuilt concurrent downloading with session management
-- **🧹 Modern Codebase**: Comprehensive cleanup with extensive documentation
-- **📦 Professional CI/CD**: Multi-platform builds including Android support
+- **🔄 Modern JSON APIs**: Clean, efficient communication with Internet Archive services
+- **⚡ High-Performance Architecture**: Concurrent downloading with intelligent session management
+- **🧪 Comprehensive Testing**: Robust test suite ensuring reliability and stability
+- **📦 Professional CI/CD**: Automated builds and testing across all supported platforms
+- **🎯 Cross-Platform Excellence**: Native performance on desktop, mobile, and embedded systems
 
-**~80-90% of the codebase has been rewritten** for modern performance standards.
+**Built for the future** with forward-compatible design and modern development practices.
 
-**Featured on [Linux Matters Podcast](https://linuxmatters.sh)** 🎙️ discussing AI development processes!
+## 🌐 Community & Contributions
+
+We welcome contributions from developers, researchers, and Internet Archive enthusiasts! Whether you want to:
+
+- **🐛 Report bugs** or suggest improvements
+- **💻 Contribute code** or documentation
+- **🎨 Improve the user interface**
+- **📚 Help with translations**
+
+Check out our [Contributing Guidelines](CONTRIBUTING.md) to get started. Every contribution helps make Internet Archive content more accessible to everyone.

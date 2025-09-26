@@ -67,7 +67,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace 'com.gameaday.ia_get_mobile'
+    namespace 'com.gameaday.internet_archive_helper'
     compileSdkVersion 36
     ndkVersion "27.0.12077973"
 
@@ -91,7 +91,7 @@ android {
             dimension "environment"
             applicationIdSuffix ".dev"
             versionNameSuffix "-dev"
-            resValue "string", "app_name", "IA Get (Dev)"
+            resValue "string", "app_name", "Internet Archive Helper (Dev)"
             buildConfigField "String", "ENVIRONMENT", '"development"'
             buildConfigField "boolean", "DEBUG_MODE", "true"
             manifestPlaceholders = [
@@ -105,7 +105,7 @@ android {
             dimension "environment"
             applicationIdSuffix ".staging"
             versionNameSuffix "-staging"
-            resValue "string", "app_name", "IA Get (Staging)"
+            resValue "string", "app_name", "Internet Archive Helper (Staging)"
             buildConfigField "String", "ENVIRONMENT", '"staging"'
             buildConfigField "boolean", "DEBUG_MODE", "true"
             manifestPlaceholders = [
@@ -117,7 +117,7 @@ android {
         
         production {
             dimension "environment"
-            resValue "string", "app_name", "IA Get"
+            resValue "string", "app_name", "Internet Archive Helper"
             buildConfigField "String", "ENVIRONMENT", '"production"'
             buildConfigField "boolean", "DEBUG_MODE", "false"
             manifestPlaceholders = [
@@ -129,7 +129,7 @@ android {
     }
 
     defaultConfig {
-        applicationId "com.gameaday.ia_get_mobile"
+        applicationId "com.gameaday.internet_archive_helper"
         minSdkVersion 21
         targetSdkVersion 36
         versionCode flutterVersionCode.toInteger()

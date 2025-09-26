@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">IA Get</string>
+    <string name="app_name">Internet Archive Helper</string>
     <string name="version_name">1.6.0</string>
     
     <!-- App description for Play Store -->
-    <string name="app_description">Download files from the Internet Archive with ease. Access millions of books, movies, music, software, and more from archive.org directly on your Android device.</string>
+    <string name="app_description">Internet Archive Helper - Your comprehensive companion for accessing the vast digital collection of the Internet Archive. Download books, movies, music, software, and historical documents with ease.</string>
     
     <!-- Permission explanations for users -->
     <string name="permission_storage_title">Storage Access</string>
-    <string name="permission_storage_explanation">IA Get needs storage access to save downloaded files to your device. Files are saved to your Downloads folder.</string>
+    <string name="permission_storage_explanation">Internet Archive Helper needs storage access to save downloaded files to your device. Files are saved to your Downloads folder.</string>
     
     <string name="permission_notification_title">Notifications</string>
-    <string name="permission_notification_explanation">IA Get uses notifications to keep you updated on download progress and completion.</string>
+    <string name="permission_notification_explanation">Internet Archive Helper uses notifications to keep you updated on download progress and completion.</string>
     
     <!-- Error messages -->
     <string name="error_network_unavailable">Network connection unavailable. Please check your internet connection.</string>

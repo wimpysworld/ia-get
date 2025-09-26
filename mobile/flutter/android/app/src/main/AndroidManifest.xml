@@ -104,7 +104,7 @@
             
         <!-- App metadata for store listing -->
         <meta-data
-            android:name="com.gameaday.ia_get_mobile.APP_VERSION"
+            android:name="com.gameaday.internet_archive_helper.APP_VERSION"
             android:value="@string/version_name" />
             
         <!-- Google Play Services metadata -->

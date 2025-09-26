@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'services/ia_get_service.dart';
 import 'screens/home_screen.dart';
+import 'widgets/onboarding_widget.dart';
 import 'utils/theme.dart';
 
 void main() async {
@@ -43,11 +44,11 @@ class IAGetMobileApp extends StatelessWidget {
         ),
       ],
       child: MaterialApp(
-        title: 'IA Get Mobile',
+        title: 'Internet Archive Helper',
         theme: AppTheme.lightTheme,
         darkTheme: AppTheme.darkTheme,
         themeMode: ThemeMode.system,
-        home: const HomeScreen(),
+        home: const AppInitializer(),
         debugShowCheckedModeBanner: false,
         
         // Performance optimizations
@@ -67,17 +68,88 @@ class IAGetMobileApp extends StatelessWidget {
           switch (settings.name) {
             case '/':
               return MaterialPageRoute(
+                builder: (_) => const AppInitializer(),
+                settings: settings,
+              );
+            case '/home':
+              return MaterialPageRoute(
                 builder: (_) => const HomeScreen(),
                 settings: settings,
               );
             default:
               return MaterialPageRoute(
-                builder: (_) => const HomeScreen(),
+                builder: (_) => const AppInitializer(),
                 settings: settings,
               );
           }
         },
       ),
     );
+  }
+}
+
+/// App initializer that handles onboarding flow
+class AppInitializer extends StatefulWidget {
+  const AppInitializer({super.key});
+
+  @override
+  State<AppInitializer> createState() => _AppInitializerState();
+}
+
+class _AppInitializerState extends State<AppInitializer> {
+  bool _isLoading = true;
+  bool _shouldShowOnboarding = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkOnboardingStatus();
+  }
+
+  Future<void> _checkOnboardingStatus() async {
+    final shouldShow = await OnboardingWidget.shouldShowOnboarding();
+    setState(() {
+      _shouldShowOnboarding = shouldShow;
+      _isLoading = false;
+    });
+  }
+
+  void _completeOnboarding() {
+    setState(() {
+      _shouldShowOnboarding = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isLoading) {
+      return Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.library_books,
+                size: 64,
+                color: Theme.of(context).primaryColor,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Internet Archive Helper',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+              const SizedBox(height: 32),
+              const CircularProgressIndicator(),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (_shouldShowOnboarding) {
+      return OnboardingWidget(onComplete: _completeOnboarding);
+    }
+
+    return const HomeScreen();
   }
 }

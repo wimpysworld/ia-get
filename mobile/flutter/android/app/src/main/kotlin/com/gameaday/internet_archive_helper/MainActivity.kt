@@ -1,4 +1,4 @@
-package com.gameaday.ia_get_mobile
+package com.gameaday.internet_archive_helper
 
 import android.content.Intent
 import android.net.Uri
@@ -13,7 +13,7 @@ import io.flutter.plugin.common.MethodChannel
  */
 class MainActivity: FlutterActivity() {
     
-    private val methodChannelName = "com.gameaday.ia_get_mobile/platform"
+    private val methodChannelName = "com.gameaday.internet_archive_helper/platform"
     private lateinit var methodChannel: MethodChannel
     
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
