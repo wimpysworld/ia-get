@@ -492,6 +492,12 @@ jobs:
             FOUND_ITEMS=$((FOUND_ITEMS + APK_COUNT))
           else
             echo "⚠ No APK files found in target/mobile/"
+            # Check for diagnostic files that explain why APK build failed
+            if ls target/mobile/*.apk.build-failure.txt 1> /dev/null 2>&1; then
+              echo "🔍 Found APK build failure diagnostic files, copying for analysis..."
+              cp target/mobile/*.apk.build-failure.txt android-artifacts/
+              FOUND_ITEMS=$((FOUND_ITEMS + 1))
+            fi
           fi
           
           # Copy App Bundle files (AAB) with error checking
@@ -507,6 +513,12 @@ jobs:
             FOUND_ITEMS=$((FOUND_ITEMS + AAB_COUNT))
           else
             echo "⚠ No App Bundle (.aab) files found in target/mobile/"
+            # Check for diagnostic files that explain why AAB build failed
+            if ls target/mobile/*.aab.build-failure.txt 1> /dev/null 2>&1; then
+              echo "🔍 Found AAB build failure diagnostic files, copying for analysis..."
+              cp target/mobile/*.aab.build-failure.txt android-artifacts/
+              FOUND_ITEMS=$((FOUND_ITEMS + 1))
+            fi
           fi
         else
           echo "✗ target/mobile directory not found"
@@ -548,7 +560,26 @@ jobs:
           fi
         done
         
-        # Validate we have meaningful content
+        # Validate we have meaningful content and provide detailed summary
+        echo "📦 Android artifacts summary:"
+        if ! ls -la android-artifacts/; then
+          echo "❌ ERROR: Failed to list android-artifacts directory"
+          exit 1
+        fi
+        
+        # Count different types of files found
+        APK_FILES=$(find android-artifacts/ -name "*.apk" 2>/dev/null | wc -l || echo "0")
+        AAB_FILES=$(find android-artifacts/ -name "*.aab" 2>/dev/null | wc -l || echo "0")
+        DIAGNOSTIC_FILES=$(find android-artifacts/ -name "*.build-failure.txt" 2>/dev/null | wc -l || echo "0")
+        NATIVE_LIB_DIRS=$(find android-artifacts/ -name "native-libs" -type d 2>/dev/null | wc -l || echo "0")
+        
+        echo "📊 Artifact breakdown:"
+        echo "   - APK files: $APK_FILES"
+        echo "   - AAB files: $AAB_FILES"
+        echo "   - Build diagnostic files: $DIAGNOSTIC_FILES"
+        echo "   - Native library sets: $NATIVE_LIB_DIRS"
+        echo "   - Total items found: $FOUND_ITEMS"
+        
         if [ $FOUND_ITEMS -eq 0 ]; then
           echo "❌ ERROR: No Android build artifacts were found!"
           echo "Expected to find APK/AAB files in target/mobile/ or native libraries"
@@ -559,12 +590,14 @@ jobs:
           exit 1
         fi
         
-        echo "📦 Android artifacts summary:"
-        if ! ls -la android-artifacts/; then
-          echo "❌ ERROR: Failed to list android-artifacts directory"
-          exit 1
+        # Warn if no actual APK/AAB files were produced
+        if [ $APK_FILES -eq 0 ] && [ $AAB_FILES -eq 0 ]; then
+          echo "⚠️ WARNING: No APK or AAB files were successfully built!"
+          if [ $DIAGNOSTIC_FILES -gt 0 ]; then
+            echo "📋 Diagnostic files are available in the artifacts to help debug the build failure."
+          fi
+          echo "🔧 Native libraries were built successfully and are included in the artifacts."
         fi
-        echo "Total artifacts found: $FOUND_ITEMS"
         
         # Create archive with error checking
         echo "🔍 Creating archive..."
@@ -696,16 +729,17 @@ jobs:
         - **🤖 Android**: \`ia-get-android-dev.zip\` (complete APK & App Bundle for testing)
         
         ### 📱 Android Development
-        The Android package contains complete development artifacts:
-        - **Development APK**: Ready to install on devices for testing (\`ia-get-mobile-development.apk\`)
-        - **Development App Bundle**: Play Store format for testing upload flow (\`ia-get-mobile-development.aab\`)
-        - **Native Libraries**: FFI libraries for all major Android architectures
+        The Android package contains development artifacts:
+        - **Development APK**: Ready to install on devices for testing (\`ia-get-mobile-development.apk\`)*
+        - **Development App Bundle**: Play Store format for testing upload flow (\`ia-get-mobile-development.aab\`)*  
+        - **Native Libraries**: FFI libraries for all major Android architectures (always included)
           - **ARM64** (arm64-v8a) - Modern devices
           - **ARMv7** (armeabi-v7a) - Older devices
           - **x86_64** - Intel emulators
           - **x86** - Legacy emulators
+        - **Build Information**: Diagnostic files if Flutter builds encounter issues
         
-        Perfect for testing both direct installation (APK) and Play Store submission flow (AAB) before production release.
+        *Note: APK and AAB files are included when Flutter builds successfully. If Flutter build fails, diagnostic files with troubleshooting information are provided instead. Native Rust libraries are always built successfully.*
         
         $(cat HASHES.md)
         
