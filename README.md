@@ -167,6 +167,8 @@ export ANDROID_HOME=/path/to/android/sdk
 ./scripts/build-android-libs-only.sh
 ```
 
+For complete Android deployment instructions including APK generation and Play Store submission, see **[ANDROID_DEPLOYMENT_GUIDE.md](ANDROID_DEPLOYMENT_GUIDE.md)**.
+
 ### Build Profiles
 - **`dev`**: Fast compilation for development
 - **`fast-dev`**: Minimal optimization for quick iteration
