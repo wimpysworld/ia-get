@@ -6,6 +6,7 @@ import '../widgets/archive_info_widget.dart';
 import '../widgets/file_list_widget.dart';
 import '../widgets/filter_controls_widget.dart';
 import '../widgets/download_controls_widget.dart';
+import '../widgets/download_manager_widget.dart';
 import 'download_screen.dart';
 import 'help_screen.dart';
 
@@ -48,6 +49,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 MaterialPageRoute(builder: (_) => const DownloadScreen()),
               );
             },
+          ),
           ),
         ],
       ),
@@ -145,6 +147,9 @@ class _HomeScreenState extends State<HomeScreen> {
               // Download controls
               if (service.currentMetadata != null)
                 const DownloadControlsWidget(),
+                
+              // Active downloads manager
+              const DownloadManagerWidget(),
             ],
           );
         },

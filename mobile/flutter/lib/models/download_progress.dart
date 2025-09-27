@@ -1,32 +1,94 @@
+/// Status of a download
+enum DownloadStatus {
+  queued,
+  downloading,
+  paused,
+  completed,
+  error,
+  cancelled,
+}
+
 /// Download progress information
 class DownloadProgress {
+  final String downloadId;
+  final String identifier;
   final int sessionId;
-  final double overallProgress;
+  final double? progress; // 0.0 to 1.0, null for indeterminate
   final String? currentFile;
-  final double currentFileProgress;
-  final int downloadSpeed; // bytes per second
-  final int etaSeconds;
-  final int completedFiles;
+  final double? currentFileProgress;
+  final double? transferSpeed; // bytes per second
+  final int? etaSeconds;
+  final int? completedFiles;
   final int totalFiles;
-  final int downloadedBytes;
-  final int totalBytes;
+  final int? downloadedBytes;
+  final int? totalBytes;
+  final DownloadStatus status;
+  final String? errorMessage;
+  final DateTime startTime;
   
   DownloadProgress({
-    required this.sessionId,
-    required this.overallProgress,
+    required this.downloadId,
+    required this.identifier,
+    this.sessionId = 0,
+    this.progress,
     this.currentFile,
-    required this.currentFileProgress,
-    required this.downloadSpeed,
-    required this.etaSeconds,
-    required this.completedFiles,
+    this.currentFileProgress,
+    this.transferSpeed,
+    this.etaSeconds,
+    this.completedFiles,
     required this.totalFiles,
-    required this.downloadedBytes,
-    required this.totalBytes,
-  });
+    this.downloadedBytes,
+    this.totalBytes,
+    required this.status,
+    this.errorMessage,
+    DateTime? startTime,
+  }) : startTime = startTime ?? DateTime.now();
+
+  /// Create a copy with updated fields
+  DownloadProgress copyWith({
+    String? downloadId,
+    String? identifier,
+    int? sessionId,
+    double? progress,
+    String? currentFile,
+    double? currentFileProgress,
+    double? transferSpeed,
+    int? etaSeconds,
+    int? completedFiles,
+    int? totalFiles,
+    int? downloadedBytes,
+    int? totalBytes,
+    DownloadStatus? status,
+    String? errorMessage,
+    DateTime? startTime,
+  }) {
+    return DownloadProgress(
+      downloadId: downloadId ?? this.downloadId,
+      identifier: identifier ?? this.identifier,
+      sessionId: sessionId ?? this.sessionId,
+      progress: progress ?? this.progress,
+      currentFile: currentFile ?? this.currentFile,
+      currentFileProgress: currentFileProgress ?? this.currentFileProgress,
+      transferSpeed: transferSpeed ?? this.transferSpeed,
+      etaSeconds: etaSeconds ?? this.etaSeconds,
+      completedFiles: completedFiles ?? this.completedFiles,
+      totalFiles: totalFiles ?? this.totalFiles,
+      downloadedBytes: downloadedBytes ?? this.downloadedBytes,
+      totalBytes: totalBytes ?? this.totalBytes,
+      status: status ?? this.status,
+      errorMessage: errorMessage ?? this.errorMessage,
+      startTime: startTime ?? this.startTime,
+    );
+  }
+
+  // Legacy compatibility getters
+  double get overallProgress => progress ?? 0.0;
+  int get downloadSpeed => (transferSpeed ?? 0).toInt();
   
   String get speedFormatted {
+    if (transferSpeed == null) return '0 B/s';
     const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
-    double speed = downloadSpeed.toDouble();
+    double speed = transferSpeed!;
     int unitIndex = 0;
     
     while (speed >= 1024 && unitIndex < units.length - 1) {
@@ -38,11 +100,11 @@ class DownloadProgress {
   }
   
   String get etaFormatted {
-    if (etaSeconds <= 0) return 'Unknown';
+    if (etaSeconds == null || etaSeconds! <= 0) return 'Unknown';
     
-    int hours = etaSeconds ~/ 3600;
-    int minutes = (etaSeconds % 3600) ~/ 60;
-    int seconds = etaSeconds % 60;
+    int hours = etaSeconds! ~/ 3600;
+    int minutes = (etaSeconds! % 3600) ~/ 60;
+    int seconds = etaSeconds! % 60;
     
     if (hours > 0) {
       return '${hours}h ${minutes}m';
@@ -54,8 +116,9 @@ class DownloadProgress {
   }
   
   String get downloadedFormatted {
+    if (downloadedBytes == null) return '0 B';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    double bytes = downloadedBytes.toDouble();
+    double bytes = downloadedBytes!.toDouble();
     int unitIndex = 0;
     
     while (bytes >= 1024 && unitIndex < units.length - 1) {
@@ -67,8 +130,9 @@ class DownloadProgress {
   }
   
   String get totalSizeFormatted {
+    if (totalBytes == null) return 'Unknown';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    double bytes = totalBytes.toDouble();
+    double bytes = totalBytes!.toDouble();
     int unitIndex = 0;
     
     while (bytes >= 1024 && unitIndex < units.length - 1) {

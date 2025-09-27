@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/ia_get_service.dart';
+import '../services/background_download_service.dart';
 import '../models/archive_metadata.dart';
+import '../screens/download_screen.dart';
 
 class DownloadControlsWidget extends StatefulWidget {
   const DownloadControlsWidget({super.key});
@@ -348,17 +350,55 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
     );
   }
 
-  void _performDownload(List<ArchiveFile> files) {
-    // TODO: Implement actual download using FFI
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Starting download of ${files.length} files...'),
-        duration: const Duration(seconds: 2),
-      ),
-    );
-
-    // Navigate to download screen
-    Navigator.pushNamed(context, '/downloads');
+  void _performDownload(List<ArchiveFile> files) async {
+    final service = context.read<IaGetService>();
+    final downloadService = context.read<BackgroundDownloadService>();
+    
+    if (service.currentMetadata == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No archive metadata available')),
+      );
+      return;
+    }
+    
+    try {
+      // Start background download
+      final downloadId = await downloadService.startBackgroundDownload(
+        identifier: service.currentMetadata!.identifier,
+        selectedFiles: files.map((f) => f.name).toList(),
+        downloadPath: _outputPath,
+        includeFormats: null, // Will be handled by file selection
+        excludeFormats: null,
+        maxSize: null,
+      );
+      
+      if (downloadId != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Download started: ${files.length} files'),
+            action: SnackBarAction(
+              label: 'View',
+              onPressed: () {
+                // Navigate to downloads screen
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const DownloadScreen()),
+                );
+              },
+            ),
+          ),
+        );
+      } else {
+        throw Exception('Failed to start download');
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Download failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
   }
 
   String _formatSize(int bytes) {

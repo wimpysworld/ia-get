@@ -185,8 +185,8 @@ class IaGetService extends ChangeNotifier {
         throw Exception('Failed to start metadata fetch');
       }
       
-      // Wait for completion (in real implementation, use proper async handling)
-      await Future.delayed(const Duration(seconds: 2));
+      // Wait for completion using proper async handling with timeout
+      await _waitForMetadataCompletion(identifier, timeout: const Duration(seconds: 10));
       
       // Get the cached metadata
       final metadataJson = IaGetFFI.getMetadataJson(identifier);
@@ -268,5 +268,23 @@ class IaGetService extends ChangeNotifier {
         print('Operation failed: $error');
       }
     }
+  }
+  
+  /// Wait for metadata fetch completion with timeout
+  Future<void> _waitForMetadataCompletion(String identifier, {required Duration timeout}) async {
+    const checkInterval = Duration(milliseconds: 500);
+    final endTime = DateTime.now().add(timeout);
+    
+    while (DateTime.now().isBefore(endTime)) {
+      await Future.delayed(checkInterval);
+      
+      // Check if metadata is available
+      final metadataJson = IaGetFFI.getMetadataJson(identifier);
+      if (metadataJson != null) {
+        return; // Metadata is ready
+      }
+    }
+    
+    throw Exception('Metadata fetch timeout after ${timeout.inSeconds} seconds');
   }
 }

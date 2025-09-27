@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'services/ia_get_service.dart';
+import 'services/background_download_service.dart';
 import 'screens/home_screen.dart';
 import 'widgets/onboarding_widget.dart';
 import 'utils/theme.dart';
@@ -41,6 +42,10 @@ class IAGetMobileApp extends StatelessWidget {
         ChangeNotifierProvider<IaGetService>(
           create: (_) => IaGetService(),
           lazy: false, // Initialize immediately for better startup performance
+        ),
+        ChangeNotifierProvider<BackgroundDownloadService>(
+          create: (_) => BackgroundDownloadService(),
+          lazy: false, // Initialize immediately for background downloads
         ),
       ],
       child: MaterialApp(
@@ -104,6 +109,11 @@ class _AppInitializerState extends State<AppInitializer> {
   void initState() {
     super.initState();
     _checkOnboardingStatus();
+    
+    // Initialize background download service
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<BackgroundDownloadService>().initialize();
+    });
   }
 
   Future<void> _checkOnboardingStatus() async {
