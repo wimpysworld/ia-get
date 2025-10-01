@@ -1,0 +1,17 @@
+# This file configures the analyzer for the Flutter app
+# https://dart.dev/guides/language/analysis-options
+
+include: package:flutter_lints/flutter.yaml
+
+# Additional lint rules can be enabled here
+linter:
+  rules:
+    # Common best practices
+    prefer_const_constructors: true
+    prefer_const_literals_to_create_immutables: true
+    avoid_print: false  # Allow print statements for debugging
+    
+analyzer:
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"

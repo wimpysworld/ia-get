@@ -51,7 +51,7 @@ class _OnboardingWidgetState extends State<OnboardingWidget> {
 
   static Future<bool> shouldShowOnboarding() async {
     final prefs = await SharedPreferences.getInstance();
-    return !prefs.getBool(_onboardingCompleteKey, false);
+    return !(prefs.getBool(_onboardingCompleteKey) ?? false);
   }
 
   final List<OnboardingPage> _pages = [

@@ -50,7 +50,6 @@ class _HomeScreenState extends State<HomeScreen> {
               );
             },
           ),
-          ),
         ],
       ),
       body: Consumer<IaGetService>(
