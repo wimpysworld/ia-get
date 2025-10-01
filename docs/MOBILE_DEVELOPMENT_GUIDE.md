@@ -477,7 +477,7 @@ echo "APK location: flutter/build/app/outputs/flutter-apk/app-release.apk"
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
-        flutter-version: '3.16.0'
+        flutter-version: '3.27.1'
 
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable

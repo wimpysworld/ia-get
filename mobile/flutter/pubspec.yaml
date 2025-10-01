@@ -3,7 +3,7 @@ description: Internet Archive Helper - Mobile app for downloading files from the
 version: 1.6.0+1
 
 environment:
-  sdk: '>=3.0.0 <4.0.0'
+  sdk: '>=3.8.0 <4.0.0'
 
 dependencies:
   flutter:
