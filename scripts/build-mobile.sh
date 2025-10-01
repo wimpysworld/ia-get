@@ -218,12 +218,7 @@ cd "$FLUTTER_DIR"
 if ! command -v flutter &> /dev/null; then
     echo -e "${RED}Error: Flutter is not installed or not in PATH${NC}"
     echo -e "${BLUE}Please install Flutter from https://flutter.dev/docs/get-started/install${NC}"
-    # In CI environments, don't fail completely if native libraries were built successfully
-    if [[ -n "${CI}" || -n "${GITHUB_ACTIONS}" ]]; then
-        echo -e "${YELLOW}⚠ CI Environment: Skipping Flutter build, but native libraries were built successfully${NC}"
-        echo -e "${GREEN}✅ Mobile native libraries build completed successfully!${NC}"
-        exit 0
-    fi
+    echo -e "${YELLOW}Note: If you only need native libraries, use scripts/build-android-libs-only.sh instead${NC}"
     exit 1
 fi
 
@@ -233,12 +228,7 @@ if flutter pub get; then
     echo -e "${GREEN}✓ Flutter dependencies installed${NC}"
 else
     echo -e "${RED}✗ Failed to get Flutter dependencies${NC}"
-    # In CI environments, don't fail completely if native libraries were built successfully
-    if [[ -n "${CI}" || -n "${GITHUB_ACTIONS}" ]]; then
-        echo -e "${YELLOW}⚠ CI Environment: Flutter dependency setup failed, but native libraries were built successfully${NC}"
-        echo -e "${GREEN}✅ Mobile native libraries build completed successfully!${NC}"
-        exit 0
-    fi
+    echo -e "${YELLOW}Note: If you only need native libraries, use scripts/build-android-libs-only.sh instead${NC}"
     exit 1
 fi
 
@@ -303,47 +293,12 @@ if [[ "$BUILD_TYPE" == "appbundle" ]]; then
             echo -e "${BLUE}Checking what actually exists:${NC}"
             find build/app/outputs/bundle -name "*.aab" 2>/dev/null || echo "No AAB files found"
             ls -la build/app/outputs/bundle/ 2>/dev/null || echo "No bundle directory found"
-            # In CI environments, continue with native libraries success
-            if [[ -n "${CI}" || -n "${GITHUB_ACTIONS}" ]]; then
-                echo -e "${YELLOW}⚠ CI Environment: App Bundle file not found, but native libraries were built successfully${NC}"
-                echo -e "${GREEN}✅ Mobile native libraries build completed successfully!${NC}"
-                exit 0
-            fi
+            echo -e "${YELLOW}Note: If you only need native libraries, use scripts/build-android-libs-only.sh instead${NC}"
             exit 1
         fi
     else
         echo -e "${RED}✗ Failed to build Flutter App Bundle${NC}"
-        # In CI environments, create a diagnostic file to help with debugging
-        if [[ -n "${CI}" || -n "${GITHUB_ACTIONS}" ]]; then
-            echo -e "${YELLOW}⚠ CI Environment: Flutter App Bundle build failed, creating diagnostic information${NC}"
-            mkdir -p "../../$OUTPUT_DIR"
-            AAB_NAME="ia-get-mobile-${ENVIRONMENT}.aab"
-            
-            # Create a diagnostic file explaining the build failure
-            cat > "../../$OUTPUT_DIR/${AAB_NAME}.build-failure.txt" << EOF
-FLUTTER APP BUNDLE BUILD FAILED
-
-Environment: ${ENVIRONMENT}
-Flavor: ${FLAVOR}
-Build Mode: ${BUILD_MODE}
-Expected Output: ${AAB_NAME}
-
-Flutter build command that failed:
-flutter build appbundle --${BUILD_MODE} --flavor ${FLAVOR}
-
-This diagnostic file was created because the Flutter App Bundle build failed in CI.
-To fix this issue:
-1. Check Flutter installation and version compatibility
-2. Verify Android SDK setup and licenses
-3. Ensure all Flutter dependencies are available
-4. Check if the flavor configuration is correct
-
-Native Rust libraries were built successfully and are available in the artifacts.
-EOF
-            echo -e "${GREEN}✅ Mobile native libraries build completed successfully!${NC}"
-            echo -e "${YELLOW}⚠ Created diagnostic file: ${AAB_NAME}.build-failure.txt${NC}"
-            exit 0
-        fi
+        echo -e "${YELLOW}Note: If you only need native libraries, use scripts/build-android-libs-only.sh instead${NC}"
         exit 1
     fi
 else
@@ -368,12 +323,7 @@ else
             echo -e "${GREEN}✓ APK variants copied to $OUTPUT_DIR/apk-variants-${ENVIRONMENT}/${NC}"
         else
             echo -e "${RED}✗ Failed to build split APKs${NC}"
-            # In CI environments, don't fail completely if native libraries were built successfully
-            if [[ -n "${CI}" || -n "${GITHUB_ACTIONS}" ]]; then
-                echo -e "${YELLOW}⚠ CI Environment: Flutter split APK build failed, but native libraries were built successfully${NC}"
-                echo -e "${GREEN}✅ Mobile native libraries build completed successfully!${NC}"
-                exit 0
-            fi
+            echo -e "${YELLOW}Note: If you only need native libraries, use scripts/build-android-libs-only.sh instead${NC}"
             exit 1
         fi
     fi
@@ -413,47 +363,12 @@ else
             echo -e "${BLUE}Checking what actually exists:${NC}"
             find build/app/outputs/flutter-apk -name "*.apk" 2>/dev/null || echo "No APK files found"
             ls -la build/app/outputs/flutter-apk/ 2>/dev/null || echo "No flutter-apk directory found"
-            # In CI environments, continue with native libraries success
-            if [[ -n "${CI}" || -n "${GITHUB_ACTIONS}" ]]; then
-                echo -e "${YELLOW}⚠ CI Environment: APK file not found, but native libraries were built successfully${NC}"
-                echo -e "${GREEN}✅ Mobile native libraries build completed successfully!${NC}"
-                exit 0
-            fi
+            echo -e "${YELLOW}Note: If you only need native libraries, use scripts/build-android-libs-only.sh instead${NC}"
             exit 1
         fi
     else
         echo -e "${RED}✗ Failed to build Flutter APK${NC}"
-        # In CI environments, create a diagnostic file to help with debugging
-        if [[ -n "${CI}" || -n "${GITHUB_ACTIONS}" ]]; then
-            echo -e "${YELLOW}⚠ CI Environment: Flutter APK build failed, creating diagnostic information${NC}"
-            mkdir -p "../../$OUTPUT_DIR"
-            APK_NAME="ia-get-mobile-${ENVIRONMENT}.apk"
-            
-            # Create a diagnostic file explaining the build failure
-            cat > "../../$OUTPUT_DIR/${APK_NAME}.build-failure.txt" << EOF
-FLUTTER APK BUILD FAILED
-
-Environment: ${ENVIRONMENT}
-Flavor: ${FLAVOR}
-Build Mode: ${BUILD_MODE}
-Expected Output: ${APK_NAME}
-
-Flutter build command that failed:
-flutter build apk --${BUILD_MODE} --flavor ${FLAVOR}
-
-This diagnostic file was created because the Flutter APK build failed in CI.
-To fix this issue:
-1. Check Flutter installation and version compatibility
-2. Verify Android SDK setup and licenses
-3. Ensure all Flutter dependencies are available
-4. Check if the flavor configuration is correct
-
-Native Rust libraries were built successfully and are available in the artifacts.
-EOF
-            echo -e "${GREEN}✅ Mobile native libraries build completed successfully!${NC}"
-            echo -e "${YELLOW}⚠ Created diagnostic file: ${APK_NAME}.build-failure.txt${NC}"
-            exit 0
-        fi
+        echo -e "${YELLOW}Note: If you only need native libraries, use scripts/build-android-libs-only.sh instead${NC}"
         exit 1
     fi
 fi
