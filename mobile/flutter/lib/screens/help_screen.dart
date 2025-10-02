@@ -28,15 +28,39 @@ class HelpScreen extends StatelessWidget {
                         color: Theme.of(context).primaryColor,
                       ),
                       const SizedBox(width: 8),
-                      Text(
-                        'About Internet Archive Helper',
-                        style: Theme.of(context).textTheme.titleLarge,
+                      Expanded(
+                        child: Text(
+                          'About This App',
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 16),
                   const Text(
                     'Internet Archive Helper is your comprehensive companion for accessing the vast digital collection of the Internet Archive. Download books, movies, music, software, and historical documents with ease.',
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue.withOpacity(0.3)),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(Icons.info, size: 20, color: Colors.blue[700]),
+                        const SizedBox(width: 8),
+                        const Expanded(
+                          child: Text(
+                            'This is an unofficial, community-developed application and is not affiliated with or endorsed by the Internet Archive.',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 16),
                   const Text('Version: 1.6.0'),

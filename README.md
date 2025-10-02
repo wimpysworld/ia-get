@@ -12,6 +12,8 @@
 
 <p align="center">Built with ❤️ for the Internet Archive community</p>
 
+> **Note**: This is an unofficial, community-developed project and is not affiliated with or endorsed by the Internet Archive.
+
 ## 📥 Quick Download
 
 ### 🚀 Production Releases

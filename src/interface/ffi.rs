@@ -214,15 +214,20 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
                 Ok(c) => c,
                 Err(e) => {
                     let error_msg = CString::new(format!("HTTP client error: {}", e)).unwrap();
+                    // Keep error_msg alive during callback by not dropping until after return
                     completion_callback(false, error_msg.as_ptr(), user_data);
+                    drop(error_msg);
                     return;
                 }
             };
             let client = enhanced_client.client();
 
             // Progress update: Starting metadata fetch
-            let progress_msg = CString::new("Fetching archive metadata...").unwrap();
-            progress_callback(0.1, progress_msg.as_ptr(), user_data);
+            {
+                let progress_msg = CString::new("Fetching archive metadata...").unwrap();
+                progress_callback(0.1, progress_msg.as_ptr(), user_data);
+                // progress_msg dropped here after callback completes
+            }
 
             // Create a progress bar for the metadata fetch
             let progress_bar = ProgressBar::new_spinner();
@@ -230,8 +235,11 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
             // Fetch metadata
             match fetch_json_metadata(&identifier_str, client, &progress_bar).await {
                 Ok((metadata, _url)) => {
-                    let progress_msg = CString::new("Parsing metadata...").unwrap();
-                    progress_callback(0.8, progress_msg.as_ptr(), user_data);
+                    {
+                        let progress_msg = CString::new("Parsing metadata...").unwrap();
+                        progress_callback(0.8, progress_msg.as_ptr(), user_data);
+                        // progress_msg dropped here after callback completes
+                    }
 
                     // Store metadata in cache
                     {
@@ -239,13 +247,18 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
                         cache.insert(identifier_str.clone(), metadata);
                     }
 
-                    let progress_msg = CString::new("Metadata fetch complete").unwrap();
-                    progress_callback(1.0, progress_msg.as_ptr(), user_data);
+                    {
+                        let progress_msg = CString::new("Metadata fetch complete").unwrap();
+                        progress_callback(1.0, progress_msg.as_ptr(), user_data);
+                        // progress_msg dropped here after callback completes
+                    }
                     completion_callback(true, ptr::null(), user_data);
                 }
                 Err(e) => {
                     let error_msg = CString::new(format!("Metadata fetch failed: {}", e)).unwrap();
+                    // Keep error_msg alive during callback
                     completion_callback(false, error_msg.as_ptr(), user_data);
+                    drop(error_msg);
                 }
             }
         });
