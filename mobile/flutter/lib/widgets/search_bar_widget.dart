@@ -79,6 +79,20 @@ class _SearchBarWidgetState extends State<SearchBarWidget> {
     if (identifier.trim().isEmpty) return;
     
     _focusNode.unfocus();
-    context.read<IaGetService>().fetchMetadata(identifier.trim());
+    
+    // Add error handling wrapper
+    try {
+      context.read<IaGetService>().fetchMetadata(identifier.trim());
+    } catch (e) {
+      // Show error to user if service call fails
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Search failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 }

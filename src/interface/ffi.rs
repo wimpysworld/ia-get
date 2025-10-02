@@ -195,16 +195,32 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
     user_data: usize,
 ) -> c_int {
     if identifier.is_null() {
+        eprintln!("ia_get_fetch_metadata: identifier is null");
         return -1;
     }
 
     let identifier_str = match CStr::from_ptr(identifier).to_str() {
-        Ok(s) => s.to_string(),
-        Err(_) => return -1,
+        Ok(s) => {
+            if s.is_empty() {
+                eprintln!("ia_get_fetch_metadata: identifier is empty");
+                return -1;
+            }
+            s.to_string()
+        }
+        Err(e) => {
+            eprintln!("ia_get_fetch_metadata: invalid UTF-8 in identifier: {}", e);
+            return -1;
+        }
     };
 
     let session_id = next_session_id();
     let runtime = RUNTIME.clone();
+
+    #[cfg(debug_assertions)]
+    println!(
+        "Starting metadata fetch for '{}' with session ID {}",
+        identifier_str, session_id
+    );
 
     // Spawn async operation in background thread
     std::thread::spawn(move || {
@@ -213,10 +229,11 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
             let enhanced_client = match HttpClientFactory::for_metadata_requests() {
                 Ok(c) => c,
                 Err(e) => {
-                    let error_msg = CString::new(format!("HTTP client error: {}", e)).unwrap();
-                    // Keep error_msg alive during callback by not dropping until after return
-                    completion_callback(false, error_msg.as_ptr(), user_data);
-                    drop(error_msg);
+                    let error_msg = CString::new(format!("HTTP client error: {}", e))
+                        .unwrap_or_else(|_| CString::new("HTTP client error").unwrap());
+                    let error_ptr = error_msg.as_ptr();
+                    completion_callback(false, error_ptr, user_data);
+                    // error_msg is dropped here but callback has already executed
                     return;
                 }
             };
@@ -224,9 +241,11 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
 
             // Progress update: Starting metadata fetch
             {
-                let progress_msg = CString::new("Fetching archive metadata...").unwrap();
-                progress_callback(0.1, progress_msg.as_ptr(), user_data);
-                // progress_msg dropped here after callback completes
+                let progress_msg = CString::new("Fetching archive metadata...")
+                    .unwrap_or_else(|_| CString::new("Starting...").unwrap());
+                let msg_ptr = progress_msg.as_ptr();
+                progress_callback(0.1, msg_ptr, user_data);
+                // progress_msg dropped after callback completes synchronously
             }
 
             // Create a progress bar for the metadata fetch
@@ -236,29 +255,46 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
             match fetch_json_metadata(&identifier_str, client, &progress_bar).await {
                 Ok((metadata, _url)) => {
                     {
-                        let progress_msg = CString::new("Parsing metadata...").unwrap();
-                        progress_callback(0.8, progress_msg.as_ptr(), user_data);
-                        // progress_msg dropped here after callback completes
+                        let progress_msg = CString::new("Parsing metadata...")
+                            .unwrap_or_else(|_| CString::new("Processing...").unwrap());
+                        let msg_ptr = progress_msg.as_ptr();
+                        progress_callback(0.8, msg_ptr, user_data);
+                        // progress_msg dropped after callback completes synchronously
                     }
 
-                    // Store metadata in cache
-                    {
-                        let mut cache = METADATA_CACHE.lock().unwrap();
-                        cache.insert(identifier_str.clone(), metadata);
+                    // Store metadata in cache with error handling
+                    match METADATA_CACHE.lock() {
+                        Ok(mut cache) => {
+                            cache.insert(identifier_str.clone(), metadata);
+                            #[cfg(debug_assertions)]
+                            println!("Metadata cached for '{}'", identifier_str);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to acquire metadata cache lock: {}", e);
+                            let error_msg = CString::new("Failed to cache metadata")
+                                .unwrap_or_else(|_| CString::new("Cache error").unwrap());
+                            let error_ptr = error_msg.as_ptr();
+                            completion_callback(false, error_ptr, user_data);
+                            return;
+                        }
                     }
 
                     {
-                        let progress_msg = CString::new("Metadata fetch complete").unwrap();
-                        progress_callback(1.0, progress_msg.as_ptr(), user_data);
-                        // progress_msg dropped here after callback completes
+                        let progress_msg = CString::new("Metadata fetch complete")
+                            .unwrap_or_else(|_| CString::new("Complete").unwrap());
+                        let msg_ptr = progress_msg.as_ptr();
+                        progress_callback(1.0, msg_ptr, user_data);
+                        // progress_msg dropped after callback completes synchronously
                     }
                     completion_callback(true, ptr::null(), user_data);
                 }
                 Err(e) => {
-                    let error_msg = CString::new(format!("Metadata fetch failed: {}", e)).unwrap();
-                    // Keep error_msg alive during callback
-                    completion_callback(false, error_msg.as_ptr(), user_data);
-                    drop(error_msg);
+                    eprintln!("Metadata fetch error for '{}': {}", identifier_str, e);
+                    let error_msg = CString::new(format!("Metadata fetch failed: {}", e))
+                        .unwrap_or_else(|_| CString::new("Metadata fetch failed").unwrap());
+                    let error_ptr = error_msg.as_ptr();
+                    completion_callback(false, error_ptr, user_data);
+                    // error_msg dropped after callback completes synchronously
                 }
             }
         });
@@ -276,24 +312,56 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
 #[no_mangle]
 pub unsafe extern "C" fn ia_get_get_metadata_json(identifier: *const c_char) -> *mut c_char {
     if identifier.is_null() {
+        eprintln!("ia_get_get_metadata_json: identifier is null");
         return ptr::null_mut();
     }
 
     let identifier_str = match CStr::from_ptr(identifier).to_str() {
-        Ok(s) => s,
-        Err(_) => return ptr::null_mut(),
+        Ok(s) => {
+            if s.is_empty() {
+                eprintln!("ia_get_get_metadata_json: identifier is empty");
+                return ptr::null_mut();
+            }
+            s
+        }
+        Err(e) => {
+            eprintln!("ia_get_get_metadata_json: invalid UTF-8: {}", e);
+            return ptr::null_mut();
+        }
     };
 
-    let cache = METADATA_CACHE.lock().unwrap();
+    let cache = match METADATA_CACHE.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "ia_get_get_metadata_json: failed to acquire cache lock: {}",
+                e
+            );
+            return ptr::null_mut();
+        }
+    };
+
     if let Some(metadata) = cache.get(identifier_str) {
         match serde_json::to_string(metadata) {
-            Ok(json) => {
-                let c_string = CString::new(json).unwrap();
-                c_string.into_raw()
+            Ok(json) => match CString::new(json) {
+                Ok(c_string) => {
+                    #[cfg(debug_assertions)]
+                    println!("Returning metadata JSON for '{}'", identifier_str);
+                    c_string.into_raw()
+                }
+                Err(e) => {
+                    eprintln!("ia_get_get_metadata_json: failed to create CString: {}", e);
+                    ptr::null_mut()
+                }
+            },
+            Err(e) => {
+                eprintln!("ia_get_get_metadata_json: JSON serialization failed: {}", e);
+                ptr::null_mut()
             }
-            Err(_) => ptr::null_mut(),
         }
     } else {
+        #[cfg(debug_assertions)]
+        println!("No metadata cached for '{}'", identifier_str);
         ptr::null_mut()
     }
 }

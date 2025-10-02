@@ -77,14 +77,42 @@ class IaGetFFI {
   
   /// Get cached metadata as JSON
   static String? getMetadataJson(String identifier) {
+    if (identifier.isEmpty) {
+      if (kDebugMode) {
+        print('getMetadataJson: empty identifier');
+      }
+      return null;
+    }
+    
     final identifierPtr = identifier.toNativeUtf8();
     try {
       final resultPtr = _iaGetGetMetadataJson(identifierPtr);
-      if (resultPtr == nullptr) return null;
+      if (resultPtr == nullptr) {
+        if (kDebugMode) {
+          print('getMetadataJson: null result for $identifier');
+        }
+        return null;
+      }
       
-      final result = resultPtr.toDartString();
-      _iaGetFreeString(resultPtr);
-      return result;
+      try {
+        final result = resultPtr.toDartString();
+        _iaGetFreeString(resultPtr);
+        return result;
+      } catch (e) {
+        if (kDebugMode) {
+          print('getMetadataJson: error converting to string: $e');
+        }
+        // Try to free the string even if conversion failed
+        try {
+          _iaGetFreeString(resultPtr);
+        } catch (_) {}
+        return null;
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('getMetadataJson: exception: $e');
+      }
+      return null;
     } finally {
       malloc.free(identifierPtr);
     }
@@ -97,6 +125,13 @@ class IaGetFFI {
     String? excludeFormats,
     String? maxSize,
   ) {
+    if (metadataJson.isEmpty) {
+      if (kDebugMode) {
+        print('filterFiles: empty metadata JSON');
+      }
+      return null;
+    }
+    
     final metadataPtr = metadataJson.toNativeUtf8();
     final includePtr = includeFormats?.toNativeUtf8() ?? nullptr;
     final excludePtr = excludeFormats?.toNativeUtf8() ?? nullptr;
@@ -104,11 +139,32 @@ class IaGetFFI {
     
     try {
       final resultPtr = _iaGetFilterFiles(metadataPtr, includePtr, excludePtr, maxSizePtr);
-      if (resultPtr == nullptr) return null;
+      if (resultPtr == nullptr) {
+        if (kDebugMode) {
+          print('filterFiles: null result');
+        }
+        return null;
+      }
       
-      final result = resultPtr.toDartString();
-      _iaGetFreeString(resultPtr);
-      return result;
+      try {
+        final result = resultPtr.toDartString();
+        _iaGetFreeString(resultPtr);
+        return result;
+      } catch (e) {
+        if (kDebugMode) {
+          print('filterFiles: error converting to string: $e');
+        }
+        // Try to free the string even if conversion failed
+        try {
+          _iaGetFreeString(resultPtr);
+        } catch (_) {}
+        return null;
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('filterFiles: exception: $e');
+      }
+      return null;
     } finally {
       malloc.free(metadataPtr);
       if (includePtr != nullptr) malloc.free(includePtr);
@@ -149,9 +205,19 @@ class IaGetService extends ChangeNotifier {
       _isInitialized = result == 0;
       if (!_isInitialized) {
         _error = 'Failed to initialize FFI library';
+        if (kDebugMode) {
+          print('FFI initialization failed with code: $result');
+        }
+      } else {
+        if (kDebugMode) {
+          print('FFI initialized successfully');
+        }
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
       _error = 'FFI initialization error: $e';
+      if (kDebugMode) {
+        print('FFI initialization exception: $e\n$stackTrace');
+      }
     }
     notifyListeners();
   }
@@ -164,14 +230,27 @@ class IaGetService extends ChangeNotifier {
       return;
     }
     
+    // Validate identifier
+    if (identifier.trim().isEmpty) {
+      _error = 'Invalid identifier: cannot be empty';
+      notifyListeners();
+      return;
+    }
+    
     _isLoading = true;
     _error = null;
+    _currentMetadata = null;
+    _filteredFiles = [];
     notifyListeners();
     
     try {
       // Create progress and completion callbacks
       final progressCallback = Pointer.fromFunction<ProgressCallbackNative>(_progressCallback);
       final completionCallback = Pointer.fromFunction<CompletionCallbackNative>(_completionCallback);
+      
+      if (kDebugMode) {
+        print('Starting metadata fetch for: $identifier');
+      }
       
       // Start metadata fetch
       final requestId = IaGetFFI.fetchMetadata(
@@ -182,24 +261,45 @@ class IaGetService extends ChangeNotifier {
       );
       
       if (requestId <= 0) {
-        throw Exception('Failed to start metadata fetch');
+        throw Exception('Failed to start metadata fetch (request ID: $requestId)');
+      }
+      
+      if (kDebugMode) {
+        print('Metadata fetch started with request ID: $requestId');
       }
       
       // Wait for completion using proper async handling with timeout
-      await _waitForMetadataCompletion(identifier, timeout: const Duration(seconds: 10));
+      await _waitForMetadataCompletion(identifier, timeout: const Duration(seconds: 30));
       
       // Get the cached metadata
       final metadataJson = IaGetFFI.getMetadataJson(identifier);
-      if (metadataJson != null) {
+      if (metadataJson == null || metadataJson.isEmpty) {
+        throw Exception('No metadata available for identifier: $identifier');
+      }
+      
+      if (kDebugMode) {
+        print('Retrieved metadata JSON (${metadataJson.length} bytes)');
+      }
+      
+      // Parse JSON with error handling
+      try {
         final metadataMap = jsonDecode(metadataJson) as Map<String, dynamic>;
         _currentMetadata = ArchiveMetadata.fromJson(metadataMap);
         _filteredFiles = _currentMetadata!.files;
-      } else {
-        throw Exception('Failed to retrieve metadata');
+        
+        if (kDebugMode) {
+          print('Successfully parsed metadata: ${_currentMetadata!.identifier}');
+          print('Files found: ${_filteredFiles.length}');
+        }
+      } catch (e) {
+        throw Exception('Failed to parse metadata JSON: $e');
       }
       
-    } catch (e) {
+    } catch (e, stackTrace) {
       _error = 'Failed to fetch metadata: $e';
+      if (kDebugMode) {
+        print('Metadata fetch error: $e\n$stackTrace');
+      }
     } finally {
       _isLoading = false;
       notifyListeners();
@@ -274,14 +374,35 @@ class IaGetService extends ChangeNotifier {
   Future<void> _waitForMetadataCompletion(String identifier, {required Duration timeout}) async {
     const checkInterval = Duration(milliseconds: 500);
     final endTime = DateTime.now().add(timeout);
+    int attempts = 0;
+    const maxAttempts = timeout.inMilliseconds ~/ checkInterval.inMilliseconds;
+    
+    if (kDebugMode) {
+      print('Waiting for metadata completion (timeout: ${timeout.inSeconds}s)...');
+    }
     
     while (DateTime.now().isBefore(endTime)) {
+      attempts++;
       await Future.delayed(checkInterval);
       
       // Check if metadata is available
-      final metadataJson = IaGetFFI.getMetadataJson(identifier);
-      if (metadataJson != null) {
-        return; // Metadata is ready
+      try {
+        final metadataJson = IaGetFFI.getMetadataJson(identifier);
+        if (metadataJson != null && metadataJson.isNotEmpty) {
+          if (kDebugMode) {
+            print('Metadata available after $attempts attempts');
+          }
+          return; // Metadata is ready
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          print('Error checking metadata availability: $e');
+        }
+        // Continue waiting
+      }
+      
+      if (kDebugMode && attempts % 4 == 0) {
+        print('Still waiting... ($attempts/${maxAttempts} attempts)');
       }
     }
     

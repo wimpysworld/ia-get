@@ -37,7 +37,14 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     _env: JNIEnv,
     _class: JClass,
 ) -> jint {
-    ia_get_init() as jint
+    println!("JNI: Initializing ia-get library");
+    let result = ia_get_init() as jint;
+    if result == 0 {
+        println!("JNI: Library initialized successfully");
+    } else {
+        eprintln!("JNI: Library initialization failed with code: {}", result);
+    }
+    result
 }
 
 /// Cleanup the ia-get library
@@ -58,26 +65,47 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     _progress_callback: JObject,
     _completion_callback: JObject,
 ) -> jint {
+    // Validate input
+    if identifier.is_null() {
+        eprintln!("JNI: identifier is null");
+        return -1;
+    }
+
     let identifier_str = match jstring_to_string(&mut env, &identifier) {
-        Ok(s) => s,
-        Err(_) => return -1,
+        Ok(s) => {
+            if s.trim().is_empty() {
+                eprintln!("JNI: identifier is empty");
+                return -1;
+            }
+            s
+        }
+        Err(e) => {
+            eprintln!("JNI: Failed to convert identifier: {:?}", e);
+            return -1;
+        }
     };
 
-    let identifier_cstr = match CString::new(identifier_str) {
+    let identifier_cstr = match CString::new(identifier_str.clone()) {
         Ok(s) => s,
-        Err(_) => return -1,
+        Err(e) => {
+            eprintln!("JNI: Failed to create CString: {:?}", e);
+            return -1;
+        }
     };
+
+    println!("JNI: Starting metadata fetch for '{}'", identifier_str);
 
     // Create callback wrappers that call back to Kotlin
     extern "C" fn progress_cb(progress: f64, message: *const c_char, _user_data: usize) {
         // TODO: Implement JNI callback to Kotlin
-        println!("Progress: {:.1}% - {:?}", progress * 100.0, unsafe {
+        let msg = unsafe {
             if message.is_null() {
-                "".to_string()
+                String::new()
             } else {
                 CStr::from_ptr(message).to_str().unwrap_or("").to_string()
             }
-        });
+        };
+        println!("Progress: {:.1}% - {}", progress * 100.0, msg);
     }
 
     extern "C" fn completion_cb(success: bool, error_message: *const c_char, _user_data: usize) {
@@ -95,11 +123,20 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
                         .to_string()
                 }
             };
-            println!("Metadata fetch failed: {}", error);
+            eprintln!("Metadata fetch failed: {}", error);
         }
     }
 
-    unsafe { ia_get_fetch_metadata(identifier_cstr.as_ptr(), progress_cb, completion_cb, 0) }
+    let result =
+        unsafe { ia_get_fetch_metadata(identifier_cstr.as_ptr(), progress_cb, completion_cb, 0) };
+
+    if result > 0 {
+        println!("JNI: Metadata fetch initiated with session ID: {}", result);
+    } else {
+        eprintln!("JNI: Failed to initiate metadata fetch");
+    }
+
+    result
 }
 
 /// Get cached metadata as JSON
@@ -109,34 +146,69 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
     _class: JClass,
     identifier: JString,
 ) -> jobject {
+    // Validate input
+    if identifier.is_null() {
+        eprintln!("JNI: getMetadataJson - identifier is null");
+        return JObject::null().as_raw();
+    }
+
     let identifier_str = match jstring_to_string(&mut env, &identifier) {
-        Ok(s) => s,
-        Err(_) => return JObject::null().as_raw(),
+        Ok(s) => {
+            if s.trim().is_empty() {
+                eprintln!("JNI: getMetadataJson - identifier is empty");
+                return JObject::null().as_raw();
+            }
+            s
+        }
+        Err(e) => {
+            eprintln!(
+                "JNI: getMetadataJson - Failed to convert identifier: {:?}",
+                e
+            );
+            return JObject::null().as_raw();
+        }
     };
 
-    let identifier_cstr = match CString::new(identifier_str) {
+    let identifier_cstr = match CString::new(identifier_str.clone()) {
         Ok(s) => s,
-        Err(_) => return JObject::null().as_raw(),
+        Err(e) => {
+            eprintln!("JNI: getMetadataJson - Failed to create CString: {:?}", e);
+            return JObject::null().as_raw();
+        }
     };
 
     let result_ptr = unsafe { ia_get_get_metadata_json(identifier_cstr.as_ptr()) };
 
     if result_ptr.is_null() {
+        println!("JNI: No metadata cached for '{}'", identifier_str);
         return JObject::null().as_raw();
     }
 
     let result_str = unsafe {
         let cstr = CStr::from_ptr(result_ptr);
-        cstr.to_str().unwrap_or("")
+        match cstr.to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("JNI: getMetadataJson - Invalid UTF-8 in result: {:?}", e);
+                ia_get_free_string(result_ptr as *mut c_char);
+                return JObject::null().as_raw();
+            }
+        }
     };
 
     match string_to_jstring(&mut env, result_str) {
         Ok(jstr) => {
             // Free the C string
             unsafe { ia_get_free_string(result_ptr as *mut c_char) };
+            println!(
+                "JNI: Retrieved metadata for '{}' ({} bytes)",
+                identifier_str,
+                result_str.len()
+            );
             jstr.as_raw()
         }
-        Err(_) => {
+        Err(e) => {
+            eprintln!("JNI: getMetadataJson - Failed to create JString: {:?}", e);
             unsafe { ia_get_free_string(result_ptr as *mut c_char) };
             JObject::null().as_raw()
         }
