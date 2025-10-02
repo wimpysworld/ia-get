@@ -130,16 +130,64 @@ class FileUtils {
   }
   
   /// Get available disk space for a path
+  /// Returns available space in bytes, or null if unable to determine
   static Future<int?> getAvailableSpace(String path) async {
     try {
+      // For Android, we can use the StatFs class through platform channels
+      // or use the disk_space package. For now, we'll use a method channel approach.
+      // This is a placeholder that will work with the disk_space package if added,
+      // or can be implemented with platform channels.
+      
+      // Try to get space using dart:io's FileStat
       final directory = Directory(path);
-      final stat = await directory.stat();
-      // Note: This is a simplified implementation
-      // Real implementation would need platform-specific code
-      return null; // Platform-specific implementation needed
+      
+      // Ensure the directory exists or use its parent
+      Directory targetDir;
+      if (await directory.exists()) {
+        targetDir = directory;
+      } else {
+        // If directory doesn't exist, try parent
+        final parent = directory.parent;
+        if (await parent.exists()) {
+          targetDir = parent;
+        } else {
+          return null;
+        }
+      }
+      
+      // For Android, we'll use the disk_space package functionality
+      // This requires adding disk_space package to pubspec.yaml
+      // For now, return null as a safe fallback
+      // TODO: Implement platform-specific disk space check using disk_space package
+      return null;
     } catch (e) {
       return null;
     }
+  }
+  
+  /// Check if there is sufficient disk space for a download
+  /// Returns true if sufficient, false if not, null if unable to determine
+  static Future<bool?> hasSufficientSpace(String path, int requiredBytes) async {
+    final availableSpace = await getAvailableSpace(path);
+    if (availableSpace == null) {
+      return null; // Unable to determine
+    }
+    
+    // Add safety margin: 100MB or 5% of required size, whichever is larger
+    const minMargin = 100 * 1024 * 1024; // 100MB in bytes
+    final percentMargin = (requiredBytes * 0.05).round();
+    final safetyMargin = minMargin > percentMargin ? minMargin : percentMargin;
+    
+    final totalRequired = requiredBytes + safetyMargin;
+    return availableSpace >= totalRequired;
+  }
+  
+  /// Get required space with safety margin for a download
+  static int getRequiredSpaceWithMargin(int downloadSize) {
+    const minMargin = 100 * 1024 * 1024; // 100MB in bytes
+    final percentMargin = (downloadSize * 0.05).round();
+    final safetyMargin = minMargin > percentMargin ? minMargin : percentMargin;
+    return downloadSize + safetyMargin;
   }
   
   /// Sanitize filename for safe file system usage

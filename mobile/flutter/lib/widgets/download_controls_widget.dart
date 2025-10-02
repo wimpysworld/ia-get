@@ -4,6 +4,7 @@ import '../services/ia_get_service.dart';
 import '../services/background_download_service.dart';
 import '../models/archive_metadata.dart';
 import '../screens/download_screen.dart';
+import '../utils/file_utils.dart';
 
 class DownloadControlsWidget extends StatefulWidget {
   const DownloadControlsWidget({super.key});
@@ -361,6 +362,129 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
       return;
     }
     
+    // Calculate total download size
+    final totalSize = files.fold<int>(
+      0, 
+      (sum, file) => sum + (file.size ?? 0),
+    );
+    
+    // Check disk space before starting download
+    final hasSufficientSpace = await FileUtils.hasSufficientSpace(
+      _outputPath, 
+      totalSize,
+    );
+    
+    if (hasSufficientSpace == false) {
+      // Insufficient disk space - show error dialog
+      final availableSpace = await FileUtils.getAvailableSpace(_outputPath);
+      final requiredSpace = FileUtils.getRequiredSpaceWithMargin(totalSize);
+      final shortage = requiredSpace - (availableSpace ?? 0);
+      
+      if (!mounted) return;
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.warning, color: Colors.orange.shade700),
+              const SizedBox(width: 8),
+              const Text('Insufficient Disk Space'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Not enough disk space available for this download.',
+                style: TextStyle(
+                  color: Colors.grey.shade700,
+                  fontSize: 14,
+                ),
+              ),
+              const SizedBox(height: 16),
+              _buildSpaceInfoRow(
+                'Required:', 
+                _formatSize(requiredSpace),
+                color: Colors.red.shade700,
+              ),
+              _buildSpaceInfoRow(
+                'Available:', 
+                availableSpace != null ? _formatSize(availableSpace) : 'Unknown',
+              ),
+              _buildSpaceInfoRow(
+                'Shortage:', 
+                _formatSize(shortage),
+                color: Colors.orange.shade700,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Note: Required size includes a safety margin for temporary files.',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey.shade600,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+      return;
+    } else if (hasSufficientSpace == null) {
+      // Unable to determine disk space - show warning but allow download
+      if (!mounted) return;
+      final shouldContinue = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.info, color: Colors.blue.shade700),
+              const SizedBox(width: 8),
+              const Text('Disk Space Check'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Unable to determine available disk space.',
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Download size: ${_formatSize(totalSize)}',
+                style: const TextStyle(fontWeight: FontWeight.w500),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Do you want to continue with the download?',
+                style: TextStyle(color: Colors.grey.shade700),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Continue'),
+            ),
+          ],
+        ),
+      );
+      
+      if (shouldContinue != true) return;
+    }
+    
     try {
       // Start background download
       final downloadId = await downloadService.startBackgroundDownload(
@@ -399,6 +523,28 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
         ),
       );
     }
+  }
+  
+  Widget _buildSpaceInfoRow(String label, String value, {Color? color}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(fontWeight: FontWeight.w500),
+          ),
+          Text(
+            value,
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   String _formatSize(int bytes) {

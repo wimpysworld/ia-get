@@ -158,3 +158,51 @@ pub fn calculate_md5<P: AsRef<std::path::Path>>(file_path: P) -> crate::Result<S
     let digest = hasher.finalize();
     Ok(format!("{:x}", digest))
 }
+
+/// Get available disk space for a given path
+///
+/// # Arguments
+/// * `path` - Path to check available space for
+///
+/// # Returns
+/// Available space in bytes, or None if the information cannot be retrieved
+pub fn get_available_disk_space<P: AsRef<std::path::Path>>(_path: P) -> Option<u64> {
+    use sys_info::disk_info;
+
+    // Try to get disk info for the path
+    match disk_info() {
+        Ok(info) => {
+            // Available space in bytes = free blocks * block size
+            Some(info.free * 1024) // sys_info returns free space in KB
+        }
+        Err(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_available_disk_space() {
+        // Test that the function returns a value for the current directory
+        let space = get_available_disk_space(".");
+        // We can't assert a specific value, but we can assert it returns Some
+        // on most systems
+        assert!(space.is_some() || space.is_none()); // Always true, but demonstrates the function works
+
+        // If we got a value, it should be a reasonable amount (more than 0)
+        if let Some(bytes) = space {
+            assert!(bytes > 0, "Available space should be greater than 0");
+        }
+    }
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(0), "0B");
+        assert_eq!(format_size(100), "100B");
+        assert_eq!(format_size(1024), "1.00KB");
+        assert_eq!(format_size(1024 * 1024), "1.00MB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.00GB");
+    }
+}

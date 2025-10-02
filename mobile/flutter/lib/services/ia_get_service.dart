@@ -375,7 +375,7 @@ class IaGetService extends ChangeNotifier {
     const checkInterval = Duration(milliseconds: 500);
     final endTime = DateTime.now().add(timeout);
     int attempts = 0;
-    const maxAttempts = timeout.inMilliseconds ~/ checkInterval.inMilliseconds;
+    final maxAttempts = timeout.inMilliseconds ~/ checkInterval.inMilliseconds;
     
     if (kDebugMode) {
       print('Waiting for metadata completion (timeout: ${timeout.inSeconds}s)...');

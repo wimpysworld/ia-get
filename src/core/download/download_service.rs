@@ -274,6 +274,51 @@ impl DownloadService {
             });
         }
 
+        // Calculate total download size
+        let total_download_size: u64 = filtered_files.iter().map(|f| f.size.unwrap_or(0)).sum();
+
+        // Check available disk space
+        if let Some(available_space) =
+            crate::utilities::common::get_available_disk_space(&request.output_dir)
+        {
+            // Add a safety margin of 100MB or 5% of download size (whichever is larger)
+            let safety_margin = std::cmp::max(
+                100 * 1024 * 1024,
+                (total_download_size as f64 * 0.05) as u64,
+            );
+            let required_space = total_download_size + safety_margin;
+
+            if available_space < required_space {
+                let warning_msg = format!(
+                    "⚠️  Warning: Insufficient disk space!\n\
+                     Required: {} (including safety margin)\n\
+                     Available: {}\n\
+                     Shortage: {}",
+                    format_size(required_space),
+                    format_size(available_space),
+                    format_size(required_space.saturating_sub(available_space))
+                );
+
+                eprintln!("{}", warning_msg.yellow());
+
+                if !request.dry_run {
+                    return Ok(DownloadResult::Error(format!(
+                        "Insufficient disk space. Required: {}, Available: {}",
+                        format_size(required_space),
+                        format_size(available_space)
+                    )));
+                }
+            } else if request.verbose {
+                eprintln!(
+                    "✓ Disk space check passed: {} available, {} required",
+                    format_size(available_space).bright_green(),
+                    format_size(required_space).bright_blue()
+                );
+            }
+        } else if request.verbose {
+            eprintln!("⚠️  Warning: Unable to determine available disk space");
+        }
+
         if request.dry_run {
             // For dry run, just return the file list information
             let api_stats = api_client.get_stats();

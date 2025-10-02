@@ -36,6 +36,7 @@ zip = "4.6.0"
 futures = "0.3.31"
 bytes = "1.0"
 lazy_static = "1.4"
+sys-info = "0.9.1"
 # GUI dependencies (optional)
 eframe = { version = "0.32.1", optional = true }
 egui = { version = "0.32.1", optional = true }
