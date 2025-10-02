@@ -61,21 +61,19 @@ On Android 13 and later, the icon can be dynamically themed:
 
 ## Color Scheme
 
-The grayscale palette was chosen to:
-- Match the Internet Archive's classic, scholarly aesthetic
-- Enable dynamic theming without losing brand identity
-- Ensure good contrast on all backgrounds
+The high-contrast design was chosen to:
+- Improve brand recognition with clear, bold visuals
+- Ensure excellent visibility on all backgrounds
 - Support accessibility requirements
+- Enable dynamic theming while maintaining icon clarity
 
 ### Colors Used
 
-- `#CCCCCC` - Column highlights (light gray)
-- `#AAAAAA` - Column capitals (medium-light gray)
-- `#999999` - Building base and roof detail (medium gray)
-- `#888888` - Steps and pediment (darker gray)
-- `#777777` - Second step (dark gray)
-- `#666666` - Foundation base (darkest gray)
-- `#FFFFFF` - Background (white)
+- `#000000` - Black for the Internet Archive building (columns, pediment, steps)
+- `#FFFFFF` - White background for maximum contrast
+- Rounded corners (15% border radius) for modern aesthetic
+
+The new design provides significantly better contrast than the previous grayscale approach, improving brand recognition and user experience.
 
 ## Testing the Icon
 
@@ -97,11 +95,12 @@ To see the icon on different Android versions:
 
 ## Files Location
 
-- **Source SVG**: `mobile/flutter/assets/icons/internet_archive_logo.svg`
+- **Source SVG**: `assets/ia-helper.svg` (master file for all icon variations)
+- **Generation Script**: `scripts/generate-android-icons.sh`
 - **PNG Icons**: `mobile/flutter/android/app/src/main/res/mipmap-*/ic_launcher.png`
 - **Vector Drawables**: `mobile/flutter/android/app/src/main/res/drawable/ic_launcher_*.xml`
 - **Adaptive Config**: `mobile/flutter/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml`
-- **Play Store**: `mobile/flutter/assets/icons/ic_launcher_1024.png`
+- **Play Store**: `assets/ia-helper_1024.png`
 
 ## References
 

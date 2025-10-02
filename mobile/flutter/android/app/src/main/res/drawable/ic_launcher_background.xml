@@ -4,7 +4,7 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Plain white background for adaptive icon -->
+    <!-- White background for adaptive icon -->
     <path
         android:fillColor="#FFFFFF"
         android:pathData="M0,0 L108,0 L108,108 L0,108 Z" />

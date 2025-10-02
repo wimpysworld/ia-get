@@ -8,14 +8,15 @@ This directory contains all assets required for Google Play Store submission and
 - **Size**: 1024x1024px (high-resolution for Play Store)
 - **Format**: Adaptive icon with PNG fallbacks
 - **Design**: Internet Archive building with 5 columns (iconic architecture)
-- **Colors**: Grayscale for OS theming support (Material You compatible)
+- **Colors**: High-contrast black and white design for improved brand recognition
 - **Implementation**: 
   - ✅ PNG icons in 5 densities (mdpi through xxxhdpi)
   - ✅ Adaptive icon with foreground/background layers (Android 8.0+)
   - ✅ Monochrome layer for dynamic theming (Android 13+)
   - ✅ Vector drawable for perfect scaling
 - **Location**: `android/app/src/main/res/mipmap-*/ic_launcher.png`
-- **Source**: `assets/icons/internet_archive_logo.svg`
+- **Source**: `assets/ia-helper.svg` (master source of truth)
+- **Generation**: Use `scripts/generate-android-icons.sh` to regenerate all icons
 
 ### Feature Graphic
 - **Size**: 1024x500px

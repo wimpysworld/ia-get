@@ -2,76 +2,111 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <!-- Internet Archive building icon with columns -->
-    <!-- Centered in the safe zone (center 72dp of 108dp) -->
-    <group
-        android:translateX="18"
-        android:translateY="18"
-        android:scaleX="0.7"
-        android:scaleY="0.7">
-        
-        <!-- Base/foundation -->
-        <path
-            android:fillColor="#666666"
-            android:pathData="M6,90 L94,90 L94,96 L6,96 Z" />
-        
-        <!-- Steps leading up -->
-        <path
-            android:fillColor="#777777"
-            android:pathData="M12,86 L88,86 L88,90 L12,90 Z" />
-        <path
-            android:fillColor="#888888"
-            android:pathData="M18,82 L82,82 L82,86 L18,86 Z" />
-        
-        <!-- Main building base -->
-        <path
-            android:fillColor="#999999"
-            android:pathData="M16,32 L84,32 L84,82 L16,82 Z" />
-        
-        <!-- Columns (5 columns representing the Internet Archive) -->
-        <path
-            android:fillColor="#CCCCCC"
-            android:pathData="M20,36 L26,36 L26,80 L20,80 Z" />
-        <path
-            android:fillColor="#CCCCCC"
-            android:pathData="M32,36 L38,36 L38,80 L32,80 Z" />
-        <path
-            android:fillColor="#CCCCCC"
-            android:pathData="M44,36 L50,36 L50,80 L44,80 Z" />
-        <path
-            android:fillColor="#CCCCCC"
-            android:pathData="M56,36 L62,36 L62,80 L56,80 Z" />
-        <path
-            android:fillColor="#CCCCCC"
-            android:pathData="M68,36 L74,36 L74,80 L68,80 Z" />
-        
-        <!-- Column capitals -->
-        <path
-            android:fillColor="#AAAAAA"
-            android:pathData="M18,32 L28,32 L28,36 L18,36 Z" />
-        <path
-            android:fillColor="#AAAAAA"
-            android:pathData="M30,32 L40,32 L40,36 L30,36 Z" />
-        <path
-            android:fillColor="#AAAAAA"
-            android:pathData="M42,32 L52,32 L52,36 L42,36 Z" />
-        <path
-            android:fillColor="#AAAAAA"
-            android:pathData="M54,32 L64,32 L64,36 L54,36 Z" />
-        <path
-            android:fillColor="#AAAAAA"
-            android:pathData="M66,32 L76,32 L76,36 L66,36 Z" />
-        
-        <!-- Pediment/roof triangle -->
-        <path
-            android:fillColor="#888888"
-            android:pathData="M50,16 L16,32 L84,32 Z" />
-        
-        <!-- Roof detail -->
-        <path
-            android:fillColor="#999999"
-            android:pathData="M16,28 L84,28 L84,32 L16,32 Z" />
-    </group>
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <!-- Internet Archive icon from ia-helper.svg -->
+    <!-- Centered with proper safe zone for adaptive icons -->
+    
+    <!-- White background with rounded corners -->
+    <path
+        android:fillColor="#ffffff"
+        android:pathData="M 76.8,0 
+                         C 34.4,0 0,34.4 0,76.8 
+                         L 0,435.2 
+                         C 0,477.6 34.4,512 76.8,512 
+                         L 435.2,512 
+                         C 477.6,512 512,477.6 512,435.2 
+                         L 512,76.8 
+                         C 512,34.4 477.6,0 435.2,0 
+                         Z" />
+    
+    <!-- Internet Archive building (columns, pediment, steps) -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M 81,419 
+                         L 431,419 
+                         L 431,437 
+                         L 81,437 
+                         Z 
+                         M 95,385 
+                         L 418,385 
+                         L 418,410 
+                         L 95,410 
+                         Z 
+                         M 93,101 
+                         L 414,101 
+                         L 414,136 
+                         L 93,136 
+                         Z 
+                         M 412,91 
+                         L 422,80 
+                         L 253,41 
+                         L 85,80 
+                         L 95,91 
+                         L 253,91 
+                         Z 
+                         M 139,245 
+                         L 138,194 
+                         L 135,147 
+                         C 135,145 135,145 133,145 
+                         A 67,67 0 0 0 105,145 
+                         C 104,145 103,145 103,147 
+                         L 101,194 
+                         A 2223,2223 0 0 0 101,321 
+                         L 103,364 
+                         L 104,372 
+                         L 119,375 
+                         C 125,374 130,374 135,372 
+                         L 136,364 
+                         L 138,321 
+                         A 1616,1616 0 0 0 139,245 
+                         Z 
+                         M 227,245 
+                         L 225,194 
+                         L 223,147 
+                         C 223,145 222,145 221,145 
+                         A 67,67 0 0 0 193,145 
+                         C 191,145 191,145 191,147 
+                         L 188,194 
+                         A 2223,2223 0 0 0 188,321 
+                         L 190,364 
+                         L 191,372 
+                         C 196,374 202,374 207,375 
+                         L 223,372 
+                         L 223,364 
+                         L 225,321 
+                         A 1620,1620 0 0 0 227,245 
+                         Z 
+                         M 328,245 
+                         L 327,194 
+                         L 324,147 
+                         C 324,145 324,145 322,145 
+                         A 67,67 0 0 0 294,145 
+                         C 293,145 292,145 292,147 
+                         L 290,194 
+                         A 2223,2223 0 0 0 290,321 
+                         L 292,364 
+                         L 293,372 
+                         L 308,375 
+                         C 313,374 319,374 324,372 
+                         L 325,364 
+                         L 327,321 
+                         A 1624,1624 0 0 0 328,245 
+                         Z 
+                         M 413,245 
+                         L 412,194 
+                         L 410,147 
+                         C 410,145 409,145 408,145 
+                         A 67,67 0 0 0 379,145 
+                         L 378,147 
+                         L 375,194 
+                         A 2227,2227 0 0 0 375,321 
+                         L 377,364 
+                         L 378,372 
+                         C 383,374 388,374 394,375 
+                         L 409,372 
+                         L 410,364 
+                         L 412,321 
+                         A 1620,1620 0 0 0 413,245 
+                         Z" />
 </vector>

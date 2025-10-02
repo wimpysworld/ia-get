@@ -36,15 +36,33 @@ The monochrome layer in the adaptive icon enables:
 - OS can recolor the icon to match user's chosen theme
 - Maintains accessibility and brand recognition
 
-### 4. Logo Design
+## Logo Design
 
 The logo represents the Internet Archive's iconic building with:
 - 5 columns representing the archive's foundation
 - Classical architecture pediment/roof
-- Grayscale color scheme for theming compatibility
-- Vector format for scalability
+- Steps leading to the entrance
+- High-contrast black and white design for better brand recognition
+- Rounded corners for modern aesthetic
+- Vector format for perfect scalability
 
-### 5. Build Configuration Updates
+This design improves upon the previous grayscale version by providing better contrast and visual impact.
+
+### 5. Icon Generation
+
+Icons are now generated from the master SVG file `assets/ia-helper.svg` using the automated script:
+
+```bash
+./scripts/generate-android-icons.sh
+```
+
+This script generates:
+- PNG icons for all densities (mdpi, hdpi, xhdpi, xxhdpi, xxxhdpi)
+- Adaptive icon vector drawables
+- Play Store icon (1024x1024)
+- Additional asset variations
+
+### 6. Build Configuration Updates
 
 Updated `mobile/flutter/android/app/build.gradle` to reference the new launcher icon:
 - Changed `appIcon` from `@android:drawable/ic_menu_gallery` to `@mipmap/ic_launcher`
@@ -86,10 +104,21 @@ To verify the implementation:
 
 ## Resources
 
-- **Logo SVG**: `assets/icons/internet_archive_logo.svg`
+- **Logo SVG**: `assets/ia-helper.svg` (source of truth for all icons)
+- **Icon Generation Script**: `scripts/generate-android-icons.sh`
 - **Android Icon Guidelines**: https://developer.android.com/guide/practices/ui_guidelines/icon_design_launcher
 - **Adaptive Icons**: https://developer.android.com/develop/ui/views/launch/icon_design_adaptive
 - **Material You**: https://m3.material.io/styles/icons/overview
+
+## Icon Generation
+
+To regenerate all Android icons from the source SVG:
+
+```bash
+./scripts/generate-android-icons.sh
+```
+
+This ensures all icon variations remain consistent with the master ia-helper.svg design.
 
 ## Future Enhancements
 
