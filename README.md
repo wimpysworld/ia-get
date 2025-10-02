@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="assets/ia-get.png" width="256" height="256" alt="Internet Archive Helper">
+  <img src="assets/ia-helper.png" width="256" height="256" alt="Internet Archive Helper">
   <br />
   Internet Archive Helper
 </h1>
