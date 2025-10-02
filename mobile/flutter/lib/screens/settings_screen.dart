@@ -6,6 +6,36 @@ class SettingsScreen extends StatefulWidget {
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
+  
+  /// Get current download path preference
+  static Future<String> getDownloadPath() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('download_path') ?? '/storage/emulated/0/Download/ia-get';
+  }
+  
+  /// Get concurrent downloads preference
+  static Future<int> getConcurrentDownloads() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt('concurrent_downloads') ?? 3;
+  }
+  
+  /// Get auto-decompress preference
+  static Future<bool> getAutoDecompress() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool('auto_decompress') ?? false;
+  }
+  
+  /// Get verify checksums preference
+  static Future<bool> getVerifyChecksums() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool('verify_checksums') ?? true;
+  }
+  
+  /// Get show hidden files preference
+  static Future<bool> getShowHiddenFiles() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool('show_hidden_files') ?? false;
+  }
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
@@ -287,35 +317,5 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
-  }
-  
-  /// Get current download path preference
-  static Future<String> getDownloadPath() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString('download_path') ?? '/storage/emulated/0/Download/ia-get';
-  }
-  
-  /// Get concurrent downloads preference
-  static Future<int> getConcurrentDownloads() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getInt('concurrent_downloads') ?? 3;
-  }
-  
-  /// Get auto-decompress preference
-  static Future<bool> getAutoDecompress() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool('auto_decompress') ?? false;
-  }
-  
-  /// Get verify checksums preference
-  static Future<bool> getVerifyChecksums() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool('verify_checksums') ?? true;
-  }
-  
-  /// Get show hidden files preference
-  static Future<bool> getShowHiddenFiles() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool('show_hidden_files') ?? false;
   }
 }
