@@ -169,6 +169,24 @@ export ANDROID_HOME=/path/to/android/sdk
 
 For complete Android deployment instructions including APK generation and Play Store submission, see **[ANDROID_DEPLOYMENT_GUIDE.md](ANDROID_DEPLOYMENT_GUIDE.md)**.
 
+### 🔧 Troubleshooting Build Issues
+
+**Having Flutter/Dart SDK version conflicts?** Run our quick-fix script:
+
+```shell
+./scripts/fix-flutter-deps.sh
+```
+
+**Common Issues:**
+- **Flutter version errors**: Ensure Flutter 3.27.1+ is installed (includes Dart 3.8.0+)
+- **Dependency conflicts**: Run `flutter clean` and `flutter pub get` in `mobile/flutter/`
+- **Build failures**: See **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for comprehensive solutions
+
+**Required Versions:**
+- Flutter: 3.27.1 or higher
+- Dart: 3.8.0 or higher (included with Flutter 3.27.1+)
+- Rust: Latest stable (1.75.0+)
+
 ### Build Profiles
 - **`dev`**: Fast compilation for development
 - **`fast-dev`**: Minimal optimization for quick iteration

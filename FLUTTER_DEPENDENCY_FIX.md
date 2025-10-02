@@ -73,6 +73,19 @@ All existing dependencies in `pubspec.yaml` are compatible with Dart SDK 3.8.0:
 
 ## Testing
 
+**Quick Fix**: If you're experiencing this issue locally, run:
+```bash
+./scripts/fix-flutter-deps.sh
+```
+
+This script will automatically:
+1. Check your Flutter and Dart versions
+2. Upgrade Flutter if needed
+3. Clean Flutter cache
+4. Resolve dependencies
+
+**Manual Steps** (if you prefer):
+
 To verify the fix works:
 
 1. Install Flutter 3.27.1 or higher (includes Dart 3.8.0+):
@@ -91,6 +104,8 @@ To verify the fix works:
    ```
 
 4. Expected result: Dependencies should resolve successfully without errors.
+
+**Still having issues?** See **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for comprehensive troubleshooting steps.
 
 ## Impact
 

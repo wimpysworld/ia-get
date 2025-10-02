@@ -443,11 +443,19 @@ jobs:
           target/
           ~/.android
           ~/.pub-cache
-        key: ${{ runner.os }}-android-apk-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}-${{ hashFiles('mobile/**/pubspec.yaml') }}
+        key: ${{ runner.os }}-android-apk-dart3.8-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}-${{ hashFiles('mobile/**/pubspec.yaml') }}
         restore-keys: |
-          ${{ runner.os }}-android-apk-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}-
-          ${{ runner.os }}-android-apk-${{ hashFiles('**/Cargo.lock') }}-
-          ${{ runner.os }}-android-apk-
+          ${{ runner.os }}-android-apk-dart3.8-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}-
+          ${{ runner.os }}-android-apk-dart3.8-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-android-apk-dart3.8-
+
+    - name: Verify Flutter and Dart versions
+      run: |
+        flutter --version
+        flutter doctor -v
+        echo "Verifying Dart SDK version is 3.8.0 or higher..."
+        DART_VERSION=$(flutter --version | grep "Dart" | awk '{print $4}')
+        echo "Detected Dart version: $DART_VERSION"
 
     - name: Build Android APK and App Bundle
       run: |

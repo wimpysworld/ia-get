@@ -13,6 +13,18 @@ We welcome contributions from developers, researchers, and Internet Archive enth
 
 ## 🛠️ Development Setup
 
+### Prerequisites
+
+**Required Versions:**
+- **Rust**: Latest stable (1.75.0 or higher)
+- **Flutter**: 3.27.1 or higher (for mobile development)
+- **Dart**: 3.8.0 or higher (included with Flutter 3.27.1+)
+- **Android SDK**: API 33+ (for mobile development)
+- **Android NDK**: 26.1.10909125 or compatible (for mobile development)
+- **Java**: JDK 17 (for Android builds)
+
+**Need help with setup?** See **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for detailed instructions.
+
 ### Rust CLI/GUI Development
 
 ```bash
@@ -39,8 +51,13 @@ cargo clippy --no-default-features --features cli -- -D warnings
 
 ### Mobile App Development
 
+**Important**: Make sure you have Flutter 3.27.1+ installed. If you encounter dependency issues, run:
 ```bash
-# Install Flutter SDK
+./scripts/fix-flutter-deps.sh
+```
+
+```bash
+# Install Flutter SDK (version 3.27.1 or higher required)
 # See: https://flutter.dev/docs/get-started/install
 
 # Install Android SDK and NDK
