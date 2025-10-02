@@ -9,6 +9,11 @@ class OnboardingWidget extends StatefulWidget {
 
   @override
   State<OnboardingWidget> createState() => _OnboardingWidgetState();
+
+  static Future<bool> shouldShowOnboarding() async {
+    final prefs = await SharedPreferences.getInstance();
+    return !(prefs.getBool(_OnboardingWidgetState._onboardingCompleteKey) ?? false);
+  }
 }
 
 class _OnboardingWidgetState extends State<OnboardingWidget> {
@@ -47,11 +52,6 @@ class _OnboardingWidgetState extends State<OnboardingWidget> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_onboardingCompleteKey, true);
     widget.onComplete();
-  }
-
-  static Future<bool> shouldShowOnboarding() async {
-    final prefs = await SharedPreferences.getInstance();
-    return !(prefs.getBool(_onboardingCompleteKey) ?? false);
   }
 
   final List<OnboardingPage> _pages = [

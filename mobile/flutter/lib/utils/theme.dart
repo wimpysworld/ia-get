@@ -51,7 +51,7 @@ class AppTheme {
       ),
       
       // Cards with Material 3 styling
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         elevation: 1,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
@@ -192,7 +192,7 @@ class AppTheme {
       ),
       
       // Cards with Material 3 dark styling
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         elevation: 1,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
