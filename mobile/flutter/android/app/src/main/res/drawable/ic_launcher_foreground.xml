@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Internet Archive building icon with columns -->
+    <!-- Centered in the safe zone (center 72dp of 108dp) -->
+    <group
+        android:translateX="18"
+        android:translateY="18"
+        android:scaleX="0.7"
+        android:scaleY="0.7">
+        
+        <!-- Base/foundation -->
+        <path
+            android:fillColor="#666666"
+            android:pathData="M6,90 L94,90 L94,96 L6,96 Z" />
+        
+        <!-- Steps leading up -->
+        <path
+            android:fillColor="#777777"
+            android:pathData="M12,86 L88,86 L88,90 L12,90 Z" />
+        <path
+            android:fillColor="#888888"
+            android:pathData="M18,82 L82,82 L82,86 L18,86 Z" />
+        
+        <!-- Main building base -->
+        <path
+            android:fillColor="#999999"
+            android:pathData="M16,32 L84,32 L84,82 L16,82 Z" />
+        
+        <!-- Columns (5 columns representing the Internet Archive) -->
+        <path
+            android:fillColor="#CCCCCC"
+            android:pathData="M20,36 L26,36 L26,80 L20,80 Z" />
+        <path
+            android:fillColor="#CCCCCC"
+            android:pathData="M32,36 L38,36 L38,80 L32,80 Z" />
+        <path
+            android:fillColor="#CCCCCC"
+            android:pathData="M44,36 L50,36 L50,80 L44,80 Z" />
+        <path
+            android:fillColor="#CCCCCC"
+            android:pathData="M56,36 L62,36 L62,80 L56,80 Z" />
+        <path
+            android:fillColor="#CCCCCC"
+            android:pathData="M68,36 L74,36 L74,80 L68,80 Z" />
+        
+        <!-- Column capitals -->
+        <path
+            android:fillColor="#AAAAAA"
+            android:pathData="M18,32 L28,32 L28,36 L18,36 Z" />
+        <path
+            android:fillColor="#AAAAAA"
+            android:pathData="M30,32 L40,32 L40,36 L30,36 Z" />
+        <path
+            android:fillColor="#AAAAAA"
+            android:pathData="M42,32 L52,32 L52,36 L42,36 Z" />
+        <path
+            android:fillColor="#AAAAAA"
+            android:pathData="M54,32 L64,32 L64,36 L54,36 Z" />
+        <path
+            android:fillColor="#AAAAAA"
+            android:pathData="M66,32 L76,32 L76,36 L66,36 Z" />
+        
+        <!-- Pediment/roof triangle -->
+        <path
+            android:fillColor="#888888"
+            android:pathData="M50,16 L16,32 L84,32 Z" />
+        
+        <!-- Roof detail -->
+        <path
+            android:fillColor="#999999"
+            android:pathData="M16,28 L84,28 L84,32 L16,32 Z" />
+    </group>
+</vector>
