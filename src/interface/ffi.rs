@@ -448,30 +448,15 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("Failed to create HTTP client: {}", e);
-                    let error_msg = CString::new(format!("HTTP client error: {}", e))
-                        .unwrap_or_else(|_| {
-                            CString::new("HTTP client error")
-                                .expect("Failed to create fallback error message")
-                        });
-                    let error_ptr = error_msg.as_ptr();
-                    completion_callback(false, error_ptr, user_data);
-                    // error_msg is dropped here but callback has already executed
+                    // NOTE: Callback NOT called to avoid thread safety issues on Android
                     return;
                 }
             };
             let client = enhanced_client.client();
 
             // Progress update: Starting metadata fetch
-            {
-                let progress_msg =
-                    CString::new("Fetching archive metadata...").unwrap_or_else(|_| {
-                        CString::new("Starting...")
-                            .expect("Failed to create fallback progress message")
-                    });
-                let msg_ptr = progress_msg.as_ptr();
-                progress_callback(0.1, msg_ptr, user_data);
-                // progress_msg dropped after callback completes synchronously
-            }
+            // NOTE: Callbacks are NOT called to avoid thread safety issues on Android.
+            // The Dart side uses polling via ia_get_get_metadata_json() instead.
 
             // Create a progress bar for the metadata fetch
             let progress_bar = ProgressBar::new_spinner();
@@ -479,16 +464,7 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
             // Fetch metadata with timeout and retry
             match fetch_json_metadata(&identifier_str, client, &progress_bar).await {
                 Ok((metadata, _url)) => {
-                    {
-                        let progress_msg =
-                            CString::new("Parsing metadata...").unwrap_or_else(|_| {
-                                CString::new("Processing...")
-                                    .expect("Failed to create fallback progress message")
-                            });
-                        let msg_ptr = progress_msg.as_ptr();
-                        progress_callback(0.8, msg_ptr, user_data);
-                        // progress_msg dropped after callback completes synchronously
-                    }
+                    // NOTE: Progress callback NOT called to avoid thread safety issues on Android
 
                     // Store metadata in cache with error handling
                     match METADATA_CACHE.lock() {
@@ -518,8 +494,8 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
                                     CString::new("Cache error")
                                         .expect("Failed to create fallback error message")
                                 });
-                            let error_ptr = error_msg.as_ptr();
-                            completion_callback(false, error_ptr, user_data);
+                            let _error_ptr = error_msg.as_ptr();
+                            // NOTE: Callback NOT called to avoid thread safety issues on Android
                             return;
                         }
                     }
@@ -549,17 +525,8 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
                         }
                     }
 
-                    {
-                        let progress_msg =
-                            CString::new("Metadata fetch complete").unwrap_or_else(|_| {
-                                CString::new("Complete")
-                                    .expect("Failed to create fallback progress message")
-                            });
-                        let msg_ptr = progress_msg.as_ptr();
-                        progress_callback(1.0, msg_ptr, user_data);
-                        // progress_msg dropped after callback completes synchronously
-                    }
-                    completion_callback(true, ptr::null(), user_data);
+                    // NOTE: Callbacks NOT called to avoid thread safety issues on Android.
+                    // The Dart side polls for completion using ia_get_get_metadata_json().
                 }
                 Err(e) => {
                     eprintln!("Metadata fetch error for '{}': {}", identifier_str, e);
@@ -586,9 +553,8 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
                             CString::new("Metadata fetch failed")
                                 .expect("Failed to create fallback error message")
                         });
-                    let error_ptr = error_msg.as_ptr();
-                    completion_callback(false, error_ptr, user_data);
-                    // error_msg dropped after callback completes synchronously
+                    let _error_ptr = error_msg.as_ptr();
+                    // NOTE: Callback NOT called to avoid thread safety issues on Android
                 }
             }
         });

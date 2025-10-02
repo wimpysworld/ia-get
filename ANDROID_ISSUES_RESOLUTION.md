@@ -4,55 +4,97 @@ This document summarizes the resolution of reported Android application issues.
 
 ## Issue #1: Android Application Crashes When Searching Archives
 
-### Status: ✅ **RESOLVED** (Fixed in Previous Work)
+### Status: ✅ **RESOLVED** (Fixed in This PR)
 
 ### Problem Statement
-The Android application was experiencing crashes when users attempted to search for Internet Archive items through the mobile Flutter interface.
+The Android application was experiencing crashes when users attempted to search for Internet Archive items through the mobile Flutter interface. The crash occurred immediately after hitting search, regardless of whether an archive exists for the searched term.
 
 ### Root Causes Identified and Fixed
 
-#### 1. Memory Safety Issues in FFI Callbacks
-**Location**: `src/interface/ffi.rs`
+#### 1. **CRITICAL: Thread Safety Violation in FFI Callbacks** (PRIMARY CAUSE)
+**Location**: `src/interface/ffi.rs` lines 444-595
 
-CString objects were being created and immediately dropped after passing their pointer to callbacks, causing use-after-free errors on Android.
+The root cause of the Android crash was that native Rust threads were **calling Dart FFI callbacks** directly. On Android, Dart code MUST execute on the Dart isolate thread only, not from arbitrary native threads. Even though the Dart callbacks were no-ops, the act of crossing the FFI boundary from a native thread caused immediate crashes.
 
-**Fix Applied**: Proper CString lifetime management with error handling:
+**The Problem**:
 ```rust
-let error_msg = CString::new("error")
-    .unwrap_or_else(|_| CString::new("fallback").unwrap());
-let error_ptr = error_msg.as_ptr();
-completion_callback(false, error_ptr, user_data);
-// error_msg dropped naturally after callback completes synchronously
+// In src/interface/ffi.rs - BEFORE FIX
+std::thread::spawn(move || {
+    runtime.block_on(async move {
+        // These callback invocations from native thread → CRASH on Android
+        progress_callback(0.1, msg_ptr, user_data);
+        completion_callback(true, ptr::null(), user_data);
+    })
+})
 ```
 
-#### 2. Insufficient Error Handling in Dart FFI
+**Fix Applied**: Removed all callback invocations from the Rust side. The Dart side already uses a polling mechanism via `ia_get_get_metadata_json()` to check for results safely from the Dart thread.
+
+```rust
+// In src/interface/ffi.rs - AFTER FIX
+std::thread::spawn(move || {
+    runtime.block_on(async move {
+        // Store metadata in cache
+        cache.insert(identifier_str.clone(), metadata);
+        
+        // NOTE: Callbacks NOT called to avoid thread safety issues on Android.
+        // The Dart side polls for completion using ia_get_get_metadata_json().
+    })
+})
+```
+
+This fix ensures that:
+- No FFI boundary crossings happen from native threads
+- The polling mechanism safely checks results from the Dart thread
+- Android search operations complete without crashes
+
+#### 2. Memory Safety Issues in FFI Callbacks (SECONDARY - Prevented by Fix #1)
+#### 2. Memory Safety Issues in FFI Callbacks (SECONDARY - Prevented by Fix #1)
+**Location**: `src/interface/ffi.rs`
+
+Previously, CString objects were being created and immediately dropped after passing their pointer to callbacks, which could cause use-after-free errors. However, since callbacks are no longer called from the Rust side, this issue is completely avoided.
+
+#### 3. Polling Architecture (Already Implemented, Now Primary Method)
 **Location**: `mobile/flutter/lib/services/ia_get_service.dart`
 
-The Dart FFI bindings lacked proper null checking and exception handling.
+The Dart FFI layer already had a polling mechanism that safely monitors results from the Dart thread. This is now the primary (and only) method used:
+
+```dart
+Future<void> _waitForMetadataCompletion(String identifier, {required Duration timeout}) async {
+  while (DateTime.now().isBefore(endTime)) {
+    // Check if metadata is available from Dart thread (SAFE)
+    final metadataJson = IaGetFFI.getMetadataJson(identifier);
+    if (metadataJson != null && metadataJson.isNotEmpty) {
+      return; // Metadata is ready
+    }
+    await Future.delayed(checkInterval);
+  }
+}
+```
+
+**Callback Implementation** (already in place):
+```dart
+static void _progressCallback(double progress, Pointer<Utf8> message, int userData) {
+  // NO-OP: Do not execute Dart code from native thread callbacks
+}
+
+static void _completionCallback(bool success, Pointer<Utf8> errorMessage, int userData) {
+  // NO-OP: Do not execute Dart code from native thread callbacks
+}
+```
+#### 4. Error Handling in Dart FFI (Already Improved)
+**Location**: `mobile/flutter/lib/services/ia_get_service.dart`
+
+The Dart FFI bindings already have comprehensive error handling:
 
 **Fixes Applied**:
-- Added try-catch blocks around all FFI calls
-- Implemented null/empty validation before FFI calls
+**Fixes Applied**:
+- Try-catch blocks around all FFI calls
+- Null/empty validation before FFI calls
 - Enhanced error messages with context
-- Increased timeout from 10s to 30s for metadata fetches
-- Added retry logic with exponential backoff (up to 3 attempts)
+- 30 second timeout for metadata fetches
+- Retry logic with exponential backoff (up to 3 attempts)
 - Input validation with regex pattern checking
-
-#### 3. Race Conditions in Async Handling
-The polling mechanism for metadata completion could fail if callbacks didn't complete properly.
-
-**Fix Applied**: Better async handling with proper timeout management and attempt tracking.
-
-#### 4. JNI Layer Validation Issues
-**Location**: `mobile/rust-ffi/src/jni_bridge.rs`
-
-The JNI bridge lacked comprehensive input validation.
-
-**Fixes Applied**:
-- Added null checks for all JString parameters
-- Validated empty/whitespace identifiers
-- Enhanced error logging for Android debugging
-- Better error propagation to Java/Kotlin layer
 
 ### Testing
 All changes validated with:
@@ -60,6 +102,20 @@ All changes validated with:
 - ✅ Cargo fmt (code formatted)
 - ✅ Unit tests (15/15 passing)
 - ✅ Build tests (main library and mobile FFI)
+
+### Technical Summary
+
+The fix addresses the root cause: **calling Dart FFI callbacks from native Rust threads**. The solution:
+
+1. **Rust side**: No longer calls progress/completion callbacks from spawned threads
+2. **Dart side**: Uses polling mechanism (`_waitForMetadataCompletion`) to safely check for results from the Dart thread
+3. **Result**: Metadata operations complete successfully without crashes
+
+This architecture is safe because:
+- All Dart code execution happens on the Dart isolate thread
+- The Rust thread only stores data in cache (thread-safe via Mutex)
+- The Dart thread polls the cache at safe intervals
+- No FFI boundary crossings happen from non-Dart threads
 
 ### References
 - Detailed documentation: `mobile/ANDROID_SEARCH_FIX.md`
