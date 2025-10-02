@@ -153,6 +153,41 @@ adb logcat | grep -i "ia-get\|JNI\|flutter"
 
 ## Recent Improvements (Latest Update)
 
+### Critical Threading Fix (Current Update)
+
+**Root Cause Discovered**: The Android crash was caused by a thread safety violation where native Rust threads were calling Dart FFI callbacks directly. On Android, Dart code MUST execute on the Dart isolate thread, not arbitrary native threads.
+
+**The Problem**:
+```rust
+// In src/interface/ffi.rs line 444
+std::thread::spawn(move || {
+    // This spawns a native thread
+    runtime.block_on(async move {
+        // Callbacks invoked from native thread → CRASH on Android
+        progress_callback(0.1, msg_ptr, user_data);
+        completion_callback(true, ptr::null(), user_data);
+    })
+})
+```
+
+**The Solution**:
+Made callbacks no-ops since the polling mechanism (`_waitForMetadataCompletion`) already safely monitors progress from the Dart thread:
+
+```dart
+static void _progressCallback(double progress, Pointer<Utf8> message, int userData) {
+  // NO-OP: Native thread callbacks are unsafe on Android
+  // Progress monitoring handled by polling
+}
+```
+
+This is the **correct and safe approach** for the current architecture where:
+1. Rust spawns background thread for async work
+2. Rust stores results in cache
+3. Dart polls cache from Dart thread (safe)
+4. Callbacks are no-ops (safe)
+
+See `ANDROID_CRASH_ROOT_CAUSE.md` for complete analysis.
+
 ### Enhanced Error Resilience
 All critical unwrap() calls that could cause panics have been replaced with proper error handling:
 

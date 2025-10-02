@@ -120,6 +120,7 @@ echo "  Creating adaptive icon foreground..."
 
 # Create the adaptive icon foreground XML
 # This uses the same SVG path data but formatted for Android
+# NOTE: Foreground should NOT include a background - that's what the background layer is for
 cat > "$FOREGROUND_XML" << 'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
@@ -128,20 +129,8 @@ cat > "$FOREGROUND_XML" << 'EOF'
     android:viewportWidth="512"
     android:viewportHeight="512">
     <!-- Internet Archive icon from ia-helper.svg -->
-    <!-- Centered with proper safe zone for adaptive icons -->
-    
-    <!-- White background with rounded corners -->
-    <path
-        android:fillColor="#ffffff"
-        android:pathData="M 76.8,0 
-                         C 34.4,0 0,34.4 0,76.8 
-                         L 0,435.2 
-                         C 0,477.6 34.4,512 76.8,512 
-                         L 435.2,512 
-                         C 477.6,512 512,477.6 512,435.2 
-                         L 512,76.8 
-                         C 512,34.4 477.6,0 435.2,0 
-                         Z" />
+    <!-- Foreground layer: only the building icon, no background -->
+    <!-- Background layer provides the white background separately -->
     
     <!-- Internet Archive building (columns, pediment, steps) -->
     <path

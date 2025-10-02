@@ -542,24 +542,26 @@ class IaGetService extends ChangeNotifier {
   }
   
   // Callback functions (static methods for FFI)
+  // 
+  // ⚠️ CRITICAL ANDROID SAFETY NOTE ⚠️
+  // These callbacks are invoked from NATIVE RUST THREADS (std::thread::spawn in ffi.rs).
+  // Calling Dart code from non-Dart threads causes CRASHES on Android.
+  // 
+  // The current implementation uses a POLLING mechanism (_waitForMetadataCompletion) 
+  // which safely checks for results from the Dart thread. These callbacks are kept
+  // as no-ops to satisfy the FFI interface but should NOT execute any Dart code.
+  //
+  // See ANDROID_CRASH_ROOT_CAUSE.md for detailed explanation.
   static void _progressCallback(double progress, Pointer<Utf8> message, int userData) {
-    // In a real implementation, use SendPort to communicate with the main isolate
-    if (kDebugMode) {
-      final msg = message != nullptr ? message.toDartString() : '';
-      print('Progress: ${(progress * 100).toStringAsFixed(1)}% - $msg');
-    }
+    // NO-OP: Do not execute Dart code from native thread callbacks
+    // Progress monitoring is handled by polling in _waitForMetadataCompletion
+    // Any code here will crash the app on Android due to thread safety violations
   }
   
   static void _completionCallback(bool success, Pointer<Utf8> errorMessage, int userData) {
-    // In a real implementation, use SendPort to communicate with the main isolate
-    if (kDebugMode) {
-      if (success) {
-        print('Operation completed successfully');
-      } else {
-        final error = errorMessage != nullptr ? errorMessage.toDartString() : 'Unknown error';
-        print('Operation failed: $error');
-      }
-    }
+    // NO-OP: Do not execute Dart code from native thread callbacks
+    // Completion detection is handled by polling in _waitForMetadataCompletion
+    // Any code here will crash the app on Android due to thread safety violations
   }
   
   /// Wait for metadata fetch completion with timeout

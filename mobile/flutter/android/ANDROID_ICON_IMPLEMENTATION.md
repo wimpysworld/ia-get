@@ -18,15 +18,20 @@ The Internet Archive building logo has been added in multiple densities to suppo
 
 ### 2. Adaptive Icon Support (Android 8.0+)
 
-Implemented adaptive icons for modern Android devices:
+Implemented adaptive icons for modern Android devices following proper layer separation:
 
-- **Foreground layer**: Vector drawable of the Internet Archive building with columns
-- **Background layer**: White background for contrast
-- **Monochrome layer**: Same as foreground, enables Material You theming on Android 13+
+- **Foreground layer**: Black vector drawable of the Internet Archive building (no embedded background)
+- **Background layer**: White solid background for contrast (separate from foreground)
+- **Monochrome layer**: References the foreground, enables Material You theming on Android 13+
+
+This proper separation allows:
+- The OS to apply different shaped masks (circle, rounded square, etc.)
+- Material You to theme the icon by recoloring the monochrome layer
+- Proper contrast between the icon and background
 
 Files:
-- `drawable/ic_launcher_foreground.xml` - Vector drawable of the building
-- `drawable/ic_launcher_background.xml` - Background layer
+- `drawable/ic_launcher_foreground.xml` - Vector drawable of the building (black icon only)
+- `drawable/ic_launcher_background.xml` - White background layer
 - `mipmap-anydpi-v26/ic_launcher.xml` - Adaptive icon configuration
 
 ### 3. Material You Theming Support
