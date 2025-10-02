@@ -10,7 +10,7 @@ Because internet_archive_helper requires SDK version >=3.8.0, version solving fa
 
 ## Root Cause
 
-The issue occurs when developers have an older Flutter version installed locally. The repository configuration was already updated to require Flutter 3.27.1+ (which includes Dart SDK 3.8.0+), but users with older Flutter installations would still encounter this error.
+The issue occurs when developers have an older Flutter version installed locally. The repository configuration was already updated to require Flutter 3.35.0+ (which includes Dart SDK 3.8.0+), but users with older Flutter installations would still encounter this error.
 
 ## Current State of Repository
 
@@ -27,7 +27,7 @@ environment:
 - name: Setup Flutter
   uses: subosito/flutter-action@v2
   with:
-    flutter-version: '3.27.1'
+    flutter-version: '3.35.0'
 ```
 
 ✅ **.github/workflows/release.yml**
@@ -35,7 +35,7 @@ environment:
 - name: Setup Flutter
   uses: subosito/flutter-action@v2
   with:
-    flutter-version: '3.27.1'
+    flutter-version: '3.35.0'
 ```
 
 ## Resolution
@@ -110,7 +110,7 @@ This ensures that when the Dart SDK constraint changes, the CI automatically use
 flutter upgrade
 
 # Verify version
-flutter --version  # Should show Flutter 3.27.1+ and Dart 3.8.0+
+flutter --version  # Should show Flutter 3.35.0+ and Dart 3.8.0+
 
 # Clean and rebuild
 cd mobile/flutter
@@ -121,8 +121,8 @@ flutter pub get
 
 ### Verify Requirements
 Your environment needs:
-- **Flutter**: 3.27.1 or higher
-- **Dart**: 3.8.0 or higher (included with Flutter 3.27.1+)
+- **Flutter**: 3.35.0 or higher
+- **Dart**: 3.8.0 or higher (included with Flutter 3.35.0+)
 - **Rust**: Latest stable (1.75.0+)
 
 ## Why This Approach
@@ -141,7 +141,7 @@ Your environment needs:
 ✅ GitHub Actions workflows updated with cache invalidation
 ✅ Cache keys now include Dart SDK version requirement (dart3.8)
 ✅ Version verification steps added before building
-✅ All workflows use Flutter 3.27.1 with Dart 3.8.0+
+✅ All workflows use Flutter 3.35.0 with Dart 3.8.0+
 
 ### Local Development
 ✅ Script validates successfully

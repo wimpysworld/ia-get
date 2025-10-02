@@ -178,13 +178,13 @@ For complete Android deployment instructions including APK generation and Play S
 ```
 
 **Common Issues:**
-- **Flutter version errors**: Ensure Flutter 3.27.1+ is installed (includes Dart 3.8.0+)
+- **Flutter version errors**: Ensure Flutter 3.35.0+ is installed (includes Dart 3.8.0+)
 - **Dependency conflicts**: Run `flutter clean` and `flutter pub get` in `mobile/flutter/`
 - **Build failures**: See **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for comprehensive solutions
 
 **Required Versions:**
-- Flutter: 3.27.1 or higher
-- Dart: 3.8.0 or higher (included with Flutter 3.27.1+)
+- Flutter: 3.35.0 or higher
+- Dart: 3.8.0 or higher (included with Flutter 3.35.0+)
 - Rust: Latest stable (1.75.0+)
 
 ### Build Profiles

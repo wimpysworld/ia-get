@@ -18,7 +18,7 @@ flutter upgrade
 flutter --version
 
 # Expected output should show:
-# Flutter 3.27.1 or higher
+# Flutter 3.35.0 or higher
 # Dart 3.8.0 or higher
 ```
 
@@ -51,7 +51,8 @@ flutter --version
 ### Why This Issue Occurs
 
 The project uses `flutter_lints: ^6.0.0` which requires Dart SDK ^3.8.0. This version comes with:
-- Flutter 3.27.1 → Dart 3.8.0+
+- Flutter 3.35.0 → Dart 3.8.0+
+- Flutter 3.27.1 → Dart 3.6.1 (too old)
 - Flutter 3.24.5 → Dart 3.5.4 (too old)
 - Flutter 3.16.0 → Dart 3.2.x (too old)
 
@@ -136,8 +137,8 @@ flutter pub upgrade
 **Check These Items**:
 
 1. **Verify Flutter version in workflows** (already updated and correct):
-   - ✅ `.github/workflows/ci.yml` has `flutter-version: '3.27.1'`
-   - ✅ `.github/workflows/release.yml` has `flutter-version: '3.27.1'`
+   - ✅ `.github/workflows/ci.yml` has `flutter-version: '3.35.0'`
+   - ✅ `.github/workflows/release.yml` has `flutter-version: '3.35.0'`
 
 2. **Verify Dart SDK constraint in pubspec.yaml** (already updated and correct):
    ```yaml
@@ -168,8 +169,8 @@ flutter pub upgrade
 ### Recommended Versions
 
 - **Rust**: 1.75.0 or higher (latest stable recommended)
-- **Flutter**: 3.27.1 or higher
-- **Dart**: 3.8.0 or higher (included with Flutter 3.27.1+)
+- **Flutter**: 3.35.0 or higher
+- **Dart**: 3.8.0 or higher (included with Flutter 3.35.0+)
 - **Android SDK**: API 33 or higher
 - **Android NDK**: 26.1.10909125 or compatible version
 - **Java**: JDK 17 (for Android builds)

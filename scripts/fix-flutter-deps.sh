@@ -63,7 +63,7 @@ echo "  Current Dart version: $DART_VERSION"
 echo ""
 
 # Required versions
-REQUIRED_FLUTTER="3.27.1"
+REQUIRED_FLUTTER="3.35.0"
 REQUIRED_DART="3.8.0"
 
 # Function to compare versions

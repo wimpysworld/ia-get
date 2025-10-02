@@ -36,13 +36,13 @@ environment:
 
 **Files**: `.github/workflows/ci.yml` and `.github/workflows/release.yml`
 
-Updated Flutter version from 3.24.5 to 3.27.1 (which includes Dart 3.8.0+):
+Updated Flutter version from 3.24.5 to 3.35.0 (which includes Dart 3.8.0+):
 
 ```yaml
 - name: Setup Flutter
   uses: subosito/flutter-action@v2
   with:
-    flutter-version: '3.27.1'  # Updated from '3.24.5'
+    flutter-version: '3.35.0'  # Updated from '3.24.5'
     channel: 'stable'
     cache: true
 ```
@@ -51,7 +51,7 @@ Updated Flutter version from 3.24.5 to 3.27.1 (which includes Dart 3.8.0+):
 
 **File**: `docs/MOBILE_DEVELOPMENT_GUIDE.md`
 
-Updated the Flutter version reference from 3.16.0 to 3.27.1 to match the CI/CD configuration.
+Updated the Flutter version reference from 3.16.0 to 3.35.0 to match the CI/CD configuration.
 
 ## Dependency Compatibility
 
@@ -88,7 +88,7 @@ This script will automatically:
 
 To verify the fix works:
 
-1. Install Flutter 3.27.1 or higher (includes Dart 3.8.0+):
+1. Install Flutter 3.35.0 or higher (includes Dart 3.8.0+):
    ```bash
    flutter upgrade
    ```
@@ -112,14 +112,14 @@ To verify the fix works:
 - **Minimal Breaking Changes**: The SDK constraint update only affects the minimum required Dart version
 - **Forward Compatible**: All dependencies work with the new SDK version
 - **CI/CD**: Updated workflows will automatically use the correct Flutter version
-- **Development**: Developers need Flutter 3.27.1+ installed locally
+- **Development**: Developers need Flutter 3.35.0+ installed locally
 
 ## Flutter-Dart Version Mapping
 
 For reference:
 - Flutter 3.16.0 → Dart 3.2.x
 - Flutter 3.24.5 → Dart 3.5.4
-- Flutter 3.27.1 → Dart 3.8.0+
+- Flutter 3.35.0 → Dart 3.8.0+
 
 ## Alternative Considered
 

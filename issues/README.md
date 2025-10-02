@@ -14,16 +14,16 @@ Because internet_archive_helper requires SDK version >=3.8.0
 
 **Status**: ✅ RESOLVED
 
-**Solution**: The repository configuration has been updated to use Flutter 3.27.1+ (which includes Dart 3.8.0+). If you're still experiencing this issue locally:
+**Solution**: The repository configuration has been updated to use Flutter 3.35.0+ (which includes Dart 3.8.0+). If you're still experiencing this issue locally:
 
 1. **Quick Fix**: Run `./scripts/fix-flutter-deps.sh`
-2. **Manual Fix**: Run `flutter upgrade` to update to Flutter 3.27.1+
+2. **Manual Fix**: Run `flutter upgrade` to update to Flutter 3.35.0+
 3. **See**: [TROUBLESHOOTING.md](../TROUBLESHOOTING.md) for detailed instructions
 
 The fix has been applied in these files:
 - ✅ `mobile/flutter/pubspec.yaml` - SDK constraint: `>=3.8.0 <4.0.0`
-- ✅ `.github/workflows/ci.yml` - Flutter version: `3.27.1`
-- ✅ `.github/workflows/release.yml` - Flutter version: `3.27.1`
+- ✅ `.github/workflows/ci.yml` - Flutter version: `3.35.0`
+- ✅ `.github/workflows/release.yml` - Flutter version: `3.35.0`
 
 ### CI Job Failures
 
