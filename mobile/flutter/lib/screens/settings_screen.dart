@@ -101,7 +101,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 
                 ListTile(
-                  leading: const Icon(Icons.download_multiple),
+                  leading: const Icon(Icons.file_download),
                   title: const Text('Concurrent Downloads'),
                   subtitle: Text('$_concurrentDownloads files at a time'),
                   trailing: SizedBox(
@@ -292,30 +292,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Get current download path preference
   static Future<String> getDownloadPath() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_keyDownloadPath) ?? '/storage/emulated/0/Download/ia-get';
+    return prefs.getString('download_path') ?? '/storage/emulated/0/Download/ia-get';
   }
   
   /// Get concurrent downloads preference
   static Future<int> getConcurrentDownloads() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getInt(_keyConcurrentDownloads) ?? 3;
+    return prefs.getInt('concurrent_downloads') ?? 3;
   }
   
   /// Get auto-decompress preference
   static Future<bool> getAutoDecompress() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_keyAutoDecompress) ?? false;
+    return prefs.getBool('auto_decompress') ?? false;
   }
   
   /// Get verify checksums preference
   static Future<bool> getVerifyChecksums() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_keyVerifyChecksums) ?? true;
+    return prefs.getBool('verify_checksums') ?? true;
   }
   
   /// Get show hidden files preference
   static Future<bool> getShowHiddenFiles() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_keyShowHiddenFiles) ?? false;
+    return prefs.getBool('show_hidden_files') ?? false;
   }
 }
