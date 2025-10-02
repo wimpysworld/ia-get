@@ -53,19 +53,34 @@ class _SearchBarWidgetState extends State<SearchBarWidget> {
           const SizedBox(width: 8),
           Consumer<IaGetService>(
             builder: (context, service, child) {
+              final isLoading = service.isLoading;
+              final canCancel = service.canCancel;
+              
               return ElevatedButton(
-                onPressed: service.isLoading || _controller.text.trim().isEmpty
-                    ? null
-                    : () => _searchArchive(_controller.text),
-                child: service.isLoading
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                        ),
-                      )
+                onPressed: isLoading
+                    ? (canCancel ? () => service.cancelOperation() : null)
+                    : (_controller.text.trim().isEmpty ? null : () => _searchArchive(_controller.text)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: isLoading && canCancel ? Colors.red : null,
+                ),
+                child: isLoading
+                    ? (canCancel
+                        ? const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.stop, size: 18),
+                              SizedBox(width: 4),
+                              Text('Stop'),
+                            ],
+                          )
+                        : const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                            ),
+                          ))
                     : const Text('Search'),
               );
             },

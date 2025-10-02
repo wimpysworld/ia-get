@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'services/ia_get_service.dart';
 import 'services/background_download_service.dart';
+import 'services/deep_link_service.dart';
 import 'screens/home_screen.dart';
 import 'widgets/onboarding_widget.dart';
 import 'utils/theme.dart';
@@ -46,6 +47,10 @@ class IAGetMobileApp extends StatelessWidget {
         ChangeNotifierProvider<BackgroundDownloadService>(
           create: (_) => BackgroundDownloadService(),
           lazy: false, // Initialize immediately for background downloads
+        ),
+        Provider<DeepLinkService>(
+          create: (_) => DeepLinkService(),
+          dispose: (_, service) => service.dispose(),
         ),
       ],
       child: MaterialApp(
@@ -113,6 +118,19 @@ class _AppInitializerState extends State<AppInitializer> {
     // Initialize background download service
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<BackgroundDownloadService>().initialize();
+      
+      // Initialize deep link service
+      final deepLinkService = context.read<DeepLinkService>();
+      deepLinkService.initialize();
+      
+      // Handle incoming archive links
+      deepLinkService.onArchiveLinkReceived = (identifier) {
+        // Navigate to home and trigger search
+        if (mounted) {
+          final iaGetService = context.read<IaGetService>();
+          iaGetService.fetchMetadata(identifier);
+        }
+      };
     });
   }
 

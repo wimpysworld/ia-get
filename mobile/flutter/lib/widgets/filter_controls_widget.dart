@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/ia_get_service.dart';
+import '../screens/filters_screen.dart';
 
 class FilterControlsWidget extends StatefulWidget {
   const FilterControlsWidget({super.key});
@@ -10,143 +11,80 @@ class FilterControlsWidget extends StatefulWidget {
 }
 
 class _FilterControlsWidgetState extends State<FilterControlsWidget> {
-  final List<String> _selectedIncludeFormats = [];
-  final List<String> _selectedExcludeFormats = [];
+  List<String> _selectedIncludeFormats = [];
+  List<String> _selectedExcludeFormats = [];
   String? _maxSize;
-
-  final List<String> _commonFormats = [
-    'pdf', 'epub', 'txt', 'mp3', 'mp4', 'avi', 
-    'jpg', 'png', 'gif', 'zip', 'rar', 'iso'
-  ];
-
-  final List<String> _sizeOptions = [
-    '10MB', '50MB', '100MB', '500MB', '1GB', '5GB'
-  ];
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16),
-      child: ExpansionTile(
-        leading: const Icon(Icons.filter_list),
-        title: const Text('Filter Files'),
-        subtitle: _hasActiveFilters()
-            ? Text('${_getActiveFilterCount()} filters active')
-            : const Text('Tap to filter files'),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
         children: [
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Include formats
-                const Text(
-                  'Include Formats',
-                  style: TextStyle(fontWeight: FontWeight.w500),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 4,
-                  children: _commonFormats.map((format) {
-                    final isSelected = _selectedIncludeFormats.contains(format);
-                    return FilterChip(
-                      label: Text(format.toUpperCase()),
-                      selected: isSelected,
-                      onSelected: (selected) {
-                        setState(() {
-                          if (selected) {
-                            _selectedIncludeFormats.add(format);
-                            _selectedExcludeFormats.remove(format);
-                          } else {
-                            _selectedIncludeFormats.remove(format);
-                          }
-                        });
-                        _applyFilters();
-                      },
-                    );
-                  }).toList(),
-                ),
-                
-                const SizedBox(height: 16),
-                
-                // Exclude formats
-                const Text(
-                  'Exclude Formats',
-                  style: TextStyle(fontWeight: FontWeight.w500),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 4,
-                  children: _commonFormats.map((format) {
-                    final isSelected = _selectedExcludeFormats.contains(format);
-                    return FilterChip(
-                      label: Text(format.toUpperCase()),
-                      selected: isSelected,
-                      onSelected: (selected) {
-                        setState(() {
-                          if (selected) {
-                            _selectedExcludeFormats.add(format);
-                            _selectedIncludeFormats.remove(format);
-                          } else {
-                            _selectedExcludeFormats.remove(format);
-                          }
-                        });
-                        _applyFilters();
-                      },
-                      selectedColor: Colors.red.shade200,
-                      checkmarkColor: Colors.red.shade700,
-                    );
-                  }).toList(),
-                ),
-                
-                const SizedBox(height: 16),
-                
-                // Max file size
-                const Text(
-                  'Maximum File Size',
-                  style: TextStyle(fontWeight: FontWeight.w500),
-                ),
-                const SizedBox(height: 8),
-                DropdownButtonFormField<String>(
-                  value: _maxSize,
-                  decoration: const InputDecoration(
-                    hintText: 'No limit',
-                    border: OutlineInputBorder(),
+          // Filters button with badge
+          Stack(
+            children: [
+              OutlinedButton.icon(
+                onPressed: _openFiltersScreen,
+                icon: const Icon(Icons.filter_list),
+                label: const Text('Filters'),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 12,
                   ),
-                  items: [
-                    const DropdownMenuItem<String>(
-                      value: null,
-                      child: Text('No limit'),
-                    ),
-                    ..._sizeOptions.map((size) => DropdownMenuItem<String>(
-                      value: size,
-                      child: Text(size),
-                    )),
-                  ],
-                  onChanged: (value) {
-                    setState(() {
-                      _maxSize = value;
-                    });
-                    _applyFilters();
-                  },
                 ),
-                
-                const SizedBox(height: 16),
-                
-                // Clear filters button
-                if (_hasActiveFilters())
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton(
-                      onPressed: _clearFilters,
-                      child: const Text('Clear All Filters'),
+              ),
+              
+              // Badge showing active filter count
+              if (_hasActiveFilters())
+                Positioned(
+                  right: 0,
+                  top: 0,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: Colors.red,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: Theme.of(context).colorScheme.surface,
+                        width: 2,
+                      ),
+                    ),
+                    constraints: const BoxConstraints(
+                      minWidth: 20,
+                      minHeight: 20,
+                    ),
+                    child: Center(
+                      child: Text(
+                        '${_getActiveFilterCount()}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ),
                   ),
-              ],
-            ),
+                ),
+            ],
           ),
+          
+          const SizedBox(width: 8),
+          
+          // Active filters summary
+          if (_hasActiveFilters())
+            Expanded(
+              child: Text(
+                _getFilterSummary(),
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey.shade600,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
         ],
       ),
     );
@@ -166,24 +104,43 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
     return count;
   }
 
-  void _applyFilters() {
-    context.read<IaGetService>().filterFiles(
-      includeFormats: _selectedIncludeFormats.isNotEmpty
-          ? _selectedIncludeFormats
-          : null,
-      excludeFormats: _selectedExcludeFormats.isNotEmpty
-          ? _selectedExcludeFormats
-          : null,
-      maxSize: _maxSize,
-    );
+  String _getFilterSummary() {
+    final parts = <String>[];
+    
+    if (_selectedIncludeFormats.isNotEmpty) {
+      parts.add('Include: ${_selectedIncludeFormats.take(2).join(", ")}${_selectedIncludeFormats.length > 2 ? "..." : ""}');
+    }
+    
+    if (_selectedExcludeFormats.isNotEmpty) {
+      parts.add('Exclude: ${_selectedExcludeFormats.take(2).join(", ")}${_selectedExcludeFormats.length > 2 ? "..." : ""}');
+    }
+    
+    if (_maxSize != null) {
+      parts.add('Max: $_maxSize');
+    }
+    
+    return parts.join(' • ');
   }
 
-  void _clearFilters() {
-    setState(() {
-      _selectedIncludeFormats.clear();
-      _selectedExcludeFormats.clear();
-      _maxSize = null;
-    });
-    _applyFilters();
+  void _openFiltersScreen() async {
+    final result = await Navigator.push<Map<String, dynamic>>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => FiltersScreen(
+          initialIncludeFormats: _selectedIncludeFormats,
+          initialExcludeFormats: _selectedExcludeFormats,
+          initialMaxSize: _maxSize,
+        ),
+      ),
+    );
+    
+    // Update local state with returned filter values
+    if (result != null && mounted) {
+      setState(() {
+        _selectedIncludeFormats = List<String>.from(result['includeFormats'] ?? []);
+        _selectedExcludeFormats = List<String>.from(result['excludeFormats'] ?? []);
+        _maxSize = result['maxSize'] as String?;
+      });
+    }
   }
 }

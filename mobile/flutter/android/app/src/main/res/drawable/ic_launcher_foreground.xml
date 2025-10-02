@@ -2,16 +2,21 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="512"
-    android:viewportHeight="512">
-    <!-- Internet Archive icon from ia-helper.svg -->
-    <!-- Foreground layer: only the building icon, no background -->
-    <!-- Background layer provides the white background separately -->
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Internet Archive icon - scaled to fit adaptive icon safe zone -->
+    <!-- Safe zone is 66dp diameter circle in center of 108dp canvas -->
+    <!-- Icon is scaled and centered to fit within safe zone -->
     
-    <!-- Internet Archive building (columns, pediment, steps) -->
-    <path
-        android:fillColor="#000000"
-        android:pathData="M 81,419 
+    <group
+        android:translateX="21"
+        android:translateY="21"
+        android:scaleX="0.129"
+        android:scaleY="0.129">
+        <!-- Internet Archive building (columns, pediment, steps) -->
+        <path
+            android:fillColor="#000000"
+            android:pathData="M 81,419 
                          L 431,419 
                          L 431,437 
                          L 81,437 
@@ -97,4 +102,5 @@
                          L 412,321 
                          A 1620,1620 0 0 0 413,245 
                          Z" />
+    </group>
 </vector>

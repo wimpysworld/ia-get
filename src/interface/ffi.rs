@@ -14,7 +14,7 @@ use tokio::runtime::Runtime;
 
 use crate::core::archive::fetch_json_metadata;
 use crate::core::session::ArchiveMetadata;
-use crate::infrastructure::http::HttpClientFactory;
+use crate::infrastructure::http::{EnhancedHttpClient, HttpClientFactory};
 use crate::utilities::filters::parse_size_string;
 
 /// Circuit breaker state for resilience
@@ -1565,5 +1565,92 @@ pub extern "C" fn ia_get_reset_circuit_breaker() -> IaGetErrorCode {
             );
             IaGetErrorCode::UnknownError
         }
+    }
+}
+
+/// Search for archives using a query string
+///
+/// # Safety
+/// The `query` parameter must be a valid null-terminated C string pointer.
+/// The returned pointer must be freed using `ia_get_free_string`.
+/// Returns JSON array of search results or null on error.
+#[no_mangle]
+pub unsafe extern "C" fn ia_get_search_archives(
+    query: *const c_char,
+    max_results: c_int,
+) -> *mut c_char {
+    if query.is_null() {
+        eprintln!("ia_get_search_archives: null query");
+        return ptr::null_mut();
+    }
+
+    let query_str = match CStr::from_ptr(query).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ia_get_search_archives: invalid UTF-8 in query: {}", e);
+            return ptr::null_mut();
+        }
+    };
+
+    // Use the global runtime
+    let rt_handle = RUNTIME.handle();
+
+    // Execute search
+    let search_result = rt_handle.block_on(async {
+        let client = match EnhancedHttpClient::default() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "ia_get_search_archives: failed to create HTTP client: {}",
+                    e
+                );
+                return None;
+            }
+        };
+
+        let mut api_client =
+            crate::infrastructure::api::archive_api::EnhancedArchiveApiClient::new(client);
+
+        let rows = if max_results > 0 && max_results <= 100 {
+            Some(max_results as u32)
+        } else {
+            Some(10)
+        };
+
+        match api_client
+            .search_items(
+                query_str,
+                Some("identifier,title,description,mediatype,downloads"),
+                rows,
+                None,
+            )
+            .await
+        {
+            Ok(response) => match response.text().await {
+                Ok(text) => Some(text),
+                Err(e) => {
+                    eprintln!("ia_get_search_archives: failed to read response: {}", e);
+                    None
+                }
+            },
+            Err(e) => {
+                eprintln!("ia_get_search_archives: search failed: {}", e);
+                None
+            }
+        }
+    });
+
+    match search_result {
+        Some(json) => match CString::new(json) {
+            Ok(c_string) => c_string.into_raw(),
+            Err(e) => {
+                eprintln!(
+                    "ia_get_search_archives: failed to create CString from result: {}",
+                    e
+                );
+                ptr::null_mut()
+            }
+        },
+        None => ptr::null_mut(),
     }
 }

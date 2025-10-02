@@ -4,6 +4,7 @@ import '../services/ia_get_service.dart';
 import '../services/background_download_service.dart';
 import '../models/archive_metadata.dart';
 import '../screens/download_screen.dart';
+import '../screens/settings_screen.dart';
 import '../utils/file_utils.dart';
 
 class DownloadControlsWidget extends StatefulWidget {
@@ -18,6 +19,28 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
   int _concurrentDownloads = 3;
   bool _autoDecompress = false;
   bool _verifyChecksums = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
+  }
+
+  Future<void> _loadSettings() async {
+    final outputPath = await SettingsScreen.getDownloadPath();
+    final concurrent = await SettingsScreen.getConcurrentDownloads();
+    final decompress = await SettingsScreen.getAutoDecompress();
+    final verify = await SettingsScreen.getVerifyChecksums();
+    
+    if (mounted) {
+      setState(() {
+        _outputPath = outputPath;
+        _concurrentDownloads = concurrent;
+        _autoDecompress = decompress;
+        _verifyChecksums = verify;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

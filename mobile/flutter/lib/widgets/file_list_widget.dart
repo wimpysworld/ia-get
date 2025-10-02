@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../models/archive_metadata.dart';
+import '../services/ia_get_service.dart';
 
 class FileListWidget extends StatefulWidget {
   final List<ArchiveFile> files;
@@ -50,6 +52,8 @@ class _FileListWidgetState extends State<FileListWidget> {
                       file.selected = _selectAll;
                     }
                   });
+                  // Notify service that selection changed
+                  context.read<IaGetService>().notifyFileSelectionChanged();
                 },
               ),
               Text(
@@ -175,6 +179,8 @@ class _FileListWidgetState extends State<FileListWidget> {
           file.selected = selected ?? false;
           _updateSelectAllState();
         });
+        // Notify service that selection changed
+        context.read<IaGetService>().notifyFileSelectionChanged();
       },
       title: Text(
         file.displayName,
