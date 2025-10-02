@@ -167,15 +167,25 @@ pub fn calculate_md5<P: AsRef<std::path::Path>>(file_path: P) -> crate::Result<S
 /// # Returns
 /// Available space in bytes, or None if the information cannot be retrieved
 pub fn get_available_disk_space<P: AsRef<std::path::Path>>(_path: P) -> Option<u64> {
-    use sys_info::disk_info;
+    #[cfg(not(target_os = "android"))]
+    {
+        use sys_info::disk_info;
 
-    // Try to get disk info for the path
-    match disk_info() {
-        Ok(info) => {
-            // Available space in bytes = free blocks * block size
-            Some(info.free * 1024) // sys_info returns free space in KB
+        // Try to get disk info for the path
+        match disk_info() {
+            Ok(info) => {
+                // Available space in bytes = free blocks * block size
+                Some(info.free * 1024) // sys_info returns free space in KB
+            }
+            Err(_) => None,
         }
-        Err(_) => None,
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        // On Android, sys-info is not available due to NDK limitations
+        // Return None to skip disk space checks
+        None
     }
 }
 
