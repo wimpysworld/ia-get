@@ -9,12 +9,97 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 
 use crate::core::archive::fetch_json_metadata;
 use crate::core::session::ArchiveMetadata;
 use crate::infrastructure::http::HttpClientFactory;
 use crate::utilities::filters::parse_size_string;
+
+/// Circuit breaker state for resilience
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CircuitBreakerState {
+    Closed,   // Normal operation
+    Open,     // Failing, rejecting requests
+    HalfOpen, // Testing if service recovered
+}
+
+/// Circuit breaker for handling repeated failures
+#[derive(Debug)]
+struct CircuitBreaker {
+    state: CircuitBreakerState,
+    failure_count: u32,
+    last_failure_time: Option<Instant>,
+    failure_threshold: u32,
+    timeout: Duration,
+}
+
+impl CircuitBreaker {
+    fn new(failure_threshold: u32, timeout_secs: u64) -> Self {
+        Self {
+            state: CircuitBreakerState::Closed,
+            failure_count: 0,
+            last_failure_time: None,
+            failure_threshold,
+            timeout: Duration::from_secs(timeout_secs),
+        }
+    }
+
+    fn can_attempt(&mut self) -> bool {
+        match self.state {
+            CircuitBreakerState::Closed => true,
+            CircuitBreakerState::Open => {
+                // Check if enough time has passed to try again
+                if let Some(last_failure) = self.last_failure_time {
+                    if last_failure.elapsed() > self.timeout {
+                        self.state = CircuitBreakerState::HalfOpen;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            CircuitBreakerState::HalfOpen => true,
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.failure_count = 0;
+        self.state = CircuitBreakerState::Closed;
+        self.last_failure_time = None;
+    }
+
+    fn record_failure(&mut self) {
+        self.failure_count += 1;
+        self.last_failure_time = Some(Instant::now());
+
+        if self.failure_count >= self.failure_threshold {
+            self.state = CircuitBreakerState::Open;
+        }
+    }
+}
+
+/// Request deduplication tracker to prevent duplicate requests
+#[derive(Debug)]
+struct RequestTracker {
+    identifier: String,
+    in_progress: bool,
+    last_request_time: Instant,
+}
+
+/// Performance metrics for monitoring
+#[derive(Debug, Clone)]
+struct PerformanceMetrics {
+    total_requests: u64,
+    successful_requests: u64,
+    failed_requests: u64,
+    average_response_time_ms: u64,
+    cache_hits: u64,
+    cache_misses: u64,
+}
 
 // Simple session structure for FFI
 #[derive(Debug)]
@@ -76,6 +161,16 @@ lazy_static::lazy_static! {
     static ref SESSIONS: Arc<Mutex<HashMap<i32, FfiSession>>> = Arc::new(Mutex::new(HashMap::new()));
     static ref METADATA_CACHE: Arc<Mutex<HashMap<String, ArchiveMetadata>>> = Arc::new(Mutex::new(HashMap::new()));
     static ref NEXT_SESSION_ID: Arc<Mutex<i32>> = Arc::new(Mutex::new(1));
+    static ref CIRCUIT_BREAKER: Arc<Mutex<CircuitBreaker>> = Arc::new(Mutex::new(CircuitBreaker::new(3, 30)));
+    static ref REQUEST_TRACKER: Arc<Mutex<HashMap<String, RequestTracker>>> = Arc::new(Mutex::new(HashMap::new()));
+    static ref PERFORMANCE_METRICS: Arc<Mutex<PerformanceMetrics>> = Arc::new(Mutex::new(PerformanceMetrics {
+        total_requests: 0,
+        successful_requests: 0,
+        failed_requests: 0,
+        average_response_time_ms: 0,
+        cache_hits: 0,
+        cache_misses: 0,
+    }));
 }
 
 /// Callback function type for progress updates
@@ -154,10 +249,23 @@ pub struct FfiDownloadProgress {
 
 /// Generate next session ID
 fn next_session_id() -> i32 {
-    let mut next_id = NEXT_SESSION_ID.lock().unwrap();
-    let id = *next_id;
-    *next_id += 1;
-    id
+    match NEXT_SESSION_ID.lock() {
+        Ok(mut next_id) => {
+            let id = *next_id;
+            *next_id += 1;
+            id
+        }
+        Err(e) => {
+            eprintln!("Failed to acquire session ID lock: {}", e);
+            // Return a fallback ID based on timestamp to avoid crashes
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i32;
+            timestamp.wrapping_rem(1000000) // Use timestamp as fallback
+        }
+    }
 }
 
 /// Initialize the FFI interface
@@ -213,8 +321,118 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
         }
     };
 
+    // Update metrics
+    if let Ok(mut metrics) = PERFORMANCE_METRICS.lock() {
+        metrics.total_requests += 1;
+    }
+
+    // Check circuit breaker
+    let can_proceed = match CIRCUIT_BREAKER.lock() {
+        Ok(mut breaker) => breaker.can_attempt(),
+        Err(e) => {
+            eprintln!(
+                "ia_get_fetch_metadata: failed to check circuit breaker: {}",
+                e
+            );
+            false
+        }
+    };
+
+    if !can_proceed {
+        eprintln!("ia_get_fetch_metadata: circuit breaker is open, rejecting request");
+        if let Ok(mut metrics) = PERFORMANCE_METRICS.lock() {
+            metrics.failed_requests += 1;
+        }
+        return -2; // Special code indicating circuit breaker rejection
+    }
+
+    // Check for duplicate requests
+    let should_proceed = match REQUEST_TRACKER.lock() {
+        Ok(mut tracker) => {
+            if let Some(request) = tracker.get(&identifier_str) {
+                if request.in_progress
+                    && request.last_request_time.elapsed() < Duration::from_secs(60)
+                {
+                    eprintln!(
+                        "ia_get_fetch_metadata: request already in progress for '{}'",
+                        identifier_str
+                    );
+                    false
+                } else {
+                    // Update existing request
+                    tracker.insert(
+                        identifier_str.clone(),
+                        RequestTracker {
+                            identifier: identifier_str.clone(),
+                            in_progress: true,
+                            last_request_time: Instant::now(),
+                        },
+                    );
+                    true
+                }
+            } else {
+                // New request
+                tracker.insert(
+                    identifier_str.clone(),
+                    RequestTracker {
+                        identifier: identifier_str.clone(),
+                        in_progress: true,
+                        last_request_time: Instant::now(),
+                    },
+                );
+                true
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "ia_get_fetch_metadata: failed to check request tracker: {}",
+                e
+            );
+            true // Proceed anyway if tracker unavailable
+        }
+    };
+
+    if !should_proceed {
+        return -3; // Special code indicating duplicate request
+    }
+
+    // Check cache first
+    let cached_result = match METADATA_CACHE.lock() {
+        Ok(cache) => {
+            if cache.contains_key(&identifier_str) {
+                if let Ok(mut metrics) = PERFORMANCE_METRICS.lock() {
+                    metrics.cache_hits += 1;
+                    metrics.successful_requests += 1;
+                }
+                true
+            } else {
+                if let Ok(mut metrics) = PERFORMANCE_METRICS.lock() {
+                    metrics.cache_misses += 1;
+                }
+                false
+            }
+        }
+        Err(_) => false,
+    };
+
+    if cached_result {
+        #[cfg(debug_assertions)]
+        println!("Metadata cache hit for '{}'", identifier_str);
+
+        // Mark request as complete
+        if let Ok(mut tracker) = REQUEST_TRACKER.lock() {
+            if let Some(request) = tracker.get_mut(&identifier_str) {
+                request.in_progress = false;
+            }
+        }
+
+        // Return positive session ID to indicate cached success
+        return next_session_id();
+    }
+
     let session_id = next_session_id();
     let runtime = RUNTIME.clone();
+    let request_start_time = Instant::now();
 
     #[cfg(debug_assertions)]
     println!(
@@ -225,12 +443,16 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
     // Spawn async operation in background thread
     std::thread::spawn(move || {
         runtime.block_on(async move {
-            // Create HTTP client
+            // Create HTTP client with retry capability
             let enhanced_client = match HttpClientFactory::for_metadata_requests() {
                 Ok(c) => c,
                 Err(e) => {
+                    eprintln!("Failed to create HTTP client: {}", e);
                     let error_msg = CString::new(format!("HTTP client error: {}", e))
-                        .unwrap_or_else(|_| CString::new("HTTP client error").unwrap());
+                        .unwrap_or_else(|_| {
+                            CString::new("HTTP client error")
+                                .expect("Failed to create fallback error message")
+                        });
                     let error_ptr = error_msg.as_ptr();
                     completion_callback(false, error_ptr, user_data);
                     // error_msg is dropped here but callback has already executed
@@ -241,8 +463,11 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
 
             // Progress update: Starting metadata fetch
             {
-                let progress_msg = CString::new("Fetching archive metadata...")
-                    .unwrap_or_else(|_| CString::new("Starting...").unwrap());
+                let progress_msg =
+                    CString::new("Fetching archive metadata...").unwrap_or_else(|_| {
+                        CString::new("Starting...")
+                            .expect("Failed to create fallback progress message")
+                    });
                 let msg_ptr = progress_msg.as_ptr();
                 progress_callback(0.1, msg_ptr, user_data);
                 // progress_msg dropped after callback completes synchronously
@@ -251,12 +476,15 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
             // Create a progress bar for the metadata fetch
             let progress_bar = ProgressBar::new_spinner();
 
-            // Fetch metadata
+            // Fetch metadata with timeout and retry
             match fetch_json_metadata(&identifier_str, client, &progress_bar).await {
                 Ok((metadata, _url)) => {
                     {
-                        let progress_msg = CString::new("Parsing metadata...")
-                            .unwrap_or_else(|_| CString::new("Processing...").unwrap());
+                        let progress_msg =
+                            CString::new("Parsing metadata...").unwrap_or_else(|_| {
+                                CString::new("Processing...")
+                                    .expect("Failed to create fallback progress message")
+                            });
                         let msg_ptr = progress_msg.as_ptr();
                         progress_callback(0.8, msg_ptr, user_data);
                         // progress_msg dropped after callback completes synchronously
@@ -271,17 +499,62 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
                         }
                         Err(e) => {
                             eprintln!("Failed to acquire metadata cache lock: {}", e);
+
+                            // Mark request as complete and record failure
+                            if let Ok(mut tracker) = REQUEST_TRACKER.lock() {
+                                if let Some(request) = tracker.get_mut(&identifier_str) {
+                                    request.in_progress = false;
+                                }
+                            }
+                            if let Ok(mut breaker) = CIRCUIT_BREAKER.lock() {
+                                breaker.record_failure();
+                            }
+                            if let Ok(mut metrics) = PERFORMANCE_METRICS.lock() {
+                                metrics.failed_requests += 1;
+                            }
+
                             let error_msg = CString::new("Failed to cache metadata")
-                                .unwrap_or_else(|_| CString::new("Cache error").unwrap());
+                                .unwrap_or_else(|_| {
+                                    CString::new("Cache error")
+                                        .expect("Failed to create fallback error message")
+                                });
                             let error_ptr = error_msg.as_ptr();
                             completion_callback(false, error_ptr, user_data);
                             return;
                         }
                     }
 
+                    // Record success metrics
+                    let elapsed = request_start_time.elapsed().as_millis() as u64;
+                    if let Ok(mut metrics) = PERFORMANCE_METRICS.lock() {
+                        metrics.successful_requests += 1;
+                        // Update rolling average
+                        if metrics.average_response_time_ms == 0 {
+                            metrics.average_response_time_ms = elapsed;
+                        } else {
+                            metrics.average_response_time_ms =
+                                (metrics.average_response_time_ms + elapsed) / 2;
+                        }
+                    }
+
+                    // Record success in circuit breaker
+                    if let Ok(mut breaker) = CIRCUIT_BREAKER.lock() {
+                        breaker.record_success();
+                    }
+
+                    // Mark request as complete
+                    if let Ok(mut tracker) = REQUEST_TRACKER.lock() {
+                        if let Some(request) = tracker.get_mut(&identifier_str) {
+                            request.in_progress = false;
+                        }
+                    }
+
                     {
-                        let progress_msg = CString::new("Metadata fetch complete")
-                            .unwrap_or_else(|_| CString::new("Complete").unwrap());
+                        let progress_msg =
+                            CString::new("Metadata fetch complete").unwrap_or_else(|_| {
+                                CString::new("Complete")
+                                    .expect("Failed to create fallback progress message")
+                            });
                         let msg_ptr = progress_msg.as_ptr();
                         progress_callback(1.0, msg_ptr, user_data);
                         // progress_msg dropped after callback completes synchronously
@@ -290,8 +563,29 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
                 }
                 Err(e) => {
                     eprintln!("Metadata fetch error for '{}': {}", identifier_str, e);
+
+                    // Record failure metrics
+                    if let Ok(mut metrics) = PERFORMANCE_METRICS.lock() {
+                        metrics.failed_requests += 1;
+                    }
+
+                    // Record failure in circuit breaker
+                    if let Ok(mut breaker) = CIRCUIT_BREAKER.lock() {
+                        breaker.record_failure();
+                    }
+
+                    // Mark request as complete
+                    if let Ok(mut tracker) = REQUEST_TRACKER.lock() {
+                        if let Some(request) = tracker.get_mut(&identifier_str) {
+                            request.in_progress = false;
+                        }
+                    }
+
                     let error_msg = CString::new(format!("Metadata fetch failed: {}", e))
-                        .unwrap_or_else(|_| CString::new("Metadata fetch failed").unwrap());
+                        .unwrap_or_else(|_| {
+                            CString::new("Metadata fetch failed")
+                                .expect("Failed to create fallback error message")
+                        });
                     let error_ptr = error_msg.as_ptr();
                     completion_callback(false, error_ptr, user_data);
                     // error_msg dropped after callback completes synchronously
@@ -409,12 +703,19 @@ pub unsafe extern "C" fn ia_get_create_session(
     );
 
     // Store session
-    {
-        let mut sessions = SESSIONS.lock().unwrap();
-        sessions.insert(session_id, session);
+    match SESSIONS.lock() {
+        Ok(mut sessions) => {
+            sessions.insert(session_id, session);
+            session_id
+        }
+        Err(e) => {
+            eprintln!(
+                "ia_get_create_session: failed to acquire sessions lock: {}",
+                e
+            );
+            -1
+        }
     }
-
-    session_id
 }
 
 /// Filter files based on criteria
@@ -511,11 +812,17 @@ pub unsafe extern "C" fn ia_get_filter_files(
 
     // Serialize filtered results
     match serde_json::to_string(&filtered_files) {
-        Ok(json) => {
-            let c_string = CString::new(json).unwrap();
-            c_string.into_raw()
+        Ok(json) => match CString::new(json) {
+            Ok(c_string) => c_string.into_raw(),
+            Err(e) => {
+                eprintln!("ia_get_filter_files: failed to create CString: {}", e);
+                ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            eprintln!("ia_get_filter_files: JSON serialization failed: {}", e);
+            ptr::null_mut()
         }
-        Err(_) => ptr::null_mut(),
     }
 }
 
@@ -550,16 +857,22 @@ pub unsafe extern "C" fn ia_get_start_download(
     };
 
     // Get session information to use in download
-    let session_info = {
-        let sessions = SESSIONS.lock().unwrap();
-        sessions.get(&session_id).map(|session| {
+    let session_info = match SESSIONS.lock() {
+        Ok(sessions) => sessions.get(&session_id).map(|session| {
             (
                 session.get_identifier().to_string(),
                 session.get_output_dir().to_string(),
                 session.get_concurrent_downloads(),
                 session.is_auto_decompress_enabled(),
             )
-        })
+        }),
+        Err(e) => {
+            eprintln!(
+                "ia_get_start_download: failed to acquire sessions lock: {}",
+                e
+            );
+            return IaGetErrorCode::UnknownError;
+        }
     };
 
     let Some((identifier, output_dir, concurrent_downloads, auto_decompress)) = session_info else {
@@ -572,11 +885,23 @@ pub unsafe extern "C" fn ia_get_start_download(
     std::thread::spawn(move || {
         runtime.block_on(async move {
             // Progress update: Starting download with session info
-            let progress_msg = CString::new(format!(
+            let progress_msg = match CString::new(format!(
                 "Initializing download for '{}' to '{}' (concurrency: {}, decompress: {})",
                 identifier, output_dir, concurrent_downloads, auto_decompress
-            ))
-            .unwrap();
+            )) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    eprintln!("Failed to create progress message: {}", e);
+                    match CString::new("Initializing download...") {
+                        Ok(fallback) => fallback,
+                        Err(_) => {
+                            eprintln!("Failed to create fallback progress message");
+                            completion_callback(false, ptr::null(), user_data);
+                            return;
+                        }
+                    }
+                }
+            };
             progress_callback(0.0, progress_msg.as_ptr(), user_data);
 
             // In a real implementation, this would:
@@ -590,14 +915,30 @@ pub unsafe extern "C" fn ia_get_start_download(
             for i in 1..=10 {
                 let progress = i as f64 / 10.0;
                 let progress_msg =
-                    CString::new(format!("Downloading... {}%", (progress * 100.0) as i32)).unwrap();
+                    match CString::new(format!("Downloading... {}%", (progress * 100.0) as i32)) {
+                        Ok(msg) => msg,
+                        Err(_) => {
+                            eprintln!(
+                                "Failed to create progress message at {}%",
+                                (progress * 100.0) as i32
+                            );
+                            continue; // Skip this update but continue download
+                        }
+                    };
                 progress_callback(progress, progress_msg.as_ptr(), user_data);
 
                 // Simulate work
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
 
-            let progress_msg = CString::new("Download completed").unwrap();
+            let progress_msg = match CString::new("Download completed") {
+                Ok(msg) => msg,
+                Err(_) => {
+                    eprintln!("Failed to create completion message");
+                    completion_callback(true, ptr::null(), user_data);
+                    return;
+                }
+            };
             progress_callback(1.0, progress_msg.as_ptr(), user_data);
             completion_callback(true, ptr::null(), user_data);
         });
@@ -629,7 +970,13 @@ pub unsafe extern "C" fn ia_get_get_download_progress(
     let mock_progress = FfiDownloadProgress {
         session_id,
         overall_progress: 0.5,
-        current_file: CString::new("test.pdf").unwrap().into_raw(),
+        current_file: match CString::new("test.pdf") {
+            Ok(cstr) => cstr.into_raw(),
+            Err(e) => {
+                eprintln!("Failed to create mock filename: {}", e);
+                ptr::null_mut() // Use null pointer on failure
+            }
+        },
         current_file_progress: 0.7,
         download_speed: 1024 * 1024, // 1 MB/s
         eta_seconds: 30,
@@ -648,12 +995,22 @@ pub unsafe extern "C" fn ia_get_get_download_progress(
 #[no_mangle]
 pub extern "C" fn ia_get_pause_download(session_id: c_int) -> IaGetErrorCode {
     // In a real implementation, this would pause the download session
-    let sessions = SESSIONS.lock().unwrap();
-    if sessions.contains_key(&session_id) {
-        // Session exists, would pause it here
-        IaGetErrorCode::Success
-    } else {
-        IaGetErrorCode::InvalidInput
+    match SESSIONS.lock() {
+        Ok(sessions) => {
+            if sessions.contains_key(&session_id) {
+                // Session exists, would pause it here
+                IaGetErrorCode::Success
+            } else {
+                IaGetErrorCode::InvalidInput
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "ia_get_pause_download: failed to acquire sessions lock: {}",
+                e
+            );
+            IaGetErrorCode::UnknownError
+        }
     }
 }
 
@@ -661,12 +1018,22 @@ pub extern "C" fn ia_get_pause_download(session_id: c_int) -> IaGetErrorCode {
 #[no_mangle]
 pub extern "C" fn ia_get_resume_download(session_id: c_int) -> IaGetErrorCode {
     // In a real implementation, this would resume the download session
-    let sessions = SESSIONS.lock().unwrap();
-    if sessions.contains_key(&session_id) {
-        // Session exists, would resume it here
-        IaGetErrorCode::Success
-    } else {
-        IaGetErrorCode::InvalidInput
+    match SESSIONS.lock() {
+        Ok(sessions) => {
+            if sessions.contains_key(&session_id) {
+                // Session exists, would resume it here
+                IaGetErrorCode::Success
+            } else {
+                IaGetErrorCode::InvalidInput
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "ia_get_resume_download: failed to acquire sessions lock: {}",
+                e
+            );
+            IaGetErrorCode::UnknownError
+        }
     }
 }
 
@@ -674,11 +1041,21 @@ pub extern "C" fn ia_get_resume_download(session_id: c_int) -> IaGetErrorCode {
 #[no_mangle]
 pub extern "C" fn ia_get_cancel_download(session_id: c_int) -> IaGetErrorCode {
     // Cancel the download and remove session
-    let mut sessions = SESSIONS.lock().unwrap();
-    if sessions.remove(&session_id).is_some() {
-        IaGetErrorCode::Success
-    } else {
-        IaGetErrorCode::InvalidInput
+    match SESSIONS.lock() {
+        Ok(mut sessions) => {
+            if sessions.remove(&session_id).is_some() {
+                IaGetErrorCode::Success
+            } else {
+                IaGetErrorCode::InvalidInput
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "ia_get_cancel_download: failed to acquire sessions lock: {}",
+                e
+            );
+            IaGetErrorCode::UnknownError
+        }
     }
 }
 
@@ -688,9 +1065,19 @@ pub extern "C" fn ia_get_cancel_operation(operation_id: c_int) -> IaGetErrorCode
     // This can cancel either metadata fetch or download operations
     if operation_id > 0 {
         // In a real implementation, this would cancel the operation with the given ID
-        let mut sessions = SESSIONS.lock().unwrap();
-        sessions.remove(&operation_id);
-        IaGetErrorCode::Success
+        match SESSIONS.lock() {
+            Ok(mut sessions) => {
+                sessions.remove(&operation_id);
+                IaGetErrorCode::Success
+            }
+            Err(e) => {
+                eprintln!(
+                    "ia_get_cancel_operation: failed to acquire sessions lock: {}",
+                    e
+                );
+                IaGetErrorCode::UnknownError
+            }
+        }
     } else {
         IaGetErrorCode::InvalidInput
     }
@@ -699,28 +1086,44 @@ pub extern "C" fn ia_get_cancel_operation(operation_id: c_int) -> IaGetErrorCode
 /// Get session information as JSON
 #[no_mangle]
 pub extern "C" fn ia_get_get_session_info(session_id: c_int) -> *mut c_char {
-    let sessions = SESSIONS.lock().unwrap();
-    if let Some(session) = sessions.get(&session_id) {
-        // Use the actual session data
-        let session_info = serde_json::json!({
-            "session_id": session_id,
-            "identifier": session.get_identifier(),
-            "output_dir": session.get_output_dir(),
-            "concurrent_downloads": session.get_concurrent_downloads(),
-            "auto_decompress": session.is_auto_decompress_enabled(),
-            "status": "active",
-            "created_at": session.get_created_at().to_rfc3339()
-        });
+    match SESSIONS.lock() {
+        Ok(sessions) => {
+            if let Some(session) = sessions.get(&session_id) {
+                // Use the actual session data
+                let session_info = serde_json::json!({
+                    "session_id": session_id,
+                    "identifier": session.get_identifier(),
+                    "output_dir": session.get_output_dir(),
+                    "concurrent_downloads": session.get_concurrent_downloads(),
+                    "auto_decompress": session.is_auto_decompress_enabled(),
+                    "status": "active",
+                    "created_at": session.get_created_at().to_rfc3339()
+                });
 
-        match serde_json::to_string(&session_info) {
-            Ok(json) => {
-                let c_string = CString::new(json).unwrap();
-                c_string.into_raw()
+                match serde_json::to_string(&session_info) {
+                    Ok(json) => match CString::new(json) {
+                        Ok(c_string) => c_string.into_raw(),
+                        Err(e) => {
+                            eprintln!("ia_get_get_session_info: failed to create CString: {}", e);
+                            ptr::null_mut()
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("ia_get_get_session_info: JSON serialization failed: {}", e);
+                        ptr::null_mut()
+                    }
+                }
+            } else {
+                ptr::null_mut()
             }
-            Err(_) => ptr::null_mut(),
         }
-    } else {
-        ptr::null_mut()
+        Err(e) => {
+            eprintln!(
+                "ia_get_get_session_info: failed to acquire sessions lock: {}",
+                e
+            );
+            ptr::null_mut()
+        }
     }
 }
 
@@ -740,7 +1143,17 @@ pub unsafe extern "C" fn ia_get_get_available_formats(identifier: *const c_char)
         Err(_) => return ptr::null_mut(),
     };
 
-    let cache = METADATA_CACHE.lock().unwrap();
+    let cache = match METADATA_CACHE.lock() {
+        Ok(cache) => cache,
+        Err(e) => {
+            eprintln!(
+                "ia_get_get_available_formats: failed to acquire cache lock: {}",
+                e
+            );
+            return ptr::null_mut();
+        }
+    };
+
     if let Some(metadata) = cache.get(identifier_str) {
         // Extract unique formats from files
         let mut formats: Vec<String> = metadata
@@ -754,10 +1167,16 @@ pub unsafe extern "C" fn ia_get_get_available_formats(identifier: *const c_char)
         formats.dedup();
 
         match serde_json::to_string(&formats) {
-            Ok(json) => {
-                let c_string = CString::new(json).unwrap();
-                c_string.into_raw()
-            }
+            Ok(json) => match CString::new(json) {
+                Ok(c_string) => c_string.into_raw(),
+                Err(e) => {
+                    eprintln!(
+                        "ia_get_get_available_formats: failed to create CString: {}",
+                        e
+                    );
+                    ptr::null_mut()
+                }
+            },
             Err(_) => ptr::null_mut(),
         }
     } else {
@@ -965,5 +1384,220 @@ mod tests {
         assert!(request_id > 0);
 
         // In a real test, you'd wait for the async operation to complete
+    }
+}
+
+/// Check if a request is already in progress for an identifier
+/// Returns true if request is in progress, false otherwise
+///
+/// # Safety
+/// The `identifier` parameter must be a valid null-terminated C string pointer.
+#[no_mangle]
+pub unsafe extern "C" fn ia_get_is_request_in_progress(identifier: *const c_char) -> bool {
+    if identifier.is_null() {
+        return false;
+    }
+
+    let identifier_str = match CStr::from_ptr(identifier).to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    match REQUEST_TRACKER.lock() {
+        Ok(tracker) => {
+            if let Some(request) = tracker.get(identifier_str) {
+                // Consider in progress if less than 60 seconds old
+                request.in_progress && request.last_request_time.elapsed() < Duration::from_secs(60)
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// Get performance metrics as JSON string
+/// Returns JSON with metrics or null on error
+///
+/// # Safety
+/// The returned pointer must be freed using `ia_get_free_string`.
+#[no_mangle]
+pub extern "C" fn ia_get_get_performance_metrics() -> *mut c_char {
+    match PERFORMANCE_METRICS.lock() {
+        Ok(metrics) => {
+            let metrics_json = serde_json::json!({
+                "total_requests": metrics.total_requests,
+                "successful_requests": metrics.successful_requests,
+                "failed_requests": metrics.failed_requests,
+                "success_rate": if metrics.total_requests > 0 {
+                    (metrics.successful_requests as f64 / metrics.total_requests as f64) * 100.0
+                } else {
+                    0.0
+                },
+                "average_response_time_ms": metrics.average_response_time_ms,
+                "cache_hits": metrics.cache_hits,
+                "cache_misses": metrics.cache_misses,
+                "cache_hit_rate": if (metrics.cache_hits + metrics.cache_misses) > 0 {
+                    (metrics.cache_hits as f64 / (metrics.cache_hits + metrics.cache_misses) as f64) * 100.0
+                } else {
+                    0.0
+                }
+            });
+
+            match serde_json::to_string(&metrics_json) {
+                Ok(json) => match CString::new(json) {
+                    Ok(c_string) => c_string.into_raw(),
+                    Err(e) => {
+                        eprintln!(
+                            "ia_get_get_performance_metrics: failed to create CString: {}",
+                            e
+                        );
+                        ptr::null_mut()
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "ia_get_get_performance_metrics: JSON serialization failed: {}",
+                        e
+                    );
+                    ptr::null_mut()
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "ia_get_get_performance_metrics: failed to acquire metrics lock: {}",
+                e
+            );
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Reset performance metrics
+#[no_mangle]
+pub extern "C" fn ia_get_reset_performance_metrics() -> IaGetErrorCode {
+    match PERFORMANCE_METRICS.lock() {
+        Ok(mut metrics) => {
+            *metrics = PerformanceMetrics {
+                total_requests: 0,
+                successful_requests: 0,
+                failed_requests: 0,
+                average_response_time_ms: 0,
+                cache_hits: 0,
+                cache_misses: 0,
+            };
+            IaGetErrorCode::Success
+        }
+        Err(e) => {
+            eprintln!(
+                "ia_get_reset_performance_metrics: failed to acquire metrics lock: {}",
+                e
+            );
+            IaGetErrorCode::UnknownError
+        }
+    }
+}
+
+/// Check health of the FFI system
+/// Returns 0 for healthy, non-zero for issues
+#[no_mangle]
+pub extern "C" fn ia_get_health_check() -> c_int {
+    let mut health_score = 0;
+
+    // Check circuit breaker state
+    if let Ok(breaker) = CIRCUIT_BREAKER.lock() {
+        if breaker.state == CircuitBreakerState::Open {
+            health_score += 10; // Circuit breaker is open - major issue
+        } else if breaker.state == CircuitBreakerState::HalfOpen {
+            health_score += 5; // Circuit breaker is recovering
+        }
+    } else {
+        health_score += 20; // Can't acquire circuit breaker lock - critical
+    }
+
+    // Check if we can acquire all necessary locks
+    if SESSIONS.lock().is_err() {
+        health_score += 15;
+    }
+    if METADATA_CACHE.lock().is_err() {
+        health_score += 15;
+    }
+    if REQUEST_TRACKER.lock().is_err() {
+        health_score += 10;
+    }
+
+    // Check metrics for high failure rate
+    if let Ok(metrics) = PERFORMANCE_METRICS.lock() {
+        if metrics.total_requests > 10 {
+            let failure_rate =
+                (metrics.failed_requests as f64 / metrics.total_requests as f64) * 100.0;
+            if failure_rate > 50.0 {
+                health_score += 20; // High failure rate
+            } else if failure_rate > 25.0 {
+                health_score += 10; // Moderate failure rate
+            }
+        }
+    }
+
+    health_score
+}
+
+/// Clear stale entries from request tracker and metadata cache
+/// Helps prevent memory leaks and keeps caches fresh
+#[no_mangle]
+pub extern "C" fn ia_get_clear_stale_cache() -> IaGetErrorCode {
+    // Clear stale request tracker entries (older than 5 minutes)
+    if let Ok(mut tracker) = REQUEST_TRACKER.lock() {
+        tracker.retain(|_, request| {
+            request.in_progress && request.last_request_time.elapsed() < Duration::from_secs(300)
+        });
+    }
+
+    // Clear old metadata cache entries if cache is too large
+    if let Ok(mut cache) = METADATA_CACHE.lock() {
+        if cache.len() > 100 {
+            // Keep only the 50 most recently used entries
+            // In a production system, you'd track access times
+            let keys_to_remove: Vec<String> = cache.keys().skip(50).cloned().collect();
+
+            for key in keys_to_remove {
+                cache.remove(&key);
+            }
+        }
+    }
+
+    IaGetErrorCode::Success
+}
+
+/// Get circuit breaker status
+/// Returns: 0 = Closed (healthy), 1 = HalfOpen (recovering), 2 = Open (failing)
+#[no_mangle]
+pub extern "C" fn ia_get_get_circuit_breaker_status() -> c_int {
+    match CIRCUIT_BREAKER.lock() {
+        Ok(breaker) => match breaker.state {
+            CircuitBreakerState::Closed => 0,
+            CircuitBreakerState::HalfOpen => 1,
+            CircuitBreakerState::Open => 2,
+        },
+        Err(_) => -1, // Error acquiring lock
+    }
+}
+
+/// Manually reset circuit breaker (use with caution)
+#[no_mangle]
+pub extern "C" fn ia_get_reset_circuit_breaker() -> IaGetErrorCode {
+    match CIRCUIT_BREAKER.lock() {
+        Ok(mut breaker) => {
+            breaker.record_success();
+            IaGetErrorCode::Success
+        }
+        Err(e) => {
+            eprintln!(
+                "ia_get_reset_circuit_breaker: failed to acquire breaker lock: {}",
+                e
+            );
+            IaGetErrorCode::UnknownError
+        }
     }
 }

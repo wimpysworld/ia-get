@@ -149,15 +149,37 @@ adb logcat | grep -i "ia-get\|JNI\|flutter"
 2. **"identifier is empty"**: Empty string passed to search
 3. **"No metadata cached"**: Metadata fetch hasn't completed yet
 4. **"Metadata fetch timeout"**: Network issue or API unavailable
+5. **"Failed to acquire lock"**: Mutex poisoning or concurrency issue (now handled gracefully)
+
+## Recent Improvements (Latest Update)
+
+### Enhanced Error Resilience
+All critical unwrap() calls that could cause panics have been replaced with proper error handling:
+
+1. **Mutex Lock Handling**: All `.lock().unwrap()` calls now use proper error handling with fallback behaviors
+2. **CString Creation**: Added nested error handling for all CString creation with fallback messages
+3. **Session ID Generation**: Added timestamp-based fallback when mutex lock fails
+4. **UTF-8 Validation**: All string conversions from C to Rust now handle invalid UTF-8 gracefully
+
+### Dart Layer Improvements
+1. **Automatic Retry Logic**: Implemented retry with exponential backoff (up to 3 attempts)
+2. **Input Validation**: Enhanced identifier validation with regex pattern checking
+3. **Better Error Messages**: More descriptive error messages with context
+4. **Improved Timeout Handling**: Better async handling with attempt tracking
+
+### JNI Bridge Improvements
+1. **UTF-8 Safety**: All C string conversions now handle invalid UTF-8 with proper error messages
+2. **Null Pointer Checks**: Enhanced null checking in all callback functions
+3. **Error Logging**: More detailed error messages for debugging Android issues
 
 ## Future Improvements
-While the current fixes address the crash issues, potential enhancements include:
+While the current fixes significantly improve stability, potential enhancements include:
 
 1. **Proper JNI callbacks**: Implement actual callback mechanism from Rust to Kotlin/Java
 2. **Connection state monitoring**: Detect network availability before attempting searches
-3. **Retry logic**: Automatic retry on transient failures
-4. **Caching improvements**: Better metadata cache invalidation
-5. **Progress indicators**: More granular progress reporting in the UI
+3. **Caching improvements**: Better metadata cache invalidation
+4. **Progress indicators**: More granular progress reporting in the UI
+5. **Telemetry**: Add crash reporting and analytics to identify remaining issues
 
 ## References
 - Main FFI implementation: `src/interface/ffi.rs`

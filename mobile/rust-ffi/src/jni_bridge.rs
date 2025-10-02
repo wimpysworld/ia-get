@@ -102,7 +102,13 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
             if message.is_null() {
                 String::new()
             } else {
-                CStr::from_ptr(message).to_str().unwrap_or("").to_string()
+                match CStr::from_ptr(message).to_str() {
+                    Ok(s) => s.to_string(),
+                    Err(e) => {
+                        eprintln!("JNI progress_cb: Invalid UTF-8 in message: {:?}", e);
+                        String::new()
+                    }
+                }
             }
         };
         println!("Progress: {:.1}% - {}", progress * 100.0, msg);
@@ -117,10 +123,13 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
                 if error_message.is_null() {
                     "Unknown error".to_string()
                 } else {
-                    CStr::from_ptr(error_message)
-                        .to_str()
-                        .unwrap_or("Unknown error")
-                        .to_string()
+                    match CStr::from_ptr(error_message).to_str() {
+                        Ok(s) => s.to_string(),
+                        Err(e) => {
+                            eprintln!("JNI completion_cb: Invalid UTF-8 in error message: {:?}", e);
+                            "Unknown error".to_string()
+                        }
+                    }
                 }
             };
             eprintln!("Metadata fetch failed: {}", error);
@@ -284,7 +293,14 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
     let result_str = unsafe {
         let cstr = CStr::from_ptr(result_ptr);
-        cstr.to_str().unwrap_or("")
+        match cstr.to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("JNI filterFiles: Invalid UTF-8 in result: {:?}", e);
+                ia_get_free_string(result_ptr as *mut c_char);
+                return JObject::null().as_raw();
+            }
+        }
     };
 
     match string_to_jstring(&mut env, result_str) {
@@ -453,10 +469,13 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
         if progress.current_file.is_null() {
             "".to_string()
         } else {
-            CStr::from_ptr(progress.current_file)
-                .to_str()
-                .unwrap_or("")
-                .to_string()
+            match CStr::from_ptr(progress.current_file).to_str() {
+                Ok(s) => s.to_string(),
+                Err(e) => {
+                    eprintln!("JNI getDownloadProgress: Invalid UTF-8 in current_file: {:?}", e);
+                    "".to_string()
+                }
+            }
         }
     };
 
