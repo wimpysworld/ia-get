@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/archive_metadata.dart';
 import '../services/ia_get_service.dart';
+import '../screens/file_preview_screen.dart';
 
 class FileListWidget extends StatefulWidget {
   final List<ArchiveFile> files;
@@ -239,6 +240,16 @@ class _FileListWidgetState extends State<FileListWidget> {
         onSelected: (action) => _handleFileAction(file, action),
         itemBuilder: (context) => [
           const PopupMenuItem(
+            value: 'preview',
+            child: Row(
+              children: [
+                Icon(Icons.preview),
+                SizedBox(width: 8),
+                Text('Preview'),
+              ],
+            ),
+          ),
+          const PopupMenuItem(
             value: 'info',
             child: Row(
               children: [
@@ -350,6 +361,9 @@ class _FileListWidgetState extends State<FileListWidget> {
 
   void _handleFileAction(ArchiveFile file, String action) {
     switch (action) {
+      case 'preview':
+        _showFilePreview(file);
+        break;
       case 'info':
         _showFileInfo(file);
         break;
@@ -357,6 +371,15 @@ class _FileListWidgetState extends State<FileListWidget> {
         _showChecksums(file);
         break;
     }
+  }
+
+  void _showFilePreview(ArchiveFile file) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => FilePreviewScreen(file: file),
+      ),
+    );
   }
 
   void _showFileInfo(ArchiveFile file) {

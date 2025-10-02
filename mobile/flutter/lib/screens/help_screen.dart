@@ -201,6 +201,13 @@ class HelpScreen extends StatelessWidget {
                     'Report bugs or request features',
                     'https://github.com/Gameaday/ia-get-cli/issues',
                   ),
+                  _buildLinkItem(
+                    context,
+                    Icons.policy,
+                    'Privacy Policy',
+                    'Read our privacy policy',
+                    'https://github.com/Gameaday/ia-get-cli/blob/main/PRIVACY_POLICY.md',
+                  ),
                 ],
               ),
             ),

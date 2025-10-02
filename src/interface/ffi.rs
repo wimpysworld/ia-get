@@ -298,9 +298,9 @@ pub extern "C" fn ia_get_cleanup() {
 #[no_mangle]
 pub unsafe extern "C" fn ia_get_fetch_metadata(
     identifier: *const c_char,
-    progress_callback: ProgressCallback,
-    completion_callback: CompletionCallback,
-    user_data: usize,
+    _progress_callback: ProgressCallback,
+    _completion_callback: CompletionCallback,
+    _user_data: usize,
 ) -> c_int {
     if identifier.is_null() {
         eprintln!("ia_get_fetch_metadata: identifier is null");
@@ -1597,7 +1597,7 @@ pub unsafe extern "C" fn ia_get_search_archives(
 
     // Execute search
     let search_result = rt_handle.block_on(async {
-        let client = match EnhancedHttpClient::default() {
+        let client = match EnhancedHttpClient::new() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!(
@@ -1608,8 +1608,9 @@ pub unsafe extern "C" fn ia_get_search_archives(
             }
         };
 
-        let mut api_client =
-            crate::infrastructure::api::archive_api::EnhancedArchiveApiClient::new(client);
+        let mut api_client = crate::infrastructure::api::archive_api::EnhancedArchiveApiClient::new(
+            client.client().clone(),
+        );
 
         let rows = if max_results > 0 && max_results <= 100 {
             Some(max_results as u32)
