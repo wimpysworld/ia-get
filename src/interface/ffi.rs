@@ -695,6 +695,7 @@ pub unsafe extern "C" fn ia_get_filter_files(
     include_formats: *const c_char,
     exclude_formats: *const c_char,
     max_size_str: *const c_char,
+    source_types: *const c_char,
 ) -> *mut c_char {
     if metadata_json.is_null() {
         return ptr::null_mut();
@@ -739,8 +740,26 @@ pub unsafe extern "C" fn ia_get_filter_files(
         }
     };
 
+    // Parse source types - comma-separated list of "original", "derivative", "metadata"
+    let source_type_filters: Vec<String> = if source_types.is_null() {
+        Vec::new()
+    } else {
+        match CStr::from_ptr(source_types).to_str() {
+            Ok(s) if !s.is_empty() => s.split(',').map(|s| s.trim().to_lowercase()).collect(),
+            _ => Vec::new(),
+        }
+    };
+
     // Apply filtering logic manually for FFI compatibility
     let mut filtered_files = metadata.files.clone();
+
+    // Filter by source type (only if source types are specified)
+    if !source_type_filters.is_empty() {
+        filtered_files.retain(|file| {
+            let file_source = file.source.to_lowercase();
+            source_type_filters.iter().any(|st| st == &file_source)
+        });
+    }
 
     // Filter by include formats
     if !include_formats.is_empty() {

@@ -55,8 +55,10 @@ class IaGetFFI {
           Pointer<Utf8>,
           Pointer<Utf8>,
           Pointer<Utf8>,
+          Pointer<Utf8>,
         ),
         Pointer<Utf8> Function(
+          Pointer<Utf8>,
           Pointer<Utf8>,
           Pointer<Utf8>,
           Pointer<Utf8>,
@@ -201,6 +203,7 @@ class IaGetFFI {
     String? includeFormats,
     String? excludeFormats,
     String? maxSize,
+    String? sourceTypes,
   ) {
     if (metadataJson.isEmpty) {
       if (kDebugMode) {
@@ -213,6 +216,7 @@ class IaGetFFI {
     final includePtr = includeFormats?.toNativeUtf8() ?? nullptr;
     final excludePtr = excludeFormats?.toNativeUtf8() ?? nullptr;
     final maxSizePtr = maxSize?.toNativeUtf8() ?? nullptr;
+    final sourceTypesPtr = sourceTypes?.toNativeUtf8() ?? nullptr;
 
     try {
       final resultPtr = _iaGetFilterFiles(
@@ -220,6 +224,7 @@ class IaGetFFI {
         includePtr,
         excludePtr,
         maxSizePtr,
+        sourceTypesPtr,
       );
       if (resultPtr == nullptr) {
         if (kDebugMode) {
@@ -252,6 +257,7 @@ class IaGetFFI {
       if (includePtr != nullptr) malloc.free(includePtr);
       if (excludePtr != nullptr) malloc.free(excludePtr);
       if (maxSizePtr != nullptr) malloc.free(maxSizePtr);
+      if (sourceTypesPtr != nullptr) malloc.free(sourceTypesPtr);
     }
   }
 
@@ -753,10 +759,20 @@ class IaGetService extends ChangeNotifier {
       final metadataJson = jsonEncode(_currentMetadata!.toJson());
       final includeFormatsStr = includeFormats?.join(',');
       final excludeFormatsStr = excludeFormats?.join(',');
+      
+      // Build source types string - only include selected types
+      String? sourceTypesStr;
+      if (hasSourceFilter) {
+        List<String> selectedTypes = [];
+        if (includeOriginal) selectedTypes.add('original');
+        if (includeDerivative) selectedTypes.add('derivative');
+        if (includeMetadata) selectedTypes.add('metadata');
+        sourceTypesStr = selectedTypes.isEmpty ? null : selectedTypes.join(',');
+      }
 
       if (kDebugMode) {
         print(
-          'Filtering files - include: $includeFormatsStr, exclude: $excludeFormatsStr, maxSize: $maxSize',
+          'Filtering files - include: $includeFormatsStr, exclude: $excludeFormatsStr, maxSize: $maxSize, sourceTypes: $sourceTypesStr',
         );
         print(
           'Source filters - original: $includeOriginal, derivative: $includeDerivative, metadata: $includeMetadata',
@@ -769,40 +785,15 @@ class IaGetService extends ChangeNotifier {
         includeFormatsStr,
         excludeFormatsStr,
         maxSize,
+        sourceTypesStr,
       );
 
       if (filteredJson != null && filteredJson.isNotEmpty) {
         try {
           final filteredList = jsonDecode(filteredJson) as List<dynamic>;
-          var files = filteredList
+          final files = filteredList
               .map((json) => ArchiveFile.fromJson(json as Map<String, dynamic>))
               .toList();
-
-          // Apply source type filtering on the Dart side only if source field exists
-          if (hasSourceFilter && hasSourceField) {
-            files = files.where((file) {
-              final source = file.source?.toLowerCase() ?? '';
-              // Treat empty/null source as original (most common case in IA)
-              if (source == '' || source == 'original') return includeOriginal;
-              if (source == 'derivative') return includeDerivative;
-              if (source == 'metadata') return includeMetadata;
-              // Include files with unknown source types by default to avoid hiding content
-              return true;
-            }).toList();
-
-            if (kDebugMode) {
-              print(
-                'Applied source type filtering: ${files.length} files after filter',
-              );
-            }
-          } else if (hasSourceFilter && !hasSourceField) {
-            // If source filter is active but archive has no source field, warn user
-            if (kDebugMode) {
-              print(
-                'Source type filter active but archive has no source field - ignoring source filter',
-              );
-            }
-          }
 
           _filteredFiles = files;
           _error = null; // Clear any previous errors

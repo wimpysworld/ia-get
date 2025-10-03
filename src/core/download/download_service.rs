@@ -74,7 +74,7 @@ impl Default for DownloadRequest {
             preserve_mtime: true,
             verbose: false,
             resume: true,
-            source_types: vec![SourceType::Original], // Default to original files only
+            source_types: Vec::new(), // Default to no filtering - all source types allowed
         }
     }
 }
@@ -487,13 +487,15 @@ impl DownloadService {
         files
             .iter()
             .filter(|file| {
-                // Apply source type filter
-                let file_source = &file.source;
-                let source_matches = source_types
-                    .iter()
-                    .any(|source_type| source_type.matches(file_source));
-                if !source_matches {
-                    return false;
+                // Apply source type filter only if source types are specified
+                if !source_types.is_empty() {
+                    let file_source = &file.source;
+                    let source_matches = source_types
+                        .iter()
+                        .any(|source_type| source_type.matches(file_source));
+                    if !source_matches {
+                        return false;
+                    }
                 }
 
                 // Apply include format filter

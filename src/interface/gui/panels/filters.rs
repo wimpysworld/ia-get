@@ -43,7 +43,7 @@ pub struct FiltersPanel {
 impl FiltersPanel {
     pub fn new() -> Self {
         Self {
-            include_original: true, // Default to including original files
+            include_original: false, // Default to no filtering
             include_derivative: false,
             include_metadata: false,
             ..Default::default()
@@ -190,7 +190,16 @@ impl FiltersPanel {
 
         // Source type filtering
         ui.group(|ui| {
-            ui.label("Source Types");
+            let source_count = [
+                self.include_original,
+                self.include_derivative,
+                self.include_metadata,
+            ]
+            .iter()
+            .filter(|&&x| x)
+            .count();
+
+            ui.label(format!("Source Types ({})", source_count));
             ui.label("Select which types of files to include:");
 
             ui.horizontal(|ui| {
@@ -255,11 +264,11 @@ impl FiltersPanel {
                 && self.exclude_formats.is_empty()
                 && self.min_file_size.is_empty()
                 && self.max_file_size.is_empty()
-                && self.include_original
+                && !self.include_original
                 && !self.include_derivative
                 && !self.include_metadata
             {
-                ui.label("Default filters: original files only");
+                ui.label("Default filters: no filters applied");
             }
         });
     }
@@ -276,10 +285,7 @@ impl FiltersPanel {
         if self.include_metadata {
             source_types.push(SourceType::Metadata);
         }
-        // Default to original if none selected
-        if source_types.is_empty() {
-            source_types.push(SourceType::Original);
-        }
+        // Return empty vector if none selected - this means no filtering
         source_types
     }
 
