@@ -6,12 +6,18 @@ class FiltersScreen extends StatefulWidget {
   final List<String> initialIncludeFormats;
   final List<String> initialExcludeFormats;
   final String? initialMaxSize;
+  final bool initialIncludeOriginal;
+  final bool initialIncludeDerivative;
+  final bool initialIncludeMetadata;
 
   const FiltersScreen({
     super.key,
     this.initialIncludeFormats = const [],
     this.initialExcludeFormats = const [],
     this.initialMaxSize,
+    this.initialIncludeOriginal = true,
+    this.initialIncludeDerivative = true,
+    this.initialIncludeMetadata = true,
   });
 
   @override
@@ -41,6 +47,9 @@ class _FiltersScreenState extends State<FiltersScreen> {
     _selectedIncludeFormats = List.from(widget.initialIncludeFormats);
     _selectedExcludeFormats = List.from(widget.initialExcludeFormats);
     _maxSize = widget.initialMaxSize;
+    _includeOriginal = widget.initialIncludeOriginal;
+    _includeDerivative = widget.initialIncludeDerivative;
+    _includeMetadata = widget.initialIncludeMetadata;
     
     // Load available formats from the current archive
     WidgetsBinding.instance.addPostFrameCallback((_) {

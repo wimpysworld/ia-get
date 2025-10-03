@@ -14,6 +14,9 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
   List<String> _selectedIncludeFormats = [];
   List<String> _selectedExcludeFormats = [];
   String? _maxSize;
+  bool _includeOriginal = true;
+  bool _includeDerivative = true;
+  bool _includeMetadata = true;
 
   @override
   Widget build(BuildContext context) {
@@ -93,7 +96,10 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
   bool _hasActiveFilters() {
     return _selectedIncludeFormats.isNotEmpty ||
            _selectedExcludeFormats.isNotEmpty ||
-           _maxSize != null;
+           _maxSize != null ||
+           !_includeOriginal ||
+           !_includeDerivative ||
+           !_includeMetadata;
   }
 
   int _getActiveFilterCount() {
@@ -101,11 +107,20 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
     if (_selectedIncludeFormats.isNotEmpty) count++;
     if (_selectedExcludeFormats.isNotEmpty) count++;
     if (_maxSize != null) count++;
+    if (!_includeOriginal || !_includeDerivative || !_includeMetadata) count++;
     return count;
   }
 
   String _getFilterSummary() {
     final parts = <String>[];
+    
+    if (!_includeOriginal || !_includeDerivative || !_includeMetadata) {
+      final sourceTypes = <String>[];
+      if (_includeOriginal) sourceTypes.add('O');
+      if (_includeDerivative) sourceTypes.add('D');
+      if (_includeMetadata) sourceTypes.add('M');
+      parts.add('Source: ${sourceTypes.join(",")}');
+    }
     
     if (_selectedIncludeFormats.isNotEmpty) {
       parts.add('Include: ${_selectedIncludeFormats.take(2).join(", ")}${_selectedIncludeFormats.length > 2 ? "..." : ""}');
@@ -130,6 +145,9 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
           initialIncludeFormats: _selectedIncludeFormats,
           initialExcludeFormats: _selectedExcludeFormats,
           initialMaxSize: _maxSize,
+          initialIncludeOriginal: _includeOriginal,
+          initialIncludeDerivative: _includeDerivative,
+          initialIncludeMetadata: _includeMetadata,
         ),
       ),
     );
@@ -140,6 +158,9 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
         _selectedIncludeFormats = List<String>.from(result['includeFormats'] ?? []);
         _selectedExcludeFormats = List<String>.from(result['excludeFormats'] ?? []);
         _maxSize = result['maxSize'] as String?;
+        _includeOriginal = result['includeOriginal'] as bool? ?? true;
+        _includeDerivative = result['includeDerivative'] as bool? ?? true;
+        _includeMetadata = result['includeMetadata'] as bool? ?? true;
       });
     }
   }

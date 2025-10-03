@@ -488,11 +488,15 @@ class IaGetService extends ChangeNotifier {
       } catch (e, stackTrace) {
         retryCount++;
         
-        // Show suggestions after first or second failure (not after all retries)
-        if (retryCount >= 2 && _suggestions.isEmpty) {
+        // Show suggestions after first failure (immediately)
+        if (retryCount >= 1 && _suggestions.isEmpty) {
           if (kDebugMode) {
             print('Metadata fetch failed after $retryCount attempts. Searching for similar archives...');
           }
+          
+          // Check if the identifier contains uppercase letters - IA identifiers are typically lowercase
+          final hasUpperCase = trimmedIdentifier != trimmedIdentifier.toLowerCase();
+          final lowercaseIdentifier = trimmedIdentifier.toLowerCase();
           
           // Attempt to search for similar archives in background
           try {
@@ -512,18 +516,54 @@ class IaGetService extends ChangeNotifier {
                   };
                 }).toList();
                 
+                // If identifier had uppercase, suggest lowercase version as first option
+                if (hasUpperCase && lowercaseIdentifier != trimmedIdentifier) {
+                  // Insert lowercase suggestion at the beginning
+                  _suggestions.insert(0, {
+                    'identifier': lowercaseIdentifier,
+                    'title': 'Try lowercase: $lowercaseIdentifier',
+                  });
+                }
+                
                 // Show suggestions while continuing to try
                 if (retryCount < maxRetries) {
-                  _error = 'Still searching... See suggestions below while we continue.';
+                  _error = hasUpperCase 
+                      ? 'Archive identifiers are usually lowercase. See suggestions below while we continue searching.'
+                      : 'Still searching... See suggestions below while we continue.';
                 }
                 
                 // Notify to show suggestions immediately
                 notifyListeners();
+              } else if (hasUpperCase) {
+                // No search results but has uppercase - suggest lowercase anyway
+                _suggestions = [{
+                  'identifier': lowercaseIdentifier,
+                  'title': 'Try lowercase: $lowercaseIdentifier',
+                }];
+                _error = 'Archive identifiers are usually lowercase. Try the suggestion below.';
+                notifyListeners();
               }
+            } else if (hasUpperCase) {
+              // Search failed but has uppercase - suggest lowercase anyway
+              _suggestions = [{
+                'identifier': lowercaseIdentifier,
+                'title': 'Try lowercase: $lowercaseIdentifier',
+              }];
+              _error = 'Archive identifiers are usually lowercase. Try the suggestion below.';
+              notifyListeners();
             }
           } catch (searchError) {
             if (kDebugMode) {
               print('Search for similar archives failed: $searchError');
+            }
+            // Even if search fails, suggest lowercase if applicable
+            if (hasUpperCase) {
+              _suggestions = [{
+                'identifier': lowercaseIdentifier,
+                'title': 'Try lowercase: $lowercaseIdentifier',
+              }];
+              _error = 'Archive identifiers are usually lowercase. Try the suggestion below.';
+              notifyListeners();
             }
           }
         }
@@ -648,10 +688,12 @@ class IaGetService extends ChangeNotifier {
           if (hasSourceFilter) {
             files = files.where((file) {
               final source = file.source?.toLowerCase() ?? '';
-              if (source == 'original' || source == '') return includeOriginal;
+              // Treat empty/null source as original (most common case in IA)
+              if (source == '' || source == 'original') return includeOriginal;
               if (source == 'derivative') return includeDerivative;
               if (source == 'metadata') return includeMetadata;
-              return true; // Include unknown source types by default
+              // Include files with unknown source types by default to avoid hiding content
+              return true;
             }).toList();
           }
           

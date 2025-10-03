@@ -164,38 +164,49 @@ class _HomeScreenState extends State<HomeScreen> {
 
               // Search suggestions
               if (service.suggestions.isNotEmpty)
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(16),
-                  margin: const EdgeInsets.symmetric(horizontal: 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Did you mean:',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.grey.shade700,
+                Expanded(
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(16),
+                    margin: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Did you mean:',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.grey.shade700,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 12),
-                      ...service.suggestions.map((suggestion) {
-                        return Card(
-                          margin: const EdgeInsets.only(bottom: 8),
-                          child: ListTile(
-                            leading: const Icon(Icons.archive),
-                            title: Text(suggestion['title']!),
-                            subtitle: Text(suggestion['identifier']!),
-                            trailing: const Icon(Icons.arrow_forward),
-                            onTap: () {
-                              // Fetch metadata for the suggested archive
-                              service.fetchMetadata(suggestion['identifier']!);
+                        const SizedBox(height: 12),
+                        Expanded(
+                          child: ListView.builder(
+                            shrinkWrap: true,
+                            itemCount: service.suggestions.length,
+                            itemBuilder: (context, index) {
+                              final suggestion = service.suggestions[index];
+                              return Card(
+                                margin: const EdgeInsets.only(bottom: 8),
+                                child: ListTile(
+                                  leading: const Icon(Icons.archive),
+                                  title: Text(suggestion['title']!),
+                                  subtitle: Text(suggestion['identifier']!),
+                                  trailing: const Icon(Icons.arrow_forward),
+                                  onTap: () {
+                                    // Reset circuit breaker before fetching
+                                    service.resetCircuitBreaker();
+                                    // Fetch metadata for the suggested archive
+                                    service.fetchMetadata(suggestion['identifier']!);
+                                  },
+                                ),
+                              );
                             },
                           ),
-                        );
-                      }),
-                    ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
 
@@ -238,10 +249,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                 ),
-                
-              // Spacer to push suggestions up when present
-              if (service.suggestions.isNotEmpty || service.error != null)
-                const Spacer(),
                 
               // Active downloads manager at bottom
               const DownloadManagerWidget(),

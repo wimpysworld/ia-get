@@ -522,6 +522,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
       );
       
       if (downloadId != null) {
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Download started: ${files.length} files'),
@@ -535,16 +536,62 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
                 );
               },
             ),
+            duration: const Duration(seconds: 3),
           ),
         );
       } else {
-        throw Exception('Failed to start download');
+        throw Exception('Failed to start download - native download service may not be initialized');
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Download failed: $e'),
-          backgroundColor: Colors.red,
+      if (!mounted) return;
+      
+      // Show more helpful error message
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.error_outline, color: Colors.red),
+              SizedBox(width: 8),
+              Text('Download Failed'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Unable to start download. This could be due to:',
+                style: TextStyle(fontWeight: FontWeight.w500),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                '• Background download service not available\n'
+                '• Missing storage permissions\n'
+                '• Network connectivity issues\n'
+                '• Invalid download path',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.grey.shade700,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Technical details: $e',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey.shade600,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('OK'),
+            ),
+          ],
         ),
       );
     }

@@ -15,73 +15,79 @@ class _DownloadScreenState extends State<DownloadScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Downloads'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.clear_all),
-            onPressed: _activeDownloads.isEmpty ? null : _clearAllDownloads,
-          ),
-        ],
-      ),
-      body: _activeDownloads.isEmpty && _completedDownloads.isEmpty
-          ? const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
+    return WillPopScope(
+      onWillPop: () async {
+        // Always allow back navigation
+        return true;
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Downloads'),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.clear_all),
+              onPressed: _activeDownloads.isEmpty ? null : _clearAllDownloads,
+            ),
+          ],
+        ),
+        body: _activeDownloads.isEmpty && _completedDownloads.isEmpty
+            ? const Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.download_done,
+                      size: 64,
+                      color: Colors.grey,
+                    ),
+                    SizedBox(height: 16),
+                    Text(
+                      'No downloads yet',
+                      style: TextStyle(
+                        fontSize: 16,
+                        color: Colors.grey,
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      'Start downloading files from the main screen',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey,
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            : ListView(
+                padding: const EdgeInsets.all(16),
                 children: [
-                  Icon(
-                    Icons.download_done,
-                    size: 64,
-                    color: Colors.grey,
-                  ),
-                  SizedBox(height: 16),
-                  Text(
-                    'No downloads yet',
-                    style: TextStyle(
-                      fontSize: 16,
-                      color: Colors.grey,
+                  if (_activeDownloads.isNotEmpty) ...[
+                    const Text(
+                      'Active Downloads',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
-                  ),
-                  SizedBox(height: 8),
-                  Text(
-                    'Start downloading files from the main screen',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.grey,
+                    const SizedBox(height: 8),
+                    ..._activeDownloads.map(_buildActiveDownloadCard),
+                    const SizedBox(height: 24),
+                  ],
+                  if (_completedDownloads.isNotEmpty) ...[
+                    const Text(
+                      'Completed Downloads',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
-                  ),
+                    const SizedBox(height: 8),
+                    ..._completedDownloads.map(_buildCompletedDownloadCard),
+                  ],
                 ],
               ),
-            )
-          : ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                if (_activeDownloads.isNotEmpty) ...[
-                  const Text(
-                    'Active Downloads',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  ..._activeDownloads.map(_buildActiveDownloadCard),
-                  const SizedBox(height: 24),
-                ],
-                if (_completedDownloads.isNotEmpty) ...[
-                  const Text(
-                    'Completed Downloads',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  ..._completedDownloads.map(_buildCompletedDownloadCard),
-                ],
-              ],
-            ),
+      ),
     );
   }
 
