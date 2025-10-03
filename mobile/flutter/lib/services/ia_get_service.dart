@@ -504,8 +504,8 @@ class IaGetService extends ChangeNotifier {
               if (docs != null && docs.isNotEmpty) {
                 // Store suggestions for display
                 _suggestions = docs.take(5).map((doc) {
-                  final id = doc['identifier'] ?? 'unknown';
-                  final title = doc['title'] ?? id;
+                  final id = (doc['identifier'] ?? 'unknown').toString();
+                  final title = (doc['title'] ?? id).toString();
                   return {
                     'identifier': id,
                     'title': title,
