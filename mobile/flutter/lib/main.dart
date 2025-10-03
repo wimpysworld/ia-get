@@ -12,7 +12,7 @@ import 'utils/permission_utils.dart';
 void main() async {
   // Ensure Flutter is initialized
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   // Set preferred orientations for mobile optimization
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
@@ -20,7 +20,7 @@ void main() async {
     DeviceOrientation.landscapeLeft,
     DeviceOrientation.landscapeRight,
   ]);
-  
+
   // Configure system UI for immersive experience
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
@@ -30,7 +30,7 @@ void main() async {
       systemNavigationBarIconBrightness: Brightness.dark,
     ),
   );
-  
+
   runApp(const IAGetMobileApp());
 }
 
@@ -61,18 +61,20 @@ class IAGetMobileApp extends StatelessWidget {
         themeMode: ThemeMode.system,
         home: const AppInitializer(),
         debugShowCheckedModeBanner: false,
-        
+
         // Performance optimizations
         builder: (context, child) {
           // Disable text scaling for consistent UI
           return MediaQuery(
             data: MediaQuery.of(context).copyWith(
-              textScaleFactor: MediaQuery.of(context).textScaleFactor.clamp(0.8, 1.2),
+              textScaleFactor: MediaQuery.of(
+                context,
+              ).textScaleFactor.clamp(0.8, 1.2),
             ),
             child: child!,
           );
         },
-        
+
         // Navigation performance
         onGenerateRoute: (settings) {
           // Implement custom route generation for better performance
@@ -115,15 +117,15 @@ class _AppInitializerState extends State<AppInitializer> {
   void initState() {
     super.initState();
     _checkOnboardingStatus();
-    
+
     // Initialize background download service
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<BackgroundDownloadService>().initialize();
-      
+
       // Initialize deep link service
       final deepLinkService = context.read<DeepLinkService>();
       deepLinkService.initialize();
-      
+
       // Handle incoming archive links
       deepLinkService.onArchiveLinkReceived = (identifier) {
         // Navigate to home and trigger search
@@ -132,19 +134,19 @@ class _AppInitializerState extends State<AppInitializer> {
           iaGetService.fetchMetadata(identifier);
         }
       };
-      
+
       // Request notification permissions (non-blocking, Android 13+)
       _requestNotificationPermissions();
     });
   }
-  
+
   /// Request notification permissions for download notifications
   Future<void> _requestNotificationPermissions() async {
     try {
       // Check if already granted
       final hasPermission = await PermissionUtils.hasNotificationPermissions();
       if (hasPermission) return;
-      
+
       // Request permission (will be silently skipped on older Android versions)
       await PermissionUtils.requestNotificationPermissions();
     } catch (e) {

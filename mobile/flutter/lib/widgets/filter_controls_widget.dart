@@ -38,7 +38,7 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
                   ),
                 ),
               ),
-              
+
               // Badge showing active filter count
               if (_hasActiveFilters())
                 Positioned(
@@ -72,18 +72,15 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
                 ),
             ],
           ),
-          
+
           const SizedBox(width: 8),
-          
+
           // Active filters summary
           if (_hasActiveFilters())
             Expanded(
               child: Text(
                 _getFilterSummary(),
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Colors.grey.shade600,
-                ),
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -95,11 +92,11 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
 
   bool _hasActiveFilters() {
     return _selectedIncludeFormats.isNotEmpty ||
-           _selectedExcludeFormats.isNotEmpty ||
-           _maxSize != null ||
-           !_includeOriginal ||
-           !_includeDerivative ||
-           !_includeMetadata;
+        _selectedExcludeFormats.isNotEmpty ||
+        _maxSize != null ||
+        !_includeOriginal ||
+        !_includeDerivative ||
+        !_includeMetadata;
   }
 
   int _getActiveFilterCount() {
@@ -113,7 +110,7 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
 
   String _getFilterSummary() {
     final parts = <String>[];
-    
+
     if (!_includeOriginal || !_includeDerivative || !_includeMetadata) {
       final sourceTypes = <String>[];
       if (_includeOriginal) sourceTypes.add('O');
@@ -121,19 +118,23 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
       if (_includeMetadata) sourceTypes.add('M');
       parts.add('Source: ${sourceTypes.join(",")}');
     }
-    
+
     if (_selectedIncludeFormats.isNotEmpty) {
-      parts.add('Include: ${_selectedIncludeFormats.take(2).join(", ")}${_selectedIncludeFormats.length > 2 ? "..." : ""}');
+      parts.add(
+        'Include: ${_selectedIncludeFormats.take(2).join(", ")}${_selectedIncludeFormats.length > 2 ? "..." : ""}',
+      );
     }
-    
+
     if (_selectedExcludeFormats.isNotEmpty) {
-      parts.add('Exclude: ${_selectedExcludeFormats.take(2).join(", ")}${_selectedExcludeFormats.length > 2 ? "..." : ""}');
+      parts.add(
+        'Exclude: ${_selectedExcludeFormats.take(2).join(", ")}${_selectedExcludeFormats.length > 2 ? "..." : ""}',
+      );
     }
-    
+
     if (_maxSize != null) {
       parts.add('Max: $_maxSize');
     }
-    
+
     return parts.join(' • ');
   }
 
@@ -151,12 +152,16 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
         ),
       ),
     );
-    
+
     // Update local state with returned filter values
     if (result != null && mounted) {
       setState(() {
-        _selectedIncludeFormats = List<String>.from(result['includeFormats'] ?? []);
-        _selectedExcludeFormats = List<String>.from(result['excludeFormats'] ?? []);
+        _selectedIncludeFormats = List<String>.from(
+          result['includeFormats'] ?? [],
+        );
+        _selectedExcludeFormats = List<String>.from(
+          result['excludeFormats'] ?? [],
+        );
         _maxSize = result['maxSize'] as String?;
         _includeOriginal = result['includeOriginal'] as bool? ?? true;
         _includeDerivative = result['includeDerivative'] as bool? ?? true;

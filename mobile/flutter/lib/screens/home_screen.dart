@@ -17,39 +17,41 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   bool _hasNavigated = false;
-  
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<IaGetService>().initialize();
-      
+
       // Listen for metadata changes to navigate to detail screen
       context.read<IaGetService>().addListener(_onServiceChanged);
     });
   }
-  
+
   @override
   void dispose() {
     context.read<IaGetService>().removeListener(_onServiceChanged);
     super.dispose();
   }
-  
+
   void _onServiceChanged() {
     final service = context.read<IaGetService>();
-    
+
     // Navigate to detail screen when metadata is loaded (only once)
     if (service.currentMetadata != null && mounted && !_hasNavigated) {
       _hasNavigated = true;
-      
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (context) => const ArchiveDetailScreen(),
-        ),
-      ).then((_) {
-        // Reset flag when returning from detail screen
-        _hasNavigated = false;
-      });
+
+      Navigator.of(context)
+          .push(
+            MaterialPageRoute(
+              builder: (context) => const ArchiveDetailScreen(),
+            ),
+          )
+          .then((_) {
+            // Reset flag when returning from detail screen
+            _hasNavigated = false;
+          });
     } else if (service.currentMetadata == null) {
       // Reset flag when metadata is cleared
       _hasNavigated = false;
@@ -110,7 +112,7 @@ class _HomeScreenState extends State<HomeScreen> {
             children: [
               // Search bar
               const SearchBarWidget(),
-              
+
               // Error display with circuit breaker reset option
               if (service.error != null)
                 Container(
@@ -147,7 +149,9 @@ class _HomeScreenState extends State<HomeScreen> {
                               service.resetCircuitBreaker();
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
-                                  content: Text('Service reset. You can try searching again.'),
+                                  content: Text(
+                                    'Service reset. You can try searching again.',
+                                  ),
                                 ),
                               );
                             },
@@ -198,7 +202,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                     // Reset circuit breaker before fetching
                                     service.resetCircuitBreaker();
                                     // Fetch metadata for the suggested archive
-                                    service.fetchMetadata(suggestion['identifier']!);
+                                    service.fetchMetadata(
+                                      suggestion['identifier']!,
+                                    );
                                   },
                                 ),
                               );
@@ -211,12 +217,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
 
               // Loading indicator
-              if (service.isLoading)
-                const LinearProgressIndicator(),
+              if (service.isLoading) const LinearProgressIndicator(),
 
               // Empty state when not loading and no metadata
-              if (!service.isLoading && 
-                  service.currentMetadata == null && 
+              if (!service.isLoading &&
+                  service.currentMetadata == null &&
                   service.suggestions.isEmpty &&
                   service.error == null)
                 Expanded(
@@ -249,7 +254,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                 ),
-                
+
               // Active downloads manager at bottom
               const DownloadManagerWidget(),
             ],

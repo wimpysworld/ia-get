@@ -32,7 +32,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
     final concurrent = await SettingsScreen.getConcurrentDownloads();
     final decompress = await SettingsScreen.getAutoDecompress();
     final verify = await SettingsScreen.getVerifyChecksums();
-    
+
     if (mounted) {
       setState(() {
         _outputPath = outputPath;
@@ -47,7 +47,9 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
   Widget build(BuildContext context) {
     return Consumer<IaGetService>(
       builder: (context, service, child) {
-        final selectedFiles = service.filteredFiles.where((f) => f.selected).toList();
+        final selectedFiles = service.filteredFiles
+            .where((f) => f.selected)
+            .toList();
         final canDownload = selectedFiles.isNotEmpty;
         final totalSize = service.calculateTotalSize(selectedFiles);
 
@@ -55,10 +57,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.surface,
             border: Border(
-              top: BorderSide(
-                color: Colors.grey.shade300,
-                width: 1,
-              ),
+              top: BorderSide(color: Colors.grey.shade300, width: 1),
             ),
           ),
           child: Column(
@@ -119,9 +118,11 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
                   child: ElevatedButton.icon(
                     onPressed: canDownload ? _performDownload : null,
                     icon: const Icon(Icons.download),
-                    label: Text(canDownload 
-                        ? 'Download ${selectedFiles.length} File${selectedFiles.length == 1 ? '' : 's'}'
-                        : 'Select Files to Download'),
+                    label: Text(
+                      canDownload
+                          ? 'Download ${selectedFiles.length} File${selectedFiles.length == 1 ? '' : 's'}'
+                          : 'Select Files to Download',
+                    ),
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 16),
                     ),
@@ -160,13 +161,10 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
                 ),
               ),
               const SizedBox(height: 16),
-              
+
               const Text(
                 'Download Settings',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 24),
 
@@ -223,7 +221,9 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
               // Auto decompress
               SwitchListTile(
                 title: const Text('Auto-decompress archives'),
-                subtitle: const Text('Automatically extract ZIP, TAR, and other archives'),
+                subtitle: const Text(
+                  'Automatically extract ZIP, TAR, and other archives',
+                ),
                 value: _autoDecompress,
                 onChanged: (value) {
                   setState(() {
@@ -235,7 +235,9 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
               // Verify checksums
               SwitchListTile(
                 title: const Text('Verify file checksums'),
-                subtitle: const Text('Verify MD5/SHA1 checksums after download'),
+                subtitle: const Text(
+                  'Verify MD5/SHA1 checksums after download',
+                ),
                 value: _verifyChecksums,
                 onChanged: (value) {
                   setState(() {
@@ -245,7 +247,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
               ),
 
               const SizedBox(height: 24),
-              
+
               // Close button
               SizedBox(
                 width: double.infinity,
@@ -264,36 +266,37 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
   void _performDownload() async {
     final service = context.read<IaGetService>();
     final downloadService = context.read<BackgroundDownloadService>();
-    final selectedFiles = service.filteredFiles.where((f) => f.selected).toList();
-    
+    final selectedFiles = service.filteredFiles
+        .where((f) => f.selected)
+        .toList();
+
     if (service.currentMetadata == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No archive metadata available')),
       );
       return;
     }
-    
+
     if (selectedFiles.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please select files to download'),
-        ),
+        const SnackBar(content: Text('Please select files to download')),
       );
       return;
     }
-    
+
     // Check and request storage permissions first
     final hasPermission = await PermissionUtils.hasStoragePermissions();
-    
+
     if (!hasPermission) {
       // Show rationale before requesting permission
       final shouldRequest = await PermissionUtils.showPermissionRationaleDialog(
         context: context,
         title: 'Storage Permission Required',
-        message: 'This app needs storage permission to download and save files from the Internet Archive. '
-                 'Your files will be saved to the Download folder.',
+        message:
+            'This app needs storage permission to download and save files from the Internet Archive. '
+            'Your files will be saved to the Download folder.',
       );
-      
+
       if (!shouldRequest) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -304,41 +307,42 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
         );
         return;
       }
-      
+
       // Request storage permissions
       final granted = await PermissionUtils.requestStoragePermissions();
-      
+
       if (!granted) {
         if (!mounted) return;
-        
+
         // Show settings dialog if permission was denied
         await PermissionUtils.showSettingsDialog(
           context: context,
-          message: 'Storage permission is required to download files. '
-                   'Please enable it in app settings to continue.',
+          message:
+              'Storage permission is required to download files. '
+              'Please enable it in app settings to continue.',
         );
         return;
       }
     }
-    
+
     // Calculate total download size
     final totalSize = selectedFiles.fold<int>(
-      0, 
+      0,
       (sum, file) => sum + (file.size ?? 0),
     );
-    
+
     // Check disk space before starting download
     final hasSufficientSpace = await FileUtils.hasSufficientSpace(
-      _outputPath, 
+      _outputPath,
       totalSize,
     );
-    
+
     if (hasSufficientSpace == false) {
       // Insufficient disk space - show error dialog
       final availableSpace = await FileUtils.getAvailableSpace(_outputPath);
       final requiredSpace = FileUtils.getRequiredSpaceWithMargin(totalSize);
       final shortage = requiredSpace - (availableSpace ?? 0);
-      
+
       if (!mounted) return;
       showDialog(
         context: context,
@@ -356,23 +360,22 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
             children: [
               Text(
                 'Not enough disk space available for this download.',
-                style: TextStyle(
-                  color: Colors.grey.shade700,
-                  fontSize: 14,
-                ),
+                style: TextStyle(color: Colors.grey.shade700, fontSize: 14),
               ),
               const SizedBox(height: 16),
               _buildSpaceInfoRow(
-                'Required:', 
+                'Required:',
                 _formatSize(requiredSpace),
                 color: Colors.red.shade700,
               ),
               _buildSpaceInfoRow(
-                'Available:', 
-                availableSpace != null ? _formatSize(availableSpace) : 'Unknown',
+                'Available:',
+                availableSpace != null
+                    ? _formatSize(availableSpace)
+                    : 'Unknown',
               ),
               _buildSpaceInfoRow(
-                'Shortage:', 
+                'Shortage:',
                 _formatSize(shortage),
                 color: Colors.orange.shade700,
               ),
@@ -397,7 +400,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
       );
       return;
     }
-    
+
     try {
       // Start background download
       final downloadId = await downloadService.startBackgroundDownload(
@@ -408,12 +411,14 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
         excludeFormats: null,
         maxSize: null,
       );
-      
+
       if (downloadId != null) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Download started: ${selectedFiles.length} file${selectedFiles.length == 1 ? '' : 's'}'),
+            content: Text(
+              'Download started: ${selectedFiles.length} file${selectedFiles.length == 1 ? '' : 's'}',
+            ),
             action: SnackBarAction(
               label: 'View',
               onPressed: () {
@@ -428,11 +433,13 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
           ),
         );
       } else {
-        throw Exception('Failed to start download - native download service may not be initialized');
+        throw Exception(
+          'Failed to start download - native download service may not be initialized',
+        );
       }
     } catch (e) {
       if (!mounted) return;
-      
+
       // Show more helpful error message with actionable steps
       showDialog(
         context: context,
@@ -458,10 +465,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
                 '• Missing storage permissions (check Settings)\n'
                 '• Network connectivity issues\n'
                 '• Invalid download path',
-                style: TextStyle(
-                  fontSize: 14,
-                  color: Colors.grey.shade700,
-                ),
+                style: TextStyle(fontSize: 14, color: Colors.grey.shade700),
               ),
               const SizedBox(height: 12),
               Container(
@@ -473,9 +477,10 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
                 ),
                 child: Row(
                   children: [
-                    Icon(Icons.info_outline, 
-                      size: 20, 
-                      color: Colors.orange.shade700
+                    Icon(
+                      Icons.info_outline,
+                      size: 20,
+                      color: Colors.orange.shade700,
                     ),
                     const SizedBox(width: 8),
                     Expanded(
@@ -510,11 +515,13 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
               onPressed: () async {
                 Navigator.pop(context);
                 // Retry after checking permissions again
-                final hasPermission = await PermissionUtils.hasStoragePermissions();
+                final hasPermission =
+                    await PermissionUtils.hasStoragePermissions();
                 if (!hasPermission) {
                   await PermissionUtils.showSettingsDialog(
                     context: context,
-                    message: 'Storage permission is required. Please enable it in Settings.',
+                    message:
+                        'Storage permission is required. Please enable it in Settings.',
                   );
                 } else {
                   _performDownload();
@@ -528,23 +535,17 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
       );
     }
   }
-  
+
   Widget _buildSpaceInfoRow(String label, String value, {Color? color}) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(
-            label,
-            style: const TextStyle(fontWeight: FontWeight.w500),
-          ),
+          Text(label, style: const TextStyle(fontWeight: FontWeight.w500)),
           Text(
             value,
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              color: color,
-            ),
+            style: TextStyle(fontWeight: FontWeight.bold, color: color),
           ),
         ],
       ),

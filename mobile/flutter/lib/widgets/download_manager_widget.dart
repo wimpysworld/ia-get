@@ -73,9 +73,9 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
           Expanded(
             child: Text(
               'Downloads (${service.activeDownloadCount})',
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
             ),
           ),
           _buildHeaderActions(context, service),
@@ -84,7 +84,10 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
     );
   }
 
-  Widget _buildHeaderActions(BuildContext context, BackgroundDownloadService service) {
+  Widget _buildHeaderActions(
+    BuildContext context,
+    BackgroundDownloadService service,
+  ) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -96,16 +99,20 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
             NotificationService.showDownloadSummary(
               activeDownloads: service.activeDownloadCount,
               completedDownloads: 0,
-              averageProgress: _calculateAverageProgress(service.activeDownloads.values),
+              averageProgress: _calculateAverageProgress(
+                service.activeDownloads.values,
+              ),
             );
           },
           tooltip: 'Minimize to notifications',
         ),
-        
+
         // Pause/Resume all button
         IconButton(
           icon: Icon(
-            _hasActiveDownloads(service) ? Icons.pause_rounded : Icons.play_arrow_rounded,
+            _hasActiveDownloads(service)
+                ? Icons.pause_rounded
+                : Icons.play_arrow_rounded,
             size: 20,
           ),
           onPressed: () => _toggleAllDownloads(service),
@@ -115,11 +122,14 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
     );
   }
 
-  Widget _buildStatisticsBar(BuildContext context, BackgroundDownloadService service) {
+  Widget _buildStatisticsBar(
+    BuildContext context,
+    BackgroundDownloadService service,
+  ) {
     final stats = service.getStatistics();
     final averageSpeed = stats['averageSpeed'] as double;
     final activeBytesDownloaded = stats['activeBytesDownloaded'] as int;
-    
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
@@ -130,7 +140,7 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
             context,
             icon: Icons.speed_rounded,
             label: 'Speed',
-            value: averageSpeed > 0 
+            value: averageSpeed > 0
                 ? FileUtils.formatTransferSpeed(averageSpeed)
                 : '-',
           ),
@@ -150,7 +160,7 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
       ),
     );
   }
-  
+
   Widget _buildStatItem(
     BuildContext context, {
     required IconData icon,
@@ -176,15 +186,18 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
         const SizedBox(height: 2),
         Text(
           value,
-          style: Theme.of(context).textTheme.labelLarge?.copyWith(
-            fontWeight: FontWeight.w600,
-          ),
+          style: Theme.of(
+            context,
+          ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600),
         ),
       ],
     );
   }
 
-  Widget _buildDownloadList(BuildContext context, BackgroundDownloadService service) {
+  Widget _buildDownloadList(
+    BuildContext context,
+    BackgroundDownloadService service,
+  ) {
     final downloads = service.activeDownloads.values.toList();
     downloads.sort((a, b) => b.startTime.compareTo(a.startTime));
 
@@ -233,9 +246,9 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
             children: [
               Text(
                 download.identifier,
-                style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
+                style: Theme.of(
+                  context,
+                ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -295,9 +308,13 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
     return Icon(icon, size: 20, color: color);
   }
 
-  Widget _buildProgressIndicator(BuildContext context, DownloadProgress download) {
+  Widget _buildProgressIndicator(
+    BuildContext context,
+    DownloadProgress download,
+  ) {
     final progress = download.progress ?? 0.0;
-    final isIndeterminate = download.status == DownloadStatus.queued || progress < 0;
+    final isIndeterminate =
+        download.status == DownloadStatus.queued || progress < 0;
 
     return Column(
       children: [
@@ -346,9 +363,9 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
     return Text(
       info.join(' • '),
       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-        color: download.status == DownloadStatus.error 
-          ? Colors.red 
-          : Theme.of(context).colorScheme.onSurfaceVariant,
+        color: download.status == DownloadStatus.error
+            ? Colors.red
+            : Theme.of(context).colorScheme.onSurfaceVariant,
       ),
       maxLines: 2,
       overflow: TextOverflow.ellipsis,
@@ -420,10 +437,7 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
     return TextButton.icon(
       onPressed: onPressed,
       icon: Icon(icon, size: 16, color: color),
-      label: Text(
-        label,
-        style: TextStyle(color: color),
-      ),
+      label: Text(label, style: TextStyle(color: color)),
       style: TextButton.styleFrom(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         minimumSize: Size.zero,
@@ -466,14 +480,14 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
       (d) => d.status == DownloadStatus.downloading,
     );
   }
-  
+
   String _formatSessionDuration(Duration? duration) {
     if (duration == null) return '-';
-    
+
     final hours = duration.inHours;
     final minutes = duration.inMinutes.remainder(60);
     final seconds = duration.inSeconds.remainder(60);
-    
+
     if (hours > 0) {
       return '${hours}h ${minutes}m';
     } else if (minutes > 0) {
@@ -521,7 +535,9 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Cancel Download'),
-        content: Text('Are you sure you want to cancel the download of "${download.identifier}"?'),
+        content: Text(
+          'Are you sure you want to cancel the download of "${download.identifier}"?',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -553,13 +569,25 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
             children: [
               _DetailRow('Status', download.status.name),
               _DetailRow('Progress', _formatProgress(download)),
-              _DetailRow('Files', '${download.completedFiles ?? 0} / ${download.totalFiles}'),
+              _DetailRow(
+                'Files',
+                '${download.completedFiles ?? 0} / ${download.totalFiles}',
+              ),
               if (download.downloadedBytes != null)
-                _DetailRow('Downloaded', FileUtils.formatBytes(download.downloadedBytes!)),
+                _DetailRow(
+                  'Downloaded',
+                  FileUtils.formatBytes(download.downloadedBytes!),
+                ),
               if (download.totalBytes != null)
-                _DetailRow('Total Size', FileUtils.formatBytes(download.totalBytes!)),
+                _DetailRow(
+                  'Total Size',
+                  FileUtils.formatBytes(download.totalBytes!),
+                ),
               if (download.transferSpeed != null)
-                _DetailRow('Speed', FileUtils.formatTransferSpeed(download.transferSpeed!)),
+                _DetailRow(
+                  'Speed',
+                  FileUtils.formatTransferSpeed(download.transferSpeed!),
+                ),
               if (download.currentFile != null)
                 _DetailRow('Current File', download.currentFile!),
               if (download.errorMessage != null)
@@ -596,16 +624,13 @@ class _DetailRow extends StatelessWidget {
             width: 100,
             child: Text(
               '$label:',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
             ),
           ),
           Expanded(
-            child: Text(
-              value,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
+            child: Text(value, style: Theme.of(context).textTheme.bodySmall),
           ),
         ],
       ),

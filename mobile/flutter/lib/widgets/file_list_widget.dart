@@ -8,10 +8,7 @@ import '../screens/filters_screen.dart';
 class FileListWidget extends StatefulWidget {
   final List<ArchiveFile> files;
 
-  const FileListWidget({
-    super.key,
-    required this.files,
-  });
+  const FileListWidget({super.key, required this.files});
 
   @override
   State<FileListWidget> createState() => _FileListWidgetState();
@@ -21,7 +18,7 @@ class _FileListWidgetState extends State<FileListWidget> {
   bool _selectAll = false;
   String _sortBy = 'name'; // name, size, format
   bool _sortAscending = true;
-  
+
   // Filter state
   List<String> _selectedIncludeFormats = [];
   List<String> _selectedExcludeFormats = [];
@@ -41,10 +38,7 @@ class _FileListWidgetState extends State<FileListWidget> {
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.surface,
             border: Border(
-              bottom: BorderSide(
-                color: Colors.grey.shade300,
-                width: 1,
-              ),
+              bottom: BorderSide(color: Colors.grey.shade300, width: 1),
             ),
           ),
           child: Row(
@@ -67,9 +61,9 @@ class _FileListWidgetState extends State<FileListWidget> {
                 _selectAll ? 'Deselect All' : 'Select All',
                 style: const TextStyle(fontWeight: FontWeight.w500),
               ),
-              
+
               const Spacer(),
-              
+
               // Filter button with badge
               Stack(
                 clipBehavior: Clip.none,
@@ -107,9 +101,9 @@ class _FileListWidgetState extends State<FileListWidget> {
                     ),
                 ],
               ),
-              
+
               const SizedBox(width: 4),
-              
+
               // Sort dropdown
               PopupMenuButton<String>(
                 icon: Row(
@@ -117,7 +111,9 @@ class _FileListWidgetState extends State<FileListWidget> {
                   children: [
                     const Icon(Icons.sort, size: 18),
                     Icon(
-                      _sortAscending ? Icons.arrow_upward : Icons.arrow_downward,
+                      _sortAscending
+                          ? Icons.arrow_upward
+                          : Icons.arrow_downward,
                       size: 14,
                     ),
                   ],
@@ -198,17 +194,17 @@ class _FileListWidgetState extends State<FileListWidget> {
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Icon(
-                              hasActiveFilters 
-                                ? Icons.filter_list_off
-                                : Icons.inbox_outlined,
+                              hasActiveFilters
+                                  ? Icons.filter_list_off
+                                  : Icons.inbox_outlined,
                               size: 64,
                               color: Colors.grey.shade400,
                             ),
                             const SizedBox(height: 16),
                             Text(
                               hasActiveFilters
-                                ? 'No files match the current filters'
-                                : 'No files available',
+                                  ? 'No files match the current filters'
+                                  : 'No files available',
                               style: TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.w500,
@@ -302,20 +298,14 @@ class _FileListWidgetState extends State<FileListWidget> {
               ],
               Text(
                 file.sizeFormatted,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Colors.grey.shade600,
-                ),
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
               ),
             ],
           ),
           if (file.name != file.displayName)
             Text(
               file.name,
-              style: TextStyle(
-                fontSize: 10,
-                color: Colors.grey.shade500,
-              ),
+              style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -365,13 +355,15 @@ class _FileListWidgetState extends State<FileListWidget> {
 
   List<ArchiveFile> _getSortedFiles() {
     final files = List<ArchiveFile>.from(widget.files);
-    
+
     files.sort((a, b) {
       int result = 0;
-      
+
       switch (_sortBy) {
         case 'name':
-          result = a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase());
+          result = a.displayName.toLowerCase().compareTo(
+            b.displayName.toLowerCase(),
+          );
           break;
         case 'size':
           final aSize = a.size ?? 0;
@@ -384,17 +376,18 @@ class _FileListWidgetState extends State<FileListWidget> {
           result = aFormat.compareTo(bFormat);
           break;
       }
-      
+
       return _sortAscending ? result : -result;
     });
-    
+
     return files;
   }
 
   void _updateSelectAllState() {
     final selectedCount = widget.files.where((f) => f.selected).length;
     setState(() {
-      _selectAll = selectedCount == widget.files.length && widget.files.isNotEmpty;
+      _selectAll =
+          selectedCount == widget.files.length && widget.files.isNotEmpty;
     });
   }
 
@@ -407,7 +400,7 @@ class _FileListWidgetState extends State<FileListWidget> {
 
   Color _getFormatColor(String format) {
     final formatLower = format.toLowerCase();
-    
+
     // Document formats
     if (['pdf', 'doc', 'docx', 'txt', 'epub'].contains(formatLower)) {
       return Colors.blue;
@@ -428,7 +421,7 @@ class _FileListWidgetState extends State<FileListWidget> {
     if (['zip', 'rar', '7z', 'tar', 'gz'].contains(formatLower)) {
       return Colors.brown;
     }
-    
+
     return Colors.grey;
   }
 
@@ -462,9 +455,7 @@ class _FileListWidgetState extends State<FileListWidget> {
   void _showFilePreview(ArchiveFile file) {
     Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (context) => FilePreviewScreen(file: file),
-      ),
+      MaterialPageRoute(builder: (context) => FilePreviewScreen(file: file)),
     );
   }
 
@@ -480,7 +471,7 @@ class _FileListWidgetState extends State<FileListWidget> {
             _buildInfoRow('Full Path', file.name),
             if (file.format != null) _buildInfoRow('Format', file.format!),
             _buildInfoRow('Size', file.sizeFormatted),
-            if (file.downloadUrl != null) 
+            if (file.downloadUrl != null)
               _buildInfoRow('URL', file.downloadUrl!, isUrl: true),
           ],
         ),
@@ -525,10 +516,7 @@ class _FileListWidgetState extends State<FileListWidget> {
         children: [
           Text(
             label,
-            style: const TextStyle(
-              fontWeight: FontWeight.w500,
-              fontSize: 12,
-            ),
+            style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 12),
           ),
           const SizedBox(height: 2),
           SelectableText(
@@ -543,11 +531,11 @@ class _FileListWidgetState extends State<FileListWidget> {
       ),
     );
   }
-  
+
   bool _hasActiveFilters() {
     return _selectedIncludeFormats.isNotEmpty ||
-           _selectedExcludeFormats.isNotEmpty ||
-           _maxSize != null;
+        _selectedExcludeFormats.isNotEmpty ||
+        _maxSize != null;
   }
 
   int _getActiveFilterCount() {
@@ -557,7 +545,7 @@ class _FileListWidgetState extends State<FileListWidget> {
     if (_maxSize != null) count++;
     return count;
   }
-  
+
   void _openFiltersScreen() async {
     final result = await Navigator.push<Map<String, dynamic>>(
       context,
@@ -569,12 +557,16 @@ class _FileListWidgetState extends State<FileListWidget> {
         ),
       ),
     );
-    
+
     // Update local state with returned filter values
     if (result != null && mounted) {
       setState(() {
-        _selectedIncludeFormats = List<String>.from(result['includeFormats'] ?? []);
-        _selectedExcludeFormats = List<String>.from(result['excludeFormats'] ?? []);
+        _selectedIncludeFormats = List<String>.from(
+          result['includeFormats'] ?? [],
+        );
+        _selectedExcludeFormats = List<String>.from(
+          result['excludeFormats'] ?? [],
+        );
         _maxSize = result['maxSize'] as String?;
       });
     }

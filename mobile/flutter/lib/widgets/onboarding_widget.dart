@@ -4,7 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Onboarding widget that helps new users understand Internet Archive Helper
 class OnboardingWidget extends StatefulWidget {
   final VoidCallback onComplete;
-  
+
   const OnboardingWidget({super.key, required this.onComplete});
 
   @override
@@ -12,7 +12,8 @@ class OnboardingWidget extends StatefulWidget {
 
   static Future<bool> shouldShowOnboarding() async {
     final prefs = await SharedPreferences.getInstance();
-    return !(prefs.getBool(_OnboardingWidgetState._onboardingCompleteKey) ?? false);
+    return !(prefs.getBool(_OnboardingWidgetState._onboardingCompleteKey) ??
+        false);
   }
 }
 
@@ -58,31 +59,36 @@ class _OnboardingWidgetState extends State<OnboardingWidget> {
     const OnboardingPage(
       icon: Icons.library_books_rounded,
       title: 'Welcome to Internet Archive Helper',
-      description: 'Your comprehensive companion for accessing the vast digital collection of the Internet Archive.',
+      description:
+          'Your comprehensive companion for accessing the vast digital collection of the Internet Archive.',
       iconColor: Color(0xFF004B87),
     ),
     const OnboardingPage(
       icon: Icons.search_rounded,
       title: 'Find What You Need',
-      description: 'Search and browse millions of books, movies, music, software, and historical documents.',
+      description:
+          'Search and browse millions of books, movies, music, software, and historical documents.',
       iconColor: Color(0xFFFF6B35),
     ),
     const OnboardingPage(
       icon: Icons.download_rounded,
       title: 'Download with Ease',
-      description: 'High-performance downloads with smart resume capability and progress tracking.',
+      description:
+          'High-performance downloads with smart resume capability and progress tracking.',
       iconColor: Color(0xFF0088CC),
     ),
     const OnboardingPage(
       icon: Icons.mobile_friendly_rounded,
       title: 'Optimized for Mobile',
-      description: 'Touch-friendly interface designed for seamless browsing and downloading on your phone.',
+      description:
+          'Touch-friendly interface designed for seamless browsing and downloading on your phone.',
       iconColor: Color(0xFF2E7D32),
     ),
     const OnboardingPage(
       icon: Icons.security_rounded,
       title: 'Privacy & Security',
-      description: 'Your data stays private. We only access what you choose to download from the Internet Archive.',
+      description:
+          'Your data stays private. We only access what you choose to download from the Internet Archive.',
       iconColor: Color(0xFFED6C02),
     ),
   ];
@@ -114,7 +120,7 @@ class _OnboardingWidgetState extends State<OnboardingWidget> {
                 ),
               ),
             ),
-            
+
             // Page content
             Expanded(
               child: PageView.builder(
@@ -133,7 +139,7 @@ class _OnboardingWidgetState extends State<OnboardingWidget> {
                 },
               ),
             ),
-            
+
             // Navigation buttons
             Container(
               padding: const EdgeInsets.all(24),
@@ -148,20 +154,19 @@ class _OnboardingWidgetState extends State<OnboardingWidget> {
                     )
                   else
                     const SizedBox(width: 64), // Placeholder for alignment
-                  
                   // Skip button (only on first pages)
                   if (_currentPage < _pages.length - 1)
                     TextButton(
                       onPressed: _completeOnboarding,
                       child: const Text('Skip'),
                     ),
-                  
+
                   // Next/Get Started button
                   FilledButton(
                     onPressed: _nextPage,
                     child: Text(
-                      _currentPage == _pages.length - 1 
-                          ? 'Get Started' 
+                      _currentPage == _pages.length - 1
+                          ? 'Get Started'
                           : 'Next',
                     ),
                   ),
@@ -200,25 +205,23 @@ class OnboardingPage extends StatelessWidget {
             color: iconColor.withOpacity(0.1),
             shape: BoxShape.circle,
           ),
-          child: Icon(
-            icon,
-            size: 80,
-            color: iconColor,
-          ),
+          child: Icon(icon, size: 80, color: iconColor),
         ),
         const SizedBox(height: 32),
         Text(
           title,
-          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-            fontWeight: FontWeight.bold,
-          ),
+          style: Theme.of(
+            context,
+          ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: 16),
         Text(
           description,
           style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-            color: Theme.of(context).textTheme.bodyLarge?.color?.withOpacity(0.7),
+            color: Theme.of(
+              context,
+            ).textTheme.bodyLarge?.color?.withOpacity(0.7),
           ),
           textAlign: TextAlign.center,
         ),

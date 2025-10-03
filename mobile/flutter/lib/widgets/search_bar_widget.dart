@@ -55,32 +55,36 @@ class _SearchBarWidgetState extends State<SearchBarWidget> {
             builder: (context, service, child) {
               final isLoading = service.isLoading;
               final canCancel = service.canCancel;
-              
+
               return ElevatedButton(
                 onPressed: isLoading
                     ? (canCancel ? () => service.cancelOperation() : null)
-                    : (_controller.text.trim().isEmpty ? null : () => _searchArchive(_controller.text)),
+                    : (_controller.text.trim().isEmpty
+                          ? null
+                          : () => _searchArchive(_controller.text)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: isLoading && canCancel ? Colors.red : null,
                 ),
                 child: isLoading
                     ? (canCancel
-                        ? const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.stop, size: 18),
-                              SizedBox(width: 4),
-                              Text('Stop'),
-                            ],
-                          )
-                        : const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                            ),
-                          ))
+                          ? const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.stop, size: 18),
+                                SizedBox(width: 4),
+                                Text('Stop'),
+                              ],
+                            )
+                          : const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  Colors.white,
+                                ),
+                              ),
+                            ))
                     : const Text('Search'),
               );
             },
@@ -92,9 +96,9 @@ class _SearchBarWidgetState extends State<SearchBarWidget> {
 
   void _searchArchive(String identifier) {
     if (identifier.trim().isEmpty) return;
-    
+
     _focusNode.unfocus();
-    
+
     // Add error handling wrapper
     try {
       context.read<IaGetService>().fetchMetadata(identifier.trim());

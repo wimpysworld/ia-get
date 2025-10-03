@@ -28,7 +28,7 @@ class _FiltersScreenState extends State<FiltersScreen> {
   late List<String> _selectedIncludeFormats;
   late List<String> _selectedExcludeFormats;
   late String? _maxSize;
-  
+
   // Source type filtering
   bool _includeOriginal = true;
   bool _includeDerivative = true;
@@ -38,7 +38,13 @@ class _FiltersScreenState extends State<FiltersScreen> {
   List<String> _availableFormats = [];
 
   final List<String> _sizeOptions = [
-    '10MB', '50MB', '100MB', '500MB', '1GB', '5GB', '10GB'
+    '10MB',
+    '50MB',
+    '100MB',
+    '500MB',
+    '1GB',
+    '5GB',
+    '10GB',
   ];
 
   @override
@@ -50,7 +56,7 @@ class _FiltersScreenState extends State<FiltersScreen> {
     _includeOriginal = widget.initialIncludeOriginal;
     _includeDerivative = widget.initialIncludeDerivative;
     _includeMetadata = widget.initialIncludeMetadata;
-    
+
     // Load available formats from the current archive
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final service = context.read<IaGetService>();
@@ -104,18 +110,15 @@ class _FiltersScreenState extends State<FiltersScreen> {
               ),
             ),
           ),
-          
+
           const SizedBox(height: 24),
-          
+
           // Source Type filtering section
           _buildSectionHeader('Content Source Type'),
           const SizedBox(height: 8),
           const Text(
             'Filter by where files originate from',
-            style: TextStyle(
-              fontSize: 12,
-              color: Colors.grey,
-            ),
+            style: TextStyle(fontSize: 12, color: Colors.grey),
           ),
           const SizedBox(height: 12),
           Wrap(
@@ -132,7 +135,9 @@ class _FiltersScreenState extends State<FiltersScreen> {
                 },
                 selectedColor: Colors.green.shade200,
                 checkmarkColor: Colors.green.shade700,
-                avatar: _includeOriginal ? null : const Icon(Icons.upload_file, size: 18),
+                avatar: _includeOriginal
+                    ? null
+                    : const Icon(Icons.upload_file, size: 18),
               ),
               FilterChip(
                 label: const Text('DERIVATIVE'),
@@ -144,7 +149,9 @@ class _FiltersScreenState extends State<FiltersScreen> {
                 },
                 selectedColor: Colors.orange.shade200,
                 checkmarkColor: Colors.orange.shade700,
-                avatar: _includeDerivative ? null : const Icon(Icons.auto_awesome, size: 18),
+                avatar: _includeDerivative
+                    ? null
+                    : const Icon(Icons.auto_awesome, size: 18),
               ),
               FilterChip(
                 label: const Text('METADATA'),
@@ -156,11 +163,13 @@ class _FiltersScreenState extends State<FiltersScreen> {
                 },
                 selectedColor: Colors.purple.shade200,
                 checkmarkColor: Colors.purple.shade700,
-                avatar: _includeMetadata ? null : const Icon(Icons.info, size: 18),
+                avatar: _includeMetadata
+                    ? null
+                    : const Icon(Icons.info, size: 18),
               ),
             ],
           ),
-          
+
           const SizedBox(height: 16),
           Text(
             '• Original: Files uploaded by users\n'
@@ -172,23 +181,20 @@ class _FiltersScreenState extends State<FiltersScreen> {
               fontStyle: FontStyle.italic,
             ),
           ),
-          
+
           const SizedBox(height: 24),
           const Divider(),
           const SizedBox(height: 24),
-          
+
           // Include formats section
           _buildSectionHeader('File Type Filters'),
           _buildSectionSubheader('Include Formats'),
           const SizedBox(height: 8),
           Text(
-            _availableFormats.isEmpty 
+            _availableFormats.isEmpty
                 ? 'Loading available formats...'
                 : 'Show only these file formats (${_availableFormats.length} available)',
-            style: const TextStyle(
-              fontSize: 12,
-              color: Colors.grey,
-            ),
+            style: const TextStyle(fontSize: 12, color: Colors.grey),
           ),
           const SizedBox(height: 12),
           if (_availableFormats.isEmpty)
@@ -222,20 +228,17 @@ class _FiltersScreenState extends State<FiltersScreen> {
                 );
               }).toList(),
             ),
-          
+
           const SizedBox(height: 24),
           const Divider(),
           const SizedBox(height: 24),
-          
+
           // Exclude formats section
           _buildSectionSubheader('Exclude Formats'),
           const SizedBox(height: 8),
           const Text(
             'Hide these file formats',
-            style: TextStyle(
-              fontSize: 12,
-              color: Colors.grey,
-            ),
+            style: TextStyle(fontSize: 12, color: Colors.grey),
           ),
           const SizedBox(height: 12),
           if (_availableFormats.isEmpty)
@@ -269,20 +272,17 @@ class _FiltersScreenState extends State<FiltersScreen> {
                 );
               }).toList(),
             ),
-          
+
           const SizedBox(height: 24),
           const Divider(),
           const SizedBox(height: 24),
-          
+
           // Max file size section
           _buildSectionHeader('Maximum File Size'),
           const SizedBox(height: 8),
           const Text(
             'Show only files smaller than this size',
-            style: TextStyle(
-              fontSize: 12,
-              color: Colors.grey,
-            ),
+            style: TextStyle(fontSize: 12, color: Colors.grey),
           ),
           const SizedBox(height: 12),
           DropdownButtonFormField<String>(
@@ -297,10 +297,10 @@ class _FiltersScreenState extends State<FiltersScreen> {
                 value: null,
                 child: Text('No limit'),
               ),
-              ..._sizeOptions.map((size) => DropdownMenuItem<String>(
-                value: size,
-                child: Text(size),
-              )),
+              ..._sizeOptions.map(
+                (size) =>
+                    DropdownMenuItem<String>(value: size, child: Text(size)),
+              ),
             ],
             onChanged: (value) {
               setState(() {
@@ -308,7 +308,7 @@ class _FiltersScreenState extends State<FiltersScreen> {
               });
             },
           ),
-          
+
           const SizedBox(height: 32),
         ],
       ),
@@ -330,7 +330,10 @@ class _FiltersScreenState extends State<FiltersScreen> {
               // Active filters count
               if (_hasActiveFilters())
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.blue.shade100,
                     borderRadius: BorderRadius.circular(20),
@@ -338,7 +341,11 @@ class _FiltersScreenState extends State<FiltersScreen> {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.filter_list, size: 16, color: Colors.blue.shade700),
+                      Icon(
+                        Icons.filter_list,
+                        size: 16,
+                        color: Colors.blue.shade700,
+                      ),
                       const SizedBox(width: 4),
                       Text(
                         '${_getActiveFilterCount()} active',
@@ -350,16 +357,19 @@ class _FiltersScreenState extends State<FiltersScreen> {
                     ],
                   ),
                 ),
-              
+
               const Spacer(),
-              
+
               // Apply button
               ElevatedButton.icon(
                 onPressed: _applyFilters,
                 icon: const Icon(Icons.check),
                 label: const Text('Apply Filters'),
                 style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 12,
+                  ),
                 ),
               ),
             ],
@@ -372,30 +382,24 @@ class _FiltersScreenState extends State<FiltersScreen> {
   Widget _buildSectionHeader(String title) {
     return Text(
       title,
-      style: const TextStyle(
-        fontSize: 18,
-        fontWeight: FontWeight.bold,
-      ),
+      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
     );
   }
-  
+
   Widget _buildSectionSubheader(String title) {
     return Text(
       title,
-      style: const TextStyle(
-        fontSize: 16,
-        fontWeight: FontWeight.w600,
-      ),
+      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
     );
   }
 
   bool _hasActiveFilters() {
     return _selectedIncludeFormats.isNotEmpty ||
-           _selectedExcludeFormats.isNotEmpty ||
-           _maxSize != null ||
-           !_includeOriginal ||
-           !_includeDerivative ||
-           !_includeMetadata;
+        _selectedExcludeFormats.isNotEmpty ||
+        _maxSize != null ||
+        !_includeOriginal ||
+        !_includeDerivative ||
+        !_includeMetadata;
   }
 
   int _getActiveFilterCount() {
@@ -432,7 +436,7 @@ class _FiltersScreenState extends State<FiltersScreen> {
       includeDerivative: _includeDerivative,
       includeMetadata: _includeMetadata,
     );
-    
+
     // Return the filter state to the caller
     Navigator.pop(context, {
       'includeFormats': _selectedIncludeFormats,

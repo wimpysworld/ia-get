@@ -6,10 +6,10 @@ import 'package:flutter/foundation.dart';
 class DeepLinkService {
   final _appLinks = AppLinks();
   StreamSubscription<Uri>? _linkSubscription;
-  
+
   /// Callback when a valid archive link is received
   Function(String identifier)? onArchiveLinkReceived;
-  
+
   /// Initialize deep link listening
   Future<void> initialize() async {
     try {
@@ -18,7 +18,7 @@ class DeepLinkService {
       if (initialUri != null) {
         _handleDeepLink(initialUri);
       }
-      
+
       // Listen for links while app is running
       _linkSubscription = _appLinks.uriLinkStream.listen(
         (uri) {
@@ -30,7 +30,7 @@ class DeepLinkService {
           }
         },
       );
-      
+
       if (kDebugMode) {
         print('Deep link service initialized');
       }
@@ -40,17 +40,17 @@ class DeepLinkService {
       }
     }
   }
-  
+
   /// Handle incoming deep link
   void _handleDeepLink(Uri uri) {
     if (kDebugMode) {
       print('Received deep link: $uri');
     }
-    
+
     final identifier = _extractArchiveIdentifier(uri);
     if (identifier != null && onArchiveLinkReceived != null) {
       onArchiveLinkReceived!(identifier);
-      
+
       if (kDebugMode) {
         print('Extracted archive identifier: $identifier');
       }
@@ -60,7 +60,7 @@ class DeepLinkService {
       }
     }
   }
-  
+
   /// Extract archive identifier from various URL formats
   String? _extractArchiveIdentifier(Uri uri) {
     // Handle https://archive.org/details/[identifier]
@@ -69,18 +69,18 @@ class DeepLinkService {
       if (uri.pathSegments.length >= 2 && uri.pathSegments[0] == 'details') {
         return uri.pathSegments[1];
       }
-      
+
       // Path format: /download/identifier
       if (uri.pathSegments.length >= 2 && uri.pathSegments[0] == 'download') {
         return uri.pathSegments[1];
       }
-      
+
       // Path format: /metadata/identifier
       if (uri.pathSegments.length >= 2 && uri.pathSegments[0] == 'metadata') {
         return uri.pathSegments[1];
       }
     }
-    
+
     // Handle custom scheme: iaget://identifier
     if (uri.scheme == 'iaget') {
       // Format: iaget://identifier or iaget:identifier
@@ -91,10 +91,10 @@ class DeepLinkService {
         return uri.path.replaceFirst('/', '');
       }
     }
-    
+
     return null;
   }
-  
+
   /// Dispose resources
   void dispose() {
     _linkSubscription?.cancel();

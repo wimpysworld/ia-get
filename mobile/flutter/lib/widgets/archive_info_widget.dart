@@ -4,10 +4,7 @@ import '../models/archive_metadata.dart';
 class ArchiveInfoWidget extends StatelessWidget {
   final ArchiveMetadata metadata;
 
-  const ArchiveInfoWidget({
-    super.key,
-    required this.metadata,
-  });
+  const ArchiveInfoWidget({super.key, required this.metadata});
 
   @override
   Widget build(BuildContext context) {
@@ -39,9 +36,7 @@ class ArchiveInfoWidget extends StatelessWidget {
               const SizedBox(height: 8),
               Text(
                 metadata.description!,
-                style: TextStyle(
-                  color: Colors.grey.shade600,
-                ),
+                style: TextStyle(color: Colors.grey.shade600),
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -65,14 +60,15 @@ class ArchiveInfoWidget extends StatelessWidget {
                 ],
                 if (metadata.date != null) ...[
                   const SizedBox(width: 16),
-                  Icon(Icons.calendar_today, size: 16, color: Colors.grey.shade600),
+                  Icon(
+                    Icons.calendar_today,
+                    size: 16,
+                    color: Colors.grey.shade600,
+                  ),
                   const SizedBox(width: 4),
                   Text(
                     metadata.date!,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey.shade600,
-                    ),
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                   ),
                 ],
               ],
@@ -84,20 +80,14 @@ class ArchiveInfoWidget extends StatelessWidget {
                 const SizedBox(width: 4),
                 Text(
                   '${metadata.totalFiles} files',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade600,
-                  ),
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                 ),
                 const SizedBox(width: 16),
                 Icon(Icons.storage, size: 16, color: Colors.grey.shade600),
                 const SizedBox(width: 4),
                 Text(
                   _formatSize(metadata.totalSize),
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade600,
-                  ),
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                 ),
               ],
             ),

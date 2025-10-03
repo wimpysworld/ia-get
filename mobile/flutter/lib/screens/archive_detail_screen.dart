@@ -47,13 +47,11 @@ class ArchiveDetailScreen extends StatelessWidget {
                 ArchiveInfoWidget(metadata: service.currentMetadata!),
 
                 // File list (with integrated filter controls)
-                Expanded(
-                  child: FileListWidget(files: service.filteredFiles),
-                ),
+                Expanded(child: FileListWidget(files: service.filteredFiles)),
 
                 // Download controls
                 const DownloadControlsWidget(),
-                
+
                 // Active downloads manager
                 const DownloadManagerWidget(),
               ],

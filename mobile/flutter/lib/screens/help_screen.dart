@@ -8,9 +8,7 @@ class HelpScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Help & About'),
-      ),
+      appBar: AppBar(title: const Text('Help & About')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -65,14 +63,16 @@ class HelpScreen extends StatelessWidget {
                   const SizedBox(height: 16),
                   const Text('Version: 1.6.0'),
                   const SizedBox(height: 8),
-                  const Text('Built with ❤️ for the Internet Archive community'),
+                  const Text(
+                    'Built with ❤️ for the Internet Archive community',
+                  ),
                 ],
               ),
             ),
           ),
-          
+
           const SizedBox(height: 16),
-          
+
           // How to use section
           Card(
             child: Padding(
@@ -122,9 +122,9 @@ class HelpScreen extends StatelessWidget {
               ),
             ),
           ),
-          
+
           const SizedBox(height: 16),
-          
+
           // Features section
           Card(
             child: Padding(
@@ -146,19 +146,29 @@ class HelpScreen extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  _buildFeatureItem('High-performance downloads with progress tracking'),
-                  _buildFeatureItem('Smart resume capability for interrupted downloads'),
-                  _buildFeatureItem('Advanced filtering by file type, size, and format'),
+                  _buildFeatureItem(
+                    'High-performance downloads with progress tracking',
+                  ),
+                  _buildFeatureItem(
+                    'Smart resume capability for interrupted downloads',
+                  ),
+                  _buildFeatureItem(
+                    'Advanced filtering by file type, size, and format',
+                  ),
                   _buildFeatureItem('Material 3 design optimized for mobile'),
-                  _buildFeatureItem('Background downloads that continue when app is closed'),
-                  _buildFeatureItem('Deep link support for Internet Archive URLs'),
+                  _buildFeatureItem(
+                    'Background downloads that continue when app is closed',
+                  ),
+                  _buildFeatureItem(
+                    'Deep link support for Internet Archive URLs',
+                  ),
                 ],
               ),
             ),
           ),
-          
+
           const SizedBox(height: 16),
-          
+
           // Links section
           Card(
             child: Padding(
@@ -168,10 +178,7 @@ class HelpScreen extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      Icon(
-                        Icons.link,
-                        color: Theme.of(context).primaryColor,
-                      ),
+                      Icon(Icons.link, color: Theme.of(context).primaryColor),
                       const SizedBox(width: 8),
                       Text(
                         'Useful Links',
@@ -212,9 +219,9 @@ class HelpScreen extends StatelessWidget {
               ),
             ),
           ),
-          
+
           const SizedBox(height: 16),
-          
+
           // Privacy section
           Card(
             child: Padding(
@@ -243,8 +250,12 @@ class HelpScreen extends StatelessWidget {
                   const SizedBox(height: 8),
                   _buildFeatureItem('No personal data collection or tracking'),
                   _buildFeatureItem('No advertisements or analytics'),
-                  _buildFeatureItem('Only accesses Internet Archive public APIs'),
-                  _buildFeatureItem('Downloaded files stored locally on your device'),
+                  _buildFeatureItem(
+                    'Only accesses Internet Archive public APIs',
+                  ),
+                  _buildFeatureItem(
+                    'Downloaded files stored locally on your device',
+                  ),
                   _buildFeatureItem('Open source - you can verify the code'),
                 ],
               ),
@@ -255,7 +266,12 @@ class HelpScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildHelpItem(BuildContext context, IconData icon, String title, String description) {
+  Widget _buildHelpItem(
+    BuildContext context,
+    IconData icon,
+    String title,
+    String description,
+  ) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
       child: Row(
@@ -272,10 +288,7 @@ class HelpScreen extends StatelessWidget {
                   style: const TextStyle(fontWeight: FontWeight.w500),
                 ),
                 const SizedBox(height: 4),
-                Text(
-                  description,
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
+                Text(description, style: Theme.of(context).textTheme.bodySmall),
               ],
             ),
           ),
@@ -298,7 +311,13 @@ class HelpScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildLinkItem(BuildContext context, IconData icon, String title, String description, String url) {
+  Widget _buildLinkItem(
+    BuildContext context,
+    IconData icon,
+    String title,
+    String description,
+    String url,
+  ) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: InkWell(

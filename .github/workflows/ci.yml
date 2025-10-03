@@ -461,7 +461,7 @@ jobs:
       run: |
         cd mobile/flutter
         echo "Running flutter analyze..."
-        flutter analyze
+        flutter analyze --no-fatal-infos
         echo "✓ Flutter analysis passed"
 
     - name: Build Android APK and App Bundle

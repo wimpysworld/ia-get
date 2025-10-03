@@ -8,7 +8,7 @@ class ArchiveMetadata {
   final int totalFiles;
   final int totalSize;
   final List<ArchiveFile> files;
-  
+
   ArchiveMetadata({
     required this.identifier,
     this.title,
@@ -19,24 +19,24 @@ class ArchiveMetadata {
     required this.totalSize,
     required this.files,
   });
-  
+
   factory ArchiveMetadata.fromJson(Map<String, dynamic> json) {
     final filesList = json['files'] as List<dynamic>? ?? [];
     final server = json['server'] as String? ?? json['d1'] as String? ?? '';
     final dir = json['dir'] as String? ?? '';
-    
-    final files = filesList
-        .map((file) {
-          final fileMap = file as Map<String, dynamic>;
-          // Generate download URL from server and directory if not present
-          if (fileMap['download_url'] == null && server.isNotEmpty && dir.isNotEmpty) {
-            final fileName = fileMap['name'] as String? ?? '';
-            fileMap['download_url'] = 'https://$server$dir/$fileName';
-          }
-          return ArchiveFile.fromJson(fileMap);
-        })
-        .toList();
-    
+
+    final files = filesList.map((file) {
+      final fileMap = file as Map<String, dynamic>;
+      // Generate download URL from server and directory if not present
+      if (fileMap['download_url'] == null &&
+          server.isNotEmpty &&
+          dir.isNotEmpty) {
+        final fileName = fileMap['name'] as String? ?? '';
+        fileMap['download_url'] = 'https://$server$dir/$fileName';
+      }
+      return ArchiveFile.fromJson(fileMap);
+    }).toList();
+
     return ArchiveMetadata(
       identifier: json['metadata']?['identifier'] ?? 'unknown',
       title: json['metadata']?['title'],
@@ -48,7 +48,7 @@ class ArchiveMetadata {
       files: files,
     );
   }
-  
+
   Map<String, dynamic> toJson() {
     return {
       'metadata': {
@@ -74,7 +74,7 @@ class ArchiveFile {
   final String? md5;
   final String? sha1;
   bool selected;
-  
+
   ArchiveFile({
     required this.name,
     this.size,
@@ -85,7 +85,7 @@ class ArchiveFile {
     this.sha1,
     this.selected = false,
   });
-  
+
   factory ArchiveFile.fromJson(Map<String, dynamic> json) {
     return ArchiveFile(
       name: json['name'] ?? '',
@@ -98,7 +98,7 @@ class ArchiveFile {
       selected: json['selected'] ?? false,
     );
   }
-  
+
   Map<String, dynamic> toJson() {
     return {
       'name': name,
@@ -111,22 +111,22 @@ class ArchiveFile {
       'selected': selected,
     };
   }
-  
+
   String get sizeFormatted {
     if (size == null) return 'Unknown size';
-    
+
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     double bytes = size!.toDouble();
     int unitIndex = 0;
-    
+
     while (bytes >= 1024 && unitIndex < units.length - 1) {
       bytes /= 1024;
       unitIndex++;
     }
-    
+
     return '${bytes.toStringAsFixed(bytes >= 100 ? 0 : 1)} ${units[unitIndex]}';
   }
-  
+
   String get displayName {
     // Remove common prefixes and clean up the name
     String cleanName = name;
@@ -135,16 +135,16 @@ class ArchiveFile {
     }
     return cleanName;
   }
-  
+
   /// Check if this is an original file
   bool get isOriginal => source?.toLowerCase() == 'original';
-  
+
   /// Check if this is a derivative file
   bool get isDerivative => source?.toLowerCase() == 'derivative';
-  
+
   /// Check if this is a metadata file
   bool get isMetadata => source?.toLowerCase() == 'metadata';
-  
+
   /// Get a user-friendly source type name
   String get sourceTypeName {
     if (isOriginal) return 'Original';

@@ -7,10 +7,7 @@ import '../models/archive_metadata.dart';
 class FilePreviewScreen extends StatefulWidget {
   final ArchiveFile file;
 
-  const FilePreviewScreen({
-    super.key,
-    required this.file,
-  });
+  const FilePreviewScreen({super.key, required this.file});
 
   @override
   State<FilePreviewScreen> createState() => _FilePreviewScreenState();
@@ -44,7 +41,7 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
 
       // Fetch file data in memory
       final response = await http.get(Uri.parse(widget.file.downloadUrl!));
-      
+
       if (response.statusCode == 200) {
         setState(() {
           _fileData = response.bodyBytes;
@@ -124,11 +121,7 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(
-                Icons.error_outline,
-                size: 64,
-                color: Colors.red,
-              ),
+              const Icon(Icons.error_outline, size: 64, color: Colors.red),
               const SizedBox(height: 16),
               Text(
                 _error!,
@@ -147,9 +140,7 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
     }
 
     if (_fileData == null) {
-      return const Center(
-        child: Text('No data available'),
-      );
+      return const Center(child: Text('No data available'));
     }
 
     // Display based on file type
@@ -196,16 +187,11 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
         padding: const EdgeInsets.all(16),
         child: SelectableText(
           text,
-          style: const TextStyle(
-            fontFamily: 'monospace',
-            fontSize: 14,
-          ),
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 14),
         ),
       );
     } catch (e) {
-      return Center(
-        child: Text('Failed to decode text: $e'),
-      );
+      return Center(child: Text('Failed to decode text: $e'));
     }
   }
 
@@ -214,11 +200,7 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Icon(
-            Icons.video_library,
-            size: 64,
-            color: Colors.grey,
-          ),
+          const Icon(Icons.video_library, size: 64, color: Colors.grey),
           const SizedBox(height: 16),
           Text(
             'Video preview loaded (${_formatSize(_fileData!.length)})',
@@ -251,11 +233,7 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(
-              Icons.description,
-              size: 64,
-              color: Colors.grey,
-            ),
+            const Icon(Icons.description, size: 64, color: Colors.grey),
             const SizedBox(height: 16),
             Text(
               'Preview not supported for ${widget.file.format ?? "unknown"} format',

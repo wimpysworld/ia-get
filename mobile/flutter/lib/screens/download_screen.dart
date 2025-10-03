@@ -26,62 +26,46 @@ class _DownloadScreenState extends State<DownloadScreen> {
         ],
       ),
       body: _activeDownloads.isEmpty && _completedDownloads.isEmpty
-            ? const Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      Icons.download_done,
-                      size: 64,
-                      color: Colors.grey,
-                    ),
-                    SizedBox(height: 16),
-                    Text(
-                      'No downloads yet',
-                      style: TextStyle(
-                        fontSize: 16,
-                        color: Colors.grey,
-                      ),
-                    ),
-                    SizedBox(height: 8),
-                    Text(
-                      'Start downloading files from the main screen',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.grey,
-                      ),
-                    ),
-                  ],
-                ),
-              )
-            : ListView(
-                padding: const EdgeInsets.all(16),
+          ? const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  if (_activeDownloads.isNotEmpty) ...[
-                    const Text(
-                      'Active Downloads',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    ..._activeDownloads.map(_buildActiveDownloadCard),
-                    const SizedBox(height: 24),
-                  ],
-                  if (_completedDownloads.isNotEmpty) ...[
-                    const Text(
-                      'Completed Downloads',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    ..._completedDownloads.map(_buildCompletedDownloadCard),
-                  ],
+                  Icon(Icons.download_done, size: 64, color: Colors.grey),
+                  SizedBox(height: 16),
+                  Text(
+                    'No downloads yet',
+                    style: TextStyle(fontSize: 16, color: Colors.grey),
+                  ),
+                  SizedBox(height: 8),
+                  Text(
+                    'Start downloading files from the main screen',
+                    style: TextStyle(fontSize: 14, color: Colors.grey),
+                  ),
                 ],
               ),
+            )
+          : ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                if (_activeDownloads.isNotEmpty) ...[
+                  const Text(
+                    'Active Downloads',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  ..._activeDownloads.map(_buildActiveDownloadCard),
+                  const SizedBox(height: 24),
+                ],
+                if (_completedDownloads.isNotEmpty) ...[
+                  const Text(
+                    'Completed Downloads',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  ..._completedDownloads.map(_buildCompletedDownloadCard),
+                ],
+              ],
+            ),
     );
   }
 
@@ -140,27 +124,18 @@ class _DownloadScreenState extends State<DownloadScreen> {
               children: [
                 Text(
                   '${progress.completedFiles}/${progress.totalFiles} files',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade600,
-                  ),
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                 ),
                 Text(
                   'ETA: ${progress.etaFormatted}',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade600,
-                  ),
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                 ),
               ],
             ),
             const SizedBox(height: 4),
             Text(
               '${progress.downloadedFormatted} / ${progress.totalSizeFormatted}',
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey.shade600,
-              ),
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
           ],
         ),
@@ -175,11 +150,7 @@ class _DownloadScreenState extends State<DownloadScreen> {
         padding: const EdgeInsets.all(16),
         child: Row(
           children: [
-            const Icon(
-              Icons.check_circle,
-              color: Colors.green,
-              size: 24,
-            ),
+            const Icon(Icons.check_circle, color: Colors.green, size: 24),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -187,17 +158,12 @@ class _DownloadScreenState extends State<DownloadScreen> {
                 children: [
                   Text(
                     progress.currentFile ?? 'Download completed',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w500,
-                    ),
+                    style: const TextStyle(fontWeight: FontWeight.w500),
                     overflow: TextOverflow.ellipsis,
                   ),
                   Text(
                     '${progress.totalFiles} files • ${progress.totalSizeFormatted}',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey.shade600,
-                    ),
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                   ),
                 ],
               ),
@@ -214,18 +180,18 @@ class _DownloadScreenState extends State<DownloadScreen> {
 
   void _pauseDownload(int sessionId) {
     // TODO: Implement pause functionality
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Download paused')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Download paused')));
   }
 
   void _cancelDownload(int sessionId) {
     setState(() {
       _activeDownloads.removeWhere((p) => p.sessionId == sessionId);
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Download cancelled')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Download cancelled')));
   }
 
   void _clearAllDownloads() {
@@ -237,8 +203,8 @@ class _DownloadScreenState extends State<DownloadScreen> {
 
   void _openDownloadFolder(DownloadProgress progress) {
     // TODO: Implement folder opening
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Opening download folder')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Opening download folder')));
   }
 }

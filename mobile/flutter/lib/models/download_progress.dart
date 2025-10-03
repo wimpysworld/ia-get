@@ -1,12 +1,5 @@
 /// Status of a download
-enum DownloadStatus {
-  queued,
-  downloading,
-  paused,
-  completed,
-  error,
-  cancelled,
-}
+enum DownloadStatus { queued, downloading, paused, completed, error, cancelled }
 
 /// Download progress information
 class DownloadProgress {
@@ -25,7 +18,8 @@ class DownloadProgress {
   final DownloadStatus status;
   final String? errorMessage;
   final DateTime startTime;
-  
+  final int retryCount; // Track number of retry attempts
+
   DownloadProgress({
     required this.downloadId,
     required this.identifier,
@@ -42,6 +36,7 @@ class DownloadProgress {
     required this.status,
     this.errorMessage,
     DateTime? startTime,
+    this.retryCount = 0,
   }) : startTime = startTime ?? DateTime.now();
 
   /// Create a copy with updated fields
@@ -61,6 +56,7 @@ class DownloadProgress {
     DownloadStatus? status,
     String? errorMessage,
     DateTime? startTime,
+    int? retryCount,
   }) {
     return DownloadProgress(
       downloadId: downloadId ?? this.downloadId,
@@ -78,34 +74,35 @@ class DownloadProgress {
       status: status ?? this.status,
       errorMessage: errorMessage ?? this.errorMessage,
       startTime: startTime ?? this.startTime,
+      retryCount: retryCount ?? this.retryCount,
     );
   }
 
   // Legacy compatibility getters
   double get overallProgress => progress ?? 0.0;
   int get downloadSpeed => (transferSpeed ?? 0).toInt();
-  
+
   String get speedFormatted {
     if (transferSpeed == null) return '0 B/s';
     const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
     double speed = transferSpeed!;
     int unitIndex = 0;
-    
+
     while (speed >= 1024 && unitIndex < units.length - 1) {
       speed /= 1024;
       unitIndex++;
     }
-    
+
     return '${speed.toStringAsFixed(speed >= 100 ? 0 : 1)} ${units[unitIndex]}';
   }
-  
+
   String get etaFormatted {
     if (etaSeconds == null || etaSeconds! <= 0) return 'Unknown';
-    
+
     int hours = etaSeconds! ~/ 3600;
     int minutes = (etaSeconds! % 3600) ~/ 60;
     int seconds = etaSeconds! % 60;
-    
+
     if (hours > 0) {
       return '${hours}h ${minutes}m';
     } else if (minutes > 0) {
@@ -114,32 +111,32 @@ class DownloadProgress {
       return '${seconds}s';
     }
   }
-  
+
   String get downloadedFormatted {
     if (downloadedBytes == null) return '0 B';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     double bytes = downloadedBytes!.toDouble();
     int unitIndex = 0;
-    
+
     while (bytes >= 1024 && unitIndex < units.length - 1) {
       bytes /= 1024;
       unitIndex++;
     }
-    
+
     return '${bytes.toStringAsFixed(bytes >= 100 ? 0 : 1)} ${units[unitIndex]}';
   }
-  
+
   String get totalSizeFormatted {
     if (totalBytes == null) return 'Unknown';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     double bytes = totalBytes!.toDouble();
     int unitIndex = 0;
-    
+
     while (bytes >= 1024 && unitIndex < units.length - 1) {
       bytes /= 1024;
       unitIndex++;
     }
-    
+
     return '${bytes.toStringAsFixed(bytes >= 100 ? 0 : 1)} ${units[unitIndex]}';
   }
 }

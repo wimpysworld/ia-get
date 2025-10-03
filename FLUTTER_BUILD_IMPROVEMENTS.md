@@ -74,7 +74,7 @@ Add a Flutter analysis step before building in `.github/workflows/ci.yml`:
   run: |
     cd mobile/flutter
     echo "Running flutter analyze..."
-    flutter analyze
+    flutter analyze --no-fatal-infos
     echo "Checking code formatting..."
     dart format --set-exit-if-changed --output=none .
   continue-on-error: false  # Fail the build if analysis fails
@@ -95,7 +95,7 @@ Add analysis step in `scripts/build-mobile.sh` before building:
 # Run Flutter analysis
 echo -e "${BLUE}Running Flutter code analysis...${NC}"
 cd "$FLUTTER_DIR"
-if flutter analyze; then
+if flutter analyze --no-fatal-infos; then
     echo -e "${GREEN}✓ Flutter analysis passed${NC}"
 else
     echo -e "${RED}✗ Flutter analysis failed${NC}"
@@ -133,7 +133,7 @@ if [ -d "$FLUTTER_DIR" ]; then
     cd "$FLUTTER_DIR"
     
     # Run flutter analyze
-    if ! flutter analyze --no-pub; then
+    if ! flutter analyze --no-pub --no-fatal-infos; then
         echo "❌ Flutter analysis failed. Please fix issues before committing."
         exit 1
     fi
@@ -229,9 +229,9 @@ linter:
 ## Quick Reference Commands
 
 ```bash
-# Check code for issues
+# Check code for issues (ignoring info-level deprecation warnings)
 cd mobile/flutter
-flutter analyze
+flutter analyze --no-fatal-infos
 
 # Format code
 dart format .

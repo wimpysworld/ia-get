@@ -4,8 +4,10 @@ import 'package:flutter/services.dart';
 
 /// Service for managing Android notifications for downloads
 class NotificationService {
-  static const _platform = MethodChannel('com.internetarchive.helper/notifications');
-  
+  static const _platform = MethodChannel(
+    'com.internetarchive.helper/notifications',
+  );
+
   static bool _isInitialized = false;
   static const String _downloadChannelId = 'download_progress';
   static const String _completionChannelId = 'download_completion';
@@ -13,7 +15,7 @@ class NotificationService {
   /// Initialize the notification service
   static Future<void> initialize() async {
     if (_isInitialized) return;
-    
+
     try {
       await _platform.invokeMethod('initialize', {
         'channels': [
@@ -31,9 +33,9 @@ class NotificationService {
             'importance': 'default',
             'showBadge': true,
           },
-        ]
+        ],
       });
-      
+
       _isInitialized = true;
     } catch (e) {
       debugPrint('Failed to initialize notification service: $e');
@@ -72,7 +74,7 @@ class NotificationService {
     int? totalFiles,
   }) async {
     if (!_isInitialized) await initialize();
-    
+
     try {
       await _platform.invokeMethod('showProgressNotification', {
         'notificationId': downloadId.hashCode,
@@ -86,21 +88,10 @@ class NotificationService {
         'cancelable': true,
         'downloadId': downloadId,
         'actions': [
-          {
-            'id': 'pause',
-            'title': 'Pause',
-            'icon': 'pause',
-          },
-          {
-            'id': 'cancel',
-            'title': 'Cancel',
-            'icon': 'close',
-          },
+          {'id': 'pause', 'title': 'Pause', 'icon': 'pause'},
+          {'id': 'cancel', 'title': 'Cancel', 'icon': 'close'},
         ],
-        'extras': {
-          'currentFile': currentFile,
-          'totalFiles': totalFiles,
-        }
+        'extras': {'currentFile': currentFile, 'totalFiles': totalFiles},
       });
     } catch (e) {
       debugPrint('Failed to show download progress notification: $e');
@@ -115,7 +106,7 @@ class NotificationService {
     required double progress,
   }) async {
     if (!_isInitialized) await initialize();
-    
+
     try {
       await _platform.invokeMethod('showProgressNotification', {
         'notificationId': downloadId.hashCode,
@@ -129,16 +120,8 @@ class NotificationService {
         'cancelable': true,
         'downloadId': downloadId,
         'actions': [
-          {
-            'id': 'resume',
-            'title': 'Resume',
-            'icon': 'play',
-          },
-          {
-            'id': 'cancel',
-            'title': 'Cancel',
-            'icon': 'close',
-          },
+          {'id': 'resume', 'title': 'Resume', 'icon': 'play'},
+          {'id': 'cancel', 'title': 'Cancel', 'icon': 'close'},
         ],
       });
     } catch (e) {
@@ -155,7 +138,7 @@ class NotificationService {
     String? downloadPath,
   }) async {
     if (!_isInitialized) await initialize();
-    
+
     try {
       await _platform.invokeMethod('showNotification', {
         'notificationId': downloadId.hashCode,
@@ -166,22 +149,14 @@ class NotificationService {
         'autoCancel': true,
         'downloadId': downloadId,
         'actions': [
-          {
-            'id': 'open_folder',
-            'title': 'Open Folder',
-            'icon': 'folder_open',
-          },
-          {
-            'id': 'share',
-            'title': 'Share',
-            'icon': 'share',
-          },
+          {'id': 'open_folder', 'title': 'Open Folder', 'icon': 'folder_open'},
+          {'id': 'share', 'title': 'Share', 'icon': 'share'},
         ],
         'extras': {
           'downloadPath': downloadPath,
           'archiveName': archiveName,
           'fileCount': fileCount,
-        }
+        },
       });
     } catch (e) {
       debugPrint('Failed to show download complete notification: $e');
@@ -195,7 +170,7 @@ class NotificationService {
     required String errorMessage,
   }) async {
     if (!_isInitialized) await initialize();
-    
+
     try {
       await _platform.invokeMethod('showNotification', {
         'notificationId': downloadId.hashCode,
@@ -207,16 +182,8 @@ class NotificationService {
         'priority': 'high',
         'downloadId': downloadId,
         'actions': [
-          {
-            'id': 'retry',
-            'title': 'Retry',
-            'icon': 'refresh',
-          },
-          {
-            'id': 'dismiss',
-            'title': 'Dismiss',
-            'icon': 'close',
-          },
+          {'id': 'retry', 'title': 'Retry', 'icon': 'refresh'},
+          {'id': 'dismiss', 'title': 'Dismiss', 'icon': 'close'},
         ],
       });
     } catch (e) {
@@ -251,7 +218,7 @@ class NotificationService {
     required double averageProgress,
   }) async {
     if (!_isInitialized) await initialize();
-    
+
     try {
       await _platform.invokeMethod('showNotification', {
         'notificationId': 'download_summary'.hashCode,
@@ -263,16 +230,8 @@ class NotificationService {
         'ongoing': true,
         'groupSummary': true,
         'actions': [
-          {
-            'id': 'pause_all',
-            'title': 'Pause All',
-            'icon': 'pause',
-          },
-          {
-            'id': 'open_app',
-            'title': 'Open App',
-            'icon': 'app',
-          },
+          {'id': 'pause_all', 'title': 'Pause All', 'icon': 'pause'},
+          {'id': 'open_app', 'title': 'Open App', 'icon': 'app'},
         ],
       });
     } catch (e) {
@@ -283,9 +242,7 @@ class NotificationService {
   /// Update app icon badge count (if supported)
   static Future<void> updateBadgeCount(int count) async {
     try {
-      await _platform.invokeMethod('updateBadgeCount', {
-        'count': count,
-      });
+      await _platform.invokeMethod('updateBadgeCount', {'count': count});
     } catch (e) {
       debugPrint('Failed to update badge count: $e');
     }

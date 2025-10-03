@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 /// Internet Archive Helper Material 3 Theme
-/// 
+///
 /// This theme implements Material 3 design principles with Internet Archive
 /// branding colors and modern accessibility standards.
 class AppTheme {
@@ -9,18 +9,18 @@ class AppTheme {
   static const Color internetArchiveBlue = Color(0xFF004B87);
   static const Color internetArchiveOrange = Color(0xFFFF6B35);
   static const Color internetArchiveGray = Color(0xFF666666);
-  
+
   // Material 3 color tokens
   static const Color primaryColor = internetArchiveBlue;
   static const Color secondaryColor = internetArchiveOrange;
   static const Color tertiaryColor = Color(0xFF0088CC);
-  
+
   // Semantic colors
   static const Color successColor = Color(0xFF2E7D32);
   static const Color warningColor = Color(0xFFED6C02);
   static const Color errorColor = Color(0xFFD32F2F);
   static const Color infoColor = Color(0xFF0288D1);
-  
+
   // Light theme with Material 3 design
   static ThemeData get lightTheme {
     final ColorScheme lightColorScheme = ColorScheme.fromSeed(
@@ -36,7 +36,7 @@ class AppTheme {
     return ThemeData(
       useMaterial3: true,
       colorScheme: lightColorScheme,
-      
+
       // App Bar with modern Material 3 styling
       appBarTheme: AppBarTheme(
         centerTitle: true,
@@ -45,20 +45,16 @@ class AppTheme {
         backgroundColor: lightColorScheme.surface,
         foregroundColor: lightColorScheme.onSurface,
         surfaceTintColor: lightColorScheme.surfaceTint,
-        iconTheme: IconThemeData(
-          color: lightColorScheme.onSurface,
-        ),
+        iconTheme: IconThemeData(color: lightColorScheme.onSurface),
       ),
-      
+
       // Cards with Material 3 styling
       cardTheme: CardThemeData(
         elevation: 1,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         clipBehavior: Clip.hardEdge,
       ),
-      
+
       // Filled buttons with Material 3 styling
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
@@ -68,7 +64,7 @@ class AppTheme {
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
         ),
       ),
-      
+
       // Elevated buttons
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
@@ -79,7 +75,7 @@ class AppTheme {
           elevation: 2,
         ),
       ),
-      
+
       // Text buttons
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
@@ -89,41 +85,35 @@ class AppTheme {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         ),
       ),
-      
+
       // Input fields with Material 3 styling
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(
-            color: lightColorScheme.outline,
-          ),
+          borderSide: BorderSide(color: lightColorScheme.outline),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(
-            color: lightColorScheme.primary,
-            width: 2,
-          ),
+          borderSide: BorderSide(color: lightColorScheme.primary, width: 2),
         ),
         errorBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(
-            color: lightColorScheme.error,
-          ),
+          borderSide: BorderSide(color: lightColorScheme.error),
         ),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 16,
+        ),
       ),
-      
+
       // Progress indicators
       progressIndicatorTheme: ProgressIndicatorThemeData(
         color: lightColorScheme.primary,
         linearTrackColor: lightColorScheme.surfaceVariant,
       ),
-      
+
       // Bottom navigation
       bottomNavigationBarTheme: BottomNavigationBarThemeData(
         type: BottomNavigationBarType.fixed,
@@ -132,7 +122,7 @@ class AppTheme {
         unselectedItemColor: lightColorScheme.onSurfaceVariant,
         elevation: 3,
       ),
-      
+
       // FAB with Material 3 styling
       floatingActionButtonTheme: FloatingActionButtonThemeData(
         backgroundColor: lightColorScheme.primaryContainer,
@@ -141,27 +131,23 @@ class AppTheme {
         focusElevation: 4,
         hoverElevation: 4,
         highlightElevation: 2,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       ),
-      
+
       // Dividers
       dividerTheme: DividerThemeData(
         color: lightColorScheme.outlineVariant,
         thickness: 1,
       ),
-      
+
       // Lists
       listTileTheme: ListTileThemeData(
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       ),
     );
   }
-  
+
   // Dark theme with Material 3 design
   static ThemeData get darkTheme {
     final ColorScheme darkColorScheme = ColorScheme.fromSeed(
@@ -177,7 +163,7 @@ class AppTheme {
     return ThemeData(
       useMaterial3: true,
       colorScheme: darkColorScheme,
-      
+
       // App Bar with dark theme styling
       appBarTheme: AppBarTheme(
         centerTitle: true,
@@ -186,20 +172,16 @@ class AppTheme {
         backgroundColor: darkColorScheme.surface,
         foregroundColor: darkColorScheme.onSurface,
         surfaceTintColor: darkColorScheme.surfaceTint,
-        iconTheme: IconThemeData(
-          color: darkColorScheme.onSurface,
-        ),
+        iconTheme: IconThemeData(color: darkColorScheme.onSurface),
       ),
-      
+
       // Cards with Material 3 dark styling
       cardTheme: CardThemeData(
         elevation: 1,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         clipBehavior: Clip.hardEdge,
       ),
-      
+
       // Filled buttons with Material 3 styling
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
@@ -209,7 +191,7 @@ class AppTheme {
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
         ),
       ),
-      
+
       // Elevated buttons
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
@@ -220,7 +202,7 @@ class AppTheme {
           elevation: 2,
         ),
       ),
-      
+
       // Text buttons
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
@@ -230,41 +212,35 @@ class AppTheme {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         ),
       ),
-      
+
       // Input fields with Material 3 dark styling
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(
-            color: darkColorScheme.outline,
-          ),
+          borderSide: BorderSide(color: darkColorScheme.outline),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(
-            color: darkColorScheme.primary,
-            width: 2,
-          ),
+          borderSide: BorderSide(color: darkColorScheme.primary, width: 2),
         ),
         errorBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(
-            color: darkColorScheme.error,
-          ),
+          borderSide: BorderSide(color: darkColorScheme.error),
         ),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 16,
+        ),
       ),
-      
+
       // Progress indicators
       progressIndicatorTheme: ProgressIndicatorThemeData(
         color: darkColorScheme.primary,
         linearTrackColor: darkColorScheme.surfaceVariant,
       ),
-      
+
       // Bottom navigation
       bottomNavigationBarTheme: BottomNavigationBarThemeData(
         type: BottomNavigationBarType.fixed,
@@ -273,7 +249,7 @@ class AppTheme {
         unselectedItemColor: darkColorScheme.onSurfaceVariant,
         elevation: 3,
       ),
-      
+
       // FAB with Material 3 dark styling
       floatingActionButtonTheme: FloatingActionButtonThemeData(
         backgroundColor: darkColorScheme.primaryContainer,
@@ -282,22 +258,18 @@ class AppTheme {
         focusElevation: 4,
         hoverElevation: 4,
         highlightElevation: 2,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       ),
-      
+
       // Dividers
       dividerTheme: DividerThemeData(
         color: darkColorScheme.outlineVariant,
         thickness: 1,
       ),
-      
+
       // Lists
       listTileTheme: ListTileThemeData(
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       ),
     );
