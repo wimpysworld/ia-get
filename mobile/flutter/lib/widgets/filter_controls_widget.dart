@@ -1,6 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import '../services/ia_get_service.dart';
 import '../screens/filters_screen.dart';
 
 class FilterControlsWidget extends StatefulWidget {

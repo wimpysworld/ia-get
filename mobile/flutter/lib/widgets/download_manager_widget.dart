@@ -35,11 +35,11 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
             color: Theme.of(context).colorScheme.surface,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: Theme.of(context).colorScheme.outline.withOpacity(0.2),
+              color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.2),
             ),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.1),
+                color: Colors.black.withValues(alpha: 0.1),
                 blurRadius: 8,
                 offset: const Offset(0, 2),
               ),
@@ -132,7 +132,7 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
+      color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
@@ -320,7 +320,7 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
       children: [
         LinearProgressIndicator(
           value: isIndeterminate ? null : progress,
-          backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
+          backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
           valueColor: AlwaysStoppedAnimation<Color>(
             _getStatusColor(context, download),
           ),

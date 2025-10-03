@@ -286,7 +286,7 @@ class _FiltersScreenState extends State<FiltersScreen> {
           ),
           const SizedBox(height: 12),
           DropdownButtonFormField<String>(
-            value: _maxSize,
+            initialValue: _maxSize,
             decoration: const InputDecoration(
               hintText: 'No limit',
               border: OutlineInputBorder(),
@@ -318,7 +318,7 @@ class _FiltersScreenState extends State<FiltersScreen> {
           color: Theme.of(context).colorScheme.surface,
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.1),
+              color: Colors.black.withValues(alpha: 0.1),
               blurRadius: 4,
               offset: const Offset(0, -2),
             ),

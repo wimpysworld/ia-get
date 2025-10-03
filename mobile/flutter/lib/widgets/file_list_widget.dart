@@ -79,7 +79,7 @@ class _FileListWidgetState extends State<FileListWidget> {
                       top: 4,
                       child: Container(
                         padding: const EdgeInsets.all(4),
-                        decoration: BoxDecoration(
+                        decoration: const BoxDecoration(
                           color: Colors.red,
                           shape: BoxShape.circle,
                         ),
@@ -171,7 +171,7 @@ class _FileListWidgetState extends State<FileListWidget> {
           Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            color: Theme.of(context).primaryColor.withOpacity(0.1),
+            color: Theme.of(context).primaryColor.withValues(alpha: 0.1),
             child: Text(
               '$selectedCount files selected • ${_formatSize(totalSize)}',
               style: TextStyle(

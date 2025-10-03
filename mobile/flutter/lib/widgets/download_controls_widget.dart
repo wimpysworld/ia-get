@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/ia_get_service.dart';
 import '../services/background_download_service.dart';
-import '../models/archive_metadata.dart';
 import '../screens/download_screen.dart';
 import '../screens/settings_screen.dart';
 import '../utils/file_utils.dart';
@@ -288,6 +287,8 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
     final hasPermission = await PermissionUtils.hasStoragePermissions();
 
     if (!hasPermission) {
+      if (!mounted) return;
+      
       // Show rationale before requesting permission
       final shouldRequest = await PermissionUtils.showPermissionRationaleDialog(
         context: context,
@@ -517,6 +518,8 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
                 // Retry after checking permissions again
                 final hasPermission =
                     await PermissionUtils.hasStoragePermissions();
+                if (!mounted) return;
+                
                 if (!hasPermission) {
                   await PermissionUtils.showSettingsDialog(
                     context: context,

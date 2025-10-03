@@ -669,7 +669,7 @@ class IaGetService extends ChangeNotifier {
         } else {
           if (kDebugMode) {
             print(
-              'Metadata fetch attempt ${retryCount} failed: $e. Retrying...',
+              'Metadata fetch attempt $retryCount failed: $e. Retrying...',
             );
           }
           // Exponential backoff: wait before retrying
@@ -984,7 +984,7 @@ class IaGetService extends ChangeNotifier {
       }
 
       if (kDebugMode && attempts % 4 == 0) {
-        print('Still waiting... ($attempts/${maxAttempts} attempts)');
+        print('Still waiting... ($attempts/$maxAttempts attempts)');
       }
 
       // Add small initial delay to give the fetch operation time to start
@@ -994,7 +994,7 @@ class IaGetService extends ChangeNotifier {
     }
 
     throw Exception(
-      'Metadata fetch timeout after ${timeout.inSeconds} seconds (${attempts} attempts)',
+      'Metadata fetch timeout after ${timeout.inSeconds} seconds ($attempts attempts)',
     );
   }
 

@@ -301,12 +301,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _showHiddenFiles = false;
               });
 
-              if (mounted) {
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Settings reset to defaults')),
-                );
-              }
+              if (!mounted) return;
+              
+              Navigator.pop(context);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Settings reset to defaults')),
+              );
             },
             child: const Text('Reset'),
           ),

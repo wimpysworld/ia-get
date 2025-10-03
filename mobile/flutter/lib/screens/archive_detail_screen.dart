@@ -3,7 +3,6 @@ import 'package:provider/provider.dart';
 import '../services/ia_get_service.dart';
 import '../widgets/archive_info_widget.dart';
 import '../widgets/file_list_widget.dart';
-import '../widgets/filter_controls_widget.dart';
 import '../widgets/download_controls_widget.dart';
 import '../widgets/download_manager_widget.dart';
 
@@ -13,12 +12,14 @@ class ArchiveDetailScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: () async {
-        // Clear metadata when going back to search
-        final service = context.read<IaGetService>();
-        service.clearMetadata();
-        return true;
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) {
+          // Clear metadata when going back to search
+          final service = context.read<IaGetService>();
+          service.clearMetadata();
+        }
       },
       child: Scaffold(
         appBar: AppBar(

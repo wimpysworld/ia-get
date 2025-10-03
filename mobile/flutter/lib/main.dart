@@ -67,9 +67,9 @@ class IAGetMobileApp extends StatelessWidget {
           // Disable text scaling for consistent UI
           return MediaQuery(
             data: MediaQuery.of(context).copyWith(
-              textScaleFactor: MediaQuery.of(
-                context,
-              ).textScaleFactor.clamp(0.8, 1.2),
+              textScaler: TextScaler.linear(
+                MediaQuery.of(context).textScaler.scale(1.0).clamp(0.8, 1.2),
+              ),
             ),
             child: child!,
           );

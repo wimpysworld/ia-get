@@ -111,7 +111,7 @@ class AppTheme {
       // Progress indicators
       progressIndicatorTheme: ProgressIndicatorThemeData(
         color: lightColorScheme.primary,
-        linearTrackColor: lightColorScheme.surfaceVariant,
+        linearTrackColor: lightColorScheme.surfaceContainerHighest,
       ),
 
       // Bottom navigation
@@ -154,10 +154,10 @@ class AppTheme {
       seedColor: primaryColor,
       brightness: Brightness.dark,
       // Override specific colors for Internet Archive branding
-      primary: Color(0xFF6BB6FF), // Lighter blue for dark theme
+      primary: const Color(0xFF6BB6FF), // Lighter blue for dark theme
       secondary: internetArchiveOrange,
-      tertiary: Color(0xFF64B5F6),
-      error: Color(0xFFFF5449),
+      tertiary: const Color(0xFF64B5F6),
+      error: const Color(0xFFFF5449),
     );
 
     return ThemeData(
@@ -238,7 +238,7 @@ class AppTheme {
       // Progress indicators
       progressIndicatorTheme: ProgressIndicatorThemeData(
         color: darkColorScheme.primary,
-        linearTrackColor: darkColorScheme.surfaceVariant,
+        linearTrackColor: darkColorScheme.surfaceContainerHighest,
       ),
 
       // Bottom navigation
