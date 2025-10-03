@@ -321,6 +321,7 @@ class IaGetService extends ChangeNotifier {
   ArchiveMetadata? _currentMetadata;
   List<ArchiveFile> _filteredFiles = [];
   int? _currentRequestId;
+  List<Map<String, String>> _suggestions = []; // Store search suggestions
   
   bool get isInitialized => _isInitialized;
   bool get isLoading => _isLoading;
@@ -328,6 +329,7 @@ class IaGetService extends ChangeNotifier {
   ArchiveMetadata? get currentMetadata => _currentMetadata;
   List<ArchiveFile> get filteredFiles => _filteredFiles;
   bool get canCancel => _isLoading && _currentRequestId != null;
+  List<Map<String, String>> get suggestions => _suggestions;
   
   /// Initialize the service
   Future<void> initialize() async {
@@ -416,6 +418,7 @@ class IaGetService extends ChangeNotifier {
     _error = null;
     _currentMetadata = null;
     _filteredFiles = [];
+    _suggestions = []; // Clear previous suggestions
     notifyListeners();
     
     int maxRetries = 3;
@@ -469,6 +472,7 @@ class IaGetService extends ChangeNotifier {
           final metadataMap = jsonDecode(metadataJson) as Map<String, dynamic>;
           _currentMetadata = ArchiveMetadata.fromJson(metadataMap);
           _filteredFiles = _currentMetadata!.files;
+          _suggestions = []; // Clear suggestions on successful fetch
           
           if (kDebugMode) {
             print('Successfully parsed metadata: ${_currentMetadata!.identifier}');
@@ -498,14 +502,17 @@ class IaGetService extends ChangeNotifier {
               final docs = searchData['response']?['docs'] as List<dynamic>?;
               
               if (docs != null && docs.isNotEmpty) {
-                // Show error with suggestions
-                final suggestions = docs.take(5).map((doc) {
+                // Store suggestions for display
+                _suggestions = docs.take(5).map((doc) {
                   final id = doc['identifier'] ?? 'unknown';
                   final title = doc['title'] ?? id;
-                  return '$id${title != id ? " ($title)" : ""}';
-                }).join('\n• ');
+                  return {
+                    'identifier': id,
+                    'title': title,
+                  };
+                }).toList();
                 
-                _error = 'Archive "$trimmedIdentifier" not found.\n\nDid you mean:\n• $suggestions';
+                _error = 'Archive "$trimmedIdentifier" not found. See suggestions below.';
               } else {
                 _error = 'Archive "$trimmedIdentifier" not found. No similar archives found.';
               }
@@ -668,6 +675,41 @@ class IaGetService extends ChangeNotifier {
   /// Notify that file selection has changed
   /// This should be called when files are selected/deselected
   void notifyFileSelectionChanged() {
+    notifyListeners();
+  }
+  
+  /// Get all unique file formats/extensions present in the current archive
+  /// Returns a cached set for performance
+  Set<String> getAvailableFormats() {
+    if (_currentMetadata == null) {
+      return {};
+    }
+    
+    final formats = <String>{};
+    for (final file in _currentMetadata!.files) {
+      // Add format if available
+      if (file.format != null && file.format!.isNotEmpty) {
+        formats.add(file.format!.toLowerCase());
+      }
+      
+      // Also extract extension from filename
+      final fileName = file.name.toLowerCase();
+      final lastDot = fileName.lastIndexOf('.');
+      if (lastDot != -1 && lastDot < fileName.length - 1) {
+        final ext = fileName.substring(lastDot + 1);
+        // Only add if it looks like a valid extension (no spaces, reasonable length)
+        if (!ext.contains(' ') && ext.length <= 10 && ext.isNotEmpty) {
+          formats.add(ext);
+        }
+      }
+    }
+    
+    return formats;
+  }
+  
+  /// Clear search suggestions
+  void clearSuggestions() {
+    _suggestions = [];
     notifyListeners();
   }
   

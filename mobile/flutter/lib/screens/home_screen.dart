@@ -31,7 +31,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Internet Archive Helper'),
+        title: const Text('Search'),
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
@@ -103,6 +103,43 @@ class _HomeScreenState extends State<HomeScreen> {
                           style: TextStyle(color: Colors.red.shade700),
                         ),
                       ),
+                    ],
+                  ),
+                ),
+
+              // Search suggestions
+              if (service.suggestions.isNotEmpty)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  margin: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Did you mean:',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.grey.shade700,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      ...service.suggestions.map((suggestion) {
+                        return Card(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          child: ListTile(
+                            leading: const Icon(Icons.archive),
+                            title: Text(suggestion['title']!),
+                            subtitle: Text(suggestion['identifier']!),
+                            trailing: const Icon(Icons.arrow_forward),
+                            onTap: () {
+                              // Fetch metadata for the suggested archive
+                              service.fetchMetadata(suggestion['identifier']!);
+                            },
+                          ),
+                        );
+                      }),
                     ],
                   ),
                 ),

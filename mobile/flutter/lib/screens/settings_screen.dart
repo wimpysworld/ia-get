@@ -301,8 +301,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           ElevatedButton(
             onPressed: () async {
+              // Clear all preferences
               await _prefs.clear();
-              await _loadSettings();
+              
+              // Reset to default values immediately
+              setState(() {
+                _downloadPath = '/storage/emulated/0/Download/ia-get';
+                _concurrentDownloads = 3;
+                _autoDecompress = false;
+                _verifyChecksums = true;
+                _showHiddenFiles = false;
+              });
+              
               if (mounted) {
                 Navigator.pop(context);
                 ScaffoldMessenger.of(context).showSnackBar(

@@ -23,11 +23,8 @@ class _FiltersScreenState extends State<FiltersScreen> {
   late List<String> _selectedExcludeFormats;
   late String? _maxSize;
 
-  final List<String> _commonFormats = [
-    'pdf', 'epub', 'txt', 'mp3', 'mp4', 'avi', 
-    'jpg', 'png', 'gif', 'zip', 'rar', 'iso',
-    'doc', 'docx', 'mobi', 'azw3', 'mkv', 'flac'
-  ];
+  // Will be populated from available formats in the archive
+  List<String> _availableFormats = [];
 
   final List<String> _sizeOptions = [
     '10MB', '50MB', '100MB', '500MB', '1GB', '5GB', '10GB'
@@ -39,6 +36,15 @@ class _FiltersScreenState extends State<FiltersScreen> {
     _selectedIncludeFormats = List.from(widget.initialIncludeFormats);
     _selectedExcludeFormats = List.from(widget.initialExcludeFormats);
     _maxSize = widget.initialMaxSize;
+    
+    // Load available formats from the current archive
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final service = context.read<IaGetService>();
+      final formats = service.getAvailableFormats();
+      setState(() {
+        _availableFormats = formats.toList()..sort();
+      });
+    });
   }
 
   @override
@@ -90,37 +96,47 @@ class _FiltersScreenState extends State<FiltersScreen> {
           // Include formats section
           _buildSectionHeader('Include Formats'),
           const SizedBox(height: 8),
-          const Text(
-            'Show only these file formats',
-            style: TextStyle(
+          Text(
+            _availableFormats.isEmpty 
+                ? 'Loading available formats...'
+                : 'Show only these file formats (${_availableFormats.length} available)',
+            style: const TextStyle(
               fontSize: 12,
               color: Colors.grey,
             ),
           ),
           const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: _commonFormats.map((format) {
-              final isSelected = _selectedIncludeFormats.contains(format);
-              return FilterChip(
-                label: Text(format.toUpperCase()),
-                selected: isSelected,
-                onSelected: (selected) {
-                  setState(() {
-                    if (selected) {
-                      _selectedIncludeFormats.add(format);
-                      _selectedExcludeFormats.remove(format);
-                    } else {
-                      _selectedIncludeFormats.remove(format);
-                    }
-                  });
-                },
-                selectedColor: Colors.blue.shade200,
-                checkmarkColor: Colors.blue.shade700,
-              );
-            }).toList(),
-          ),
+          if (_availableFormats.isEmpty)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(16.0),
+                child: CircularProgressIndicator(),
+              ),
+            )
+          else
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: _availableFormats.map((format) {
+                final isSelected = _selectedIncludeFormats.contains(format);
+                return FilterChip(
+                  label: Text(format.toUpperCase()),
+                  selected: isSelected,
+                  onSelected: (selected) {
+                    setState(() {
+                      if (selected) {
+                        _selectedIncludeFormats.add(format);
+                        _selectedExcludeFormats.remove(format);
+                      } else {
+                        _selectedIncludeFormats.remove(format);
+                      }
+                    });
+                  },
+                  selectedColor: Colors.blue.shade200,
+                  checkmarkColor: Colors.blue.shade700,
+                );
+              }).toList(),
+            ),
           
           const SizedBox(height: 24),
           const Divider(),
@@ -137,29 +153,37 @@ class _FiltersScreenState extends State<FiltersScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: _commonFormats.map((format) {
-              final isSelected = _selectedExcludeFormats.contains(format);
-              return FilterChip(
-                label: Text(format.toUpperCase()),
-                selected: isSelected,
-                onSelected: (selected) {
-                  setState(() {
-                    if (selected) {
-                      _selectedExcludeFormats.add(format);
-                      _selectedIncludeFormats.remove(format);
-                    } else {
-                      _selectedExcludeFormats.remove(format);
-                    }
-                  });
-                },
-                selectedColor: Colors.red.shade200,
-                checkmarkColor: Colors.red.shade700,
-              );
-            }).toList(),
-          ),
+          if (_availableFormats.isEmpty)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(16.0),
+                child: CircularProgressIndicator(),
+              ),
+            )
+          else
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: _availableFormats.map((format) {
+                final isSelected = _selectedExcludeFormats.contains(format);
+                return FilterChip(
+                  label: Text(format.toUpperCase()),
+                  selected: isSelected,
+                  onSelected: (selected) {
+                    setState(() {
+                      if (selected) {
+                        _selectedExcludeFormats.add(format);
+                        _selectedIncludeFormats.remove(format);
+                      } else {
+                        _selectedExcludeFormats.remove(format);
+                      }
+                    });
+                  },
+                  selectedColor: Colors.red.shade200,
+                  checkmarkColor: Colors.red.shade700,
+                );
+              }).toList(),
+            ),
           
           const SizedBox(height: 24),
           const Divider(),

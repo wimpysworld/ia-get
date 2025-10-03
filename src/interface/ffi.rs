@@ -1256,103 +1256,6 @@ pub extern "C" fn ia_get_last_error() -> *const c_char {
     ptr::null()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::ffi::CString;
-
-    extern "C" fn test_progress_callback(progress: f64, message: *const c_char, _user_data: usize) {
-        if !message.is_null() {
-            let msg = unsafe { CStr::from_ptr(message) }.to_str().unwrap();
-            println!("Progress: {:.1}% - {}", progress * 100.0, msg);
-        }
-    }
-
-    extern "C" fn test_completion_callback(
-        success: bool,
-        error_message: *const c_char,
-        _user_data: usize,
-    ) {
-        if success {
-            println!("Operation completed successfully");
-        } else if !error_message.is_null() {
-            let msg = unsafe { CStr::from_ptr(error_message) }.to_str().unwrap();
-            println!("Operation failed: {}", msg);
-        }
-    }
-
-    #[test]
-    fn test_ffi_init() {
-        let result = ia_get_init();
-        assert_eq!(result as i32, IaGetErrorCode::Success as i32);
-    }
-
-    #[test]
-    fn test_ffi_filter_files() {
-        let metadata_json = r#"{
-            "created": 1640995200,
-            "d1": "ia800100.us.archive.org",
-            "d2": "ia600100.us.archive.org", 
-            "dir": "/test",
-            "files": [{
-                "name": "test.pdf",
-                "source": "original",
-                "mtime": "1640995200",
-                "size": 1024,
-                "format": "pdf",
-                "crc32": "12345678",
-                "md5": "abcdef123456789",
-                "sha1": "fedcba987654321",
-                "btih": "999999999999999",
-                "summation": "5555"
-            }],
-            "files_count": 1,
-            "item_last_updated": 1640995200,
-            "item_size": 1024,
-            "metadata": {"title": "Test Archive"},
-            "server": "ia800100.us.archive.org",
-            "uniq": 123456,
-            "workable_servers": ["ia800100.us.archive.org"]
-        }"#;
-        let metadata_cstr = CString::new(metadata_json).unwrap();
-        let include_formats = CString::new("pdf").unwrap();
-
-        let result = unsafe {
-            ia_get_filter_files(
-                metadata_cstr.as_ptr(),
-                include_formats.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-
-        assert!(!result.is_null());
-
-        // Clean up
-        unsafe {
-            ia_get_free_string(result);
-        }
-    }
-
-    #[test]
-    fn test_ffi_fetch_metadata() {
-        let identifier = CString::new("commute_test").unwrap();
-
-        let request_id = unsafe {
-            ia_get_fetch_metadata(
-                identifier.as_ptr(),
-                test_progress_callback,
-                test_completion_callback,
-                0,
-            )
-        };
-
-        assert!(request_id > 0);
-
-        // In a real test, you'd wait for the async operation to complete
-    }
-}
-
 /// Check if a request is already in progress for an identifier
 /// Returns true if request is in progress, false otherwise
 ///
@@ -1653,5 +1556,102 @@ pub unsafe extern "C" fn ia_get_search_archives(
             }
         },
         None => ptr::null_mut(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    extern "C" fn test_progress_callback(progress: f64, message: *const c_char, _user_data: usize) {
+        if !message.is_null() {
+            let msg = unsafe { CStr::from_ptr(message) }.to_str().unwrap();
+            println!("Progress: {:.1}% - {}", progress * 100.0, msg);
+        }
+    }
+
+    extern "C" fn test_completion_callback(
+        success: bool,
+        error_message: *const c_char,
+        _user_data: usize,
+    ) {
+        if success {
+            println!("Operation completed successfully");
+        } else if !error_message.is_null() {
+            let msg = unsafe { CStr::from_ptr(error_message) }.to_str().unwrap();
+            println!("Operation failed: {}", msg);
+        }
+    }
+
+    #[test]
+    fn test_ffi_init() {
+        let result = ia_get_init();
+        assert_eq!(result as i32, IaGetErrorCode::Success as i32);
+    }
+
+    #[test]
+    fn test_ffi_filter_files() {
+        let metadata_json = r#"{
+            "created": 1640995200,
+            "d1": "ia800100.us.archive.org",
+            "d2": "ia600100.us.archive.org", 
+            "dir": "/test",
+            "files": [{
+                "name": "test.pdf",
+                "source": "original",
+                "mtime": "1640995200",
+                "size": 1024,
+                "format": "pdf",
+                "crc32": "12345678",
+                "md5": "abcdef123456789",
+                "sha1": "fedcba987654321",
+                "btih": "999999999999999",
+                "summation": "5555"
+            }],
+            "files_count": 1,
+            "item_last_updated": 1640995200,
+            "item_size": 1024,
+            "metadata": {"title": "Test Archive"},
+            "server": "ia800100.us.archive.org",
+            "uniq": 123456,
+            "workable_servers": ["ia800100.us.archive.org"]
+        }"#;
+        let metadata_cstr = CString::new(metadata_json).unwrap();
+        let include_formats = CString::new("pdf").unwrap();
+
+        let result = unsafe {
+            ia_get_filter_files(
+                metadata_cstr.as_ptr(),
+                include_formats.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+
+        assert!(!result.is_null());
+
+        // Clean up
+        unsafe {
+            ia_get_free_string(result);
+        }
+    }
+
+    #[test]
+    fn test_ffi_fetch_metadata() {
+        let identifier = CString::new("commute_test").unwrap();
+
+        let request_id = unsafe {
+            ia_get_fetch_metadata(
+                identifier.as_ptr(),
+                test_progress_callback,
+                test_completion_callback,
+                0,
+            )
+        };
+
+        assert!(request_id > 0);
+
+        // In a real test, you'd wait for the async operation to complete
     }
 }
