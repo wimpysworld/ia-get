@@ -82,9 +82,8 @@ class _DownloadScreenState extends State<DownloadScreen> {
                   ],
                 ],
               ),
-        ),
-      );
-    }
+    );
+  }
 
   Widget _buildActiveDownloadCard(DownloadProgress progress) {
     return Card(

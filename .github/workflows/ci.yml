@@ -457,6 +457,13 @@ jobs:
         DART_VERSION=$(flutter --version | grep "Dart" | awk '{print $4}')
         echo "Detected Dart version: $DART_VERSION"
 
+    - name: Flutter Code Analysis
+      run: |
+        cd mobile/flutter
+        echo "Running flutter analyze..."
+        flutter analyze
+        echo "✓ Flutter analysis passed"
+
     - name: Build Android APK and App Bundle
       run: |
         chmod +x scripts/build-mobile.sh

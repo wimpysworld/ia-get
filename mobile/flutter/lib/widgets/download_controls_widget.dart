@@ -521,7 +521,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
                 }
               },
               icon: const Icon(Icons.refresh),
-              child: const Text('Retry'),
+              label: const Text('Retry'),
             ),
           ],
         ),
