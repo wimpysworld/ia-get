@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:isolate';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -10,7 +11,7 @@ import 'notification_service.dart';
 /// Service for managing background downloads with Android WorkManager integration
 class BackgroundDownloadService extends ChangeNotifier {
   static const _platform = MethodChannel(
-    'com.internetarchive.helper/background_download',
+    'com.gameaday.internet_archive_helper/platform',
   );
 
   final Map<String, DownloadProgress> _activeDownloads = {};
@@ -72,9 +73,6 @@ class BackgroundDownloadService extends ChangeNotifier {
     try {
       // Setup method channel communication with Android
       _platform.setMethodCallHandler(_handleMethodCall);
-
-      // Initialize native background service
-      await _platform.invokeMethod('initialize');
 
       // Start periodic status updates (faster for better feedback)
       _statusUpdateTimer = Timer.periodic(
@@ -180,16 +178,25 @@ class BackgroundDownloadService extends ChangeNotifier {
     String? maxSize,
   }) async {
     try {
-      final downloadId = await _platform.invokeMethod('startDownload', {
-        'identifier': identifier,
-        'selectedFiles': selectedFiles,
-        'downloadPath': downloadPath,
+      // Convert selectedFiles list to JSON string
+      final filesJson = jsonEncode(selectedFiles);
+      
+      // Create config JSON
+      final configJson = jsonEncode({
         'includeFormats': includeFormats,
         'excludeFormats': excludeFormats,
         'maxSize': maxSize,
       });
+      
+      final success = await _platform.invokeMethod('startDownloadService', {
+        'identifier': identifier,
+        'outputDir': downloadPath,
+        'configJson': configJson,
+        'filesJson': filesJson,
+      });
 
-      if (downloadId != null) {
+      if (success == true) {
+        final downloadId = identifier; // Use identifier as downloadId
         _activeDownloads[downloadId] = DownloadProgress(
           downloadId: downloadId,
           identifier: identifier,
@@ -197,9 +204,10 @@ class BackgroundDownloadService extends ChangeNotifier {
           status: DownloadStatus.queued,
         );
         notifyListeners();
+        return downloadId;
       }
 
-      return downloadId;
+      return null;
     } catch (e) {
       debugPrint('Failed to start background download: $e');
       return null;

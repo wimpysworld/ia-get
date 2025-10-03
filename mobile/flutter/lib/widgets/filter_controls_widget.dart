@@ -151,7 +151,7 @@ class _FilterControlsWidgetState extends State<FilterControlsWidget> {
       ),
     );
 
-    // Update local state with returned filter values
+    // Update local state with returned filter values AND apply them to service
     if (result != null && mounted) {
       setState(() {
         _selectedIncludeFormats = List<String>.from(

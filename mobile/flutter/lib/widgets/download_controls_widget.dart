@@ -139,27 +139,34 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      builder: (context) => DraggableScrollableSheet(
-        initialChildSize: 0.7,
-        maxChildSize: 0.9,
-        minChildSize: 0.5,
-        builder: (context, scrollController) => Container(
+      builder: (context) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: Container(
           padding: const EdgeInsets.all(16),
-          child: ListView(
-            controller: scrollController,
+          decoration: BoxDecoration(
+            color: Theme.of(context).scaffoldBackgroundColor,
+            borderRadius: const BorderRadius.vertical(
+              top: Radius.circular(16),
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // Handle
               Center(
                 child: Container(
                   width: 32,
                   height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
                   decoration: BoxDecoration(
                     color: Colors.grey,
                     borderRadius: BorderRadius.circular(2),
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
 
               const Text(
                 'Download Settings',
@@ -224,6 +231,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
                   'Automatically extract ZIP, TAR, and other archives',
                 ),
                 value: _autoDecompress,
+                contentPadding: EdgeInsets.zero,
                 onChanged: (value) {
                   setState(() {
                     _autoDecompress = value;
@@ -238,6 +246,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
                   'Verify MD5/SHA1 checksums after download',
                 ),
                 value: _verifyChecksums,
+                contentPadding: EdgeInsets.zero,
                 onChanged: (value) {
                   setState(() {
                     _verifyChecksums = value;

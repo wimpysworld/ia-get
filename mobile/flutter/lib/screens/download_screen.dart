@@ -5,6 +5,9 @@ import '../models/download_progress.dart';
 class DownloadScreen extends StatefulWidget {
   const DownloadScreen({super.key});
 
+  /// Route name for navigation tracking
+  static const routeName = '/downloads';
+
   @override
   State<DownloadScreen> createState() => _DownloadScreenState();
 }
@@ -15,16 +18,18 @@ class _DownloadScreenState extends State<DownloadScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Downloads'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.clear_all),
-            onPressed: _activeDownloads.isEmpty ? null : _clearAllDownloads,
-          ),
-        ],
-      ),
+    return PopScope(
+      canPop: true,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Downloads'),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.clear_all),
+              onPressed: _activeDownloads.isEmpty ? null : _clearAllDownloads,
+            ),
+          ],
+        ),
       body: _activeDownloads.isEmpty && _completedDownloads.isEmpty
           ? const Center(
               child: Column(
@@ -66,6 +71,7 @@ class _DownloadScreenState extends State<DownloadScreen> {
                 ],
               ],
             ),
+      ),
     );
   }
 

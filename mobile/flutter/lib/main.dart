@@ -5,6 +5,8 @@ import 'services/ia_get_service.dart';
 import 'services/background_download_service.dart';
 import 'services/deep_link_service.dart';
 import 'screens/home_screen.dart';
+import 'screens/archive_detail_screen.dart';
+import 'screens/download_screen.dart';
 import 'widgets/onboarding_widget.dart';
 import 'utils/theme.dart';
 import 'utils/permission_utils.dart';
@@ -77,7 +79,7 @@ class IAGetMobileApp extends StatelessWidget {
 
         // Navigation performance
         onGenerateRoute: (settings) {
-          // Implement custom route generation for better performance
+          // Implement custom route generation for better performance and state restoration
           switch (settings.name) {
             case '/':
               return MaterialPageRoute(
@@ -87,6 +89,16 @@ class IAGetMobileApp extends StatelessWidget {
             case '/home':
               return MaterialPageRoute(
                 builder: (_) => const HomeScreen(),
+                settings: settings,
+              );
+            case ArchiveDetailScreen.routeName:
+              return MaterialPageRoute(
+                builder: (_) => const ArchiveDetailScreen(),
+                settings: settings,
+              );
+            case DownloadScreen.routeName:
+              return MaterialPageRoute(
+                builder: (_) => const DownloadScreen(),
                 settings: settings,
               );
             default:

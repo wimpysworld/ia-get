@@ -46,6 +46,7 @@ class _HomeScreenState extends State<HomeScreen> {
           .push(
             MaterialPageRoute(
               builder: (context) => const ArchiveDetailScreen(),
+              settings: const RouteSettings(name: ArchiveDetailScreen.routeName),
             ),
           )
           .then((_) {
@@ -69,7 +70,10 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                MaterialPageRoute(
+                  builder: (_) => const SettingsScreen(),
+                  settings: const RouteSettings(name: '/settings'),
+                ),
               );
             },
           ),
@@ -78,7 +82,10 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => const HelpScreen()),
+                MaterialPageRoute(
+                  builder: (_) => const HelpScreen(),
+                  settings: const RouteSettings(name: '/help'),
+                ),
               );
             },
           ),
@@ -87,7 +94,10 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => const DownloadScreen()),
+                MaterialPageRoute(
+                  builder: (_) => const DownloadScreen(),
+                  settings: const RouteSettings(name: DownloadScreen.routeName),
+                ),
               );
             },
           ),
@@ -107,6 +117,16 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             );
           }
+
+          // Safety check: if we're on home screen, metadata should be cleared
+          // This prevents black screen if we somehow navigate back without clearing metadata
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && service.currentMetadata != null && !_hasNavigated) {
+              // We have metadata but haven't navigated - this shouldn't happen normally
+              // Clear it to ensure consistent state
+              service.clearMetadata();
+            }
+          });
 
           return Column(
             children: [

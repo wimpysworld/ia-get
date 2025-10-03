@@ -7,8 +7,18 @@ import '../widgets/download_controls_widget.dart';
 import '../widgets/download_manager_widget.dart';
 
 /// Screen showing archive details with files and download options
-class ArchiveDetailScreen extends StatelessWidget {
+class ArchiveDetailScreen extends StatefulWidget {
   const ArchiveDetailScreen({super.key});
+
+  /// Route name for navigation tracking and state restoration
+  static const routeName = '/archive-detail';
+
+  @override
+  State<ArchiveDetailScreen> createState() => _ArchiveDetailScreenState();
+}
+
+class _ArchiveDetailScreenState extends State<ArchiveDetailScreen> {
+  bool _isPopping = false;
 
   @override
   Widget build(BuildContext context) {
@@ -17,7 +27,8 @@ class ArchiveDetailScreen extends StatelessWidget {
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) {
           // Clear metadata when going back to search
-          final service = context.read<IaGetService>();
+          // Use Provider.of with listen: false for safer context access in callbacks
+          final service = Provider.of<IaGetService>(context, listen: false);
           service.clearMetadata();
         }
       },
@@ -34,11 +45,24 @@ class ArchiveDetailScreen extends StatelessWidget {
         ),
         body: Consumer<IaGetService>(
           builder: (context, service, child) {
-            if (service.currentMetadata == null) {
-              // If no metadata, go back to search
+            // If no metadata and not already popping, go back to search
+            if (service.currentMetadata == null && !_isPopping) {
+              _isPopping = true;
               WidgetsBinding.instance.addPostFrameCallback((_) {
-                Navigator.of(context).pop();
+                if (mounted && Navigator.of(context).canPop()) {
+                  Navigator.of(context).pop();
+                }
               });
+              return const Center(child: CircularProgressIndicator());
+            }
+
+            // If we have metadata again, reset the popping flag
+            if (service.currentMetadata != null && _isPopping) {
+              _isPopping = false;
+            }
+
+            // Show loading if we're in the popping state but still have metadata
+            if (_isPopping) {
               return const Center(child: CircularProgressIndicator());
             }
 
