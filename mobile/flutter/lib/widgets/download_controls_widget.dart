@@ -461,34 +461,36 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
       );
       return;
     } else if (hasSufficientSpace == null) {
-      // Unable to determine disk space - show warning but allow download
+      // Unable to determine disk space - show confirmation with download size
       if (!mounted) return;
       final shouldContinue = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
           title: Row(
             children: [
-              Icon(Icons.info, color: Colors.blue.shade700),
+              Icon(Icons.download, color: Colors.blue.shade700),
               const SizedBox(width: 8),
-              const Text('Disk Space Check'),
+              const Text('Ready to Download'),
             ],
           ),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                'Unable to determine available disk space.',
+              Text(
+                'Total download size: ${_formatSize(totalSize)}',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w500,
+                  fontSize: 16,
+                ),
               ),
               const SizedBox(height: 16),
               Text(
-                'Download size: ${_formatSize(totalSize)}',
-                style: const TextStyle(fontWeight: FontWeight.w500),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Do you want to continue with the download?',
-                style: TextStyle(color: Colors.grey.shade700),
+                'Make sure you have enough storage space available.',
+                style: TextStyle(
+                  color: Colors.grey.shade700,
+                  fontSize: 14,
+                ),
               ),
             ],
           ),
@@ -499,7 +501,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
             ),
             ElevatedButton(
               onPressed: () => Navigator.pop(context, true),
-              child: const Text('Continue'),
+              child: const Text('Start Download'),
             ),
           ],
         ),

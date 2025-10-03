@@ -1,6 +1,5 @@
 import 'dart:io';
 import 'dart:math';
-import 'package:disk_space/disk_space.dart';
 
 /// Utility class for file operations and formatting
 class FileUtils {
@@ -132,42 +131,15 @@ class FileUtils {
   
   /// Get available disk space for a path
   /// Returns available space in bytes, or null if unable to determine
+  /// 
+  /// Note: On Android, this function returns null because reliable disk space
+  /// APIs are not consistently available across devices. The app handles this
+  /// gracefully by skipping disk space validation.
   static Future<int?> getAvailableSpace(String path) async {
-    try {
-      // Use the disk_space package to get available space
-      final freeSpace = await DiskSpace.getFreeDiskSpace;
-      
-      if (freeSpace != null) {
-        // Convert MB to bytes
-        return (freeSpace * 1024 * 1024).round();
-      }
-      
-      return null;
-    } catch (e) {
-      // If disk_space fails, try alternative approach
-      try {
-        final directory = Directory(path);
-        
-        // Ensure the directory exists or use its parent
-        Directory targetDir;
-        if (await directory.exists()) {
-          targetDir = directory;
-        } else {
-          // If directory doesn't exist, try parent
-          final parent = directory.parent;
-          if (await parent.exists()) {
-            targetDir = parent;
-          } else {
-            return null;
-          }
-        }
-        
-        // Fallback: return null if we can't determine
-        return null;
-      } catch (e2) {
-        return null;
-      }
-    }
+    // On Android, disk space checks are unreliable and not supported
+    // Return null to skip validation (similar to Rust implementation)
+    // The app gracefully handles null by proceeding with download
+    return null;
   }
   
   /// Check if there is sufficient disk space for a download
