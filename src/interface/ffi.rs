@@ -85,7 +85,6 @@ impl CircuitBreaker {
 /// Request deduplication tracker to prevent duplicate requests
 #[derive(Debug)]
 struct RequestTracker {
-    identifier: String,
     in_progress: bool,
     last_request_time: Instant,
 }
@@ -363,7 +362,6 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
                     tracker.insert(
                         identifier_str.clone(),
                         RequestTracker {
-                            identifier: identifier_str.clone(),
                             in_progress: true,
                             last_request_time: Instant::now(),
                         },
@@ -375,7 +373,6 @@ pub unsafe extern "C" fn ia_get_fetch_metadata(
                 tracker.insert(
                     identifier_str.clone(),
                     RequestTracker {
-                        identifier: identifier_str.clone(),
                         in_progress: true,
                         last_request_time: Instant::now(),
                     },
