@@ -188,27 +188,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 
                 const Divider(),
                 
-                // About Section
-                _buildSectionHeader('About'),
-                
-                ListTile(
-                  leading: const Icon(Icons.info),
-                  title: const Text('App Version'),
-                  subtitle: const Text('1.6.0'),
-                ),
-                
-                ListTile(
-                  leading: const Icon(Icons.library_books),
-                  title: const Text('Internet Archive'),
-                  subtitle: const Text('A digital library of Internet sites and other cultural artifacts'),
-                  onTap: () {
-                    // Could open browser to archive.org
-                  },
-                ),
-                
-                const SizedBox(height: 16),
-                
                 // Reset Settings
+                const SizedBox(height: 16),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: OutlinedButton.icon(

@@ -2,11 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/ia_get_service.dart';
 import '../widgets/search_bar_widget.dart';
-import '../widgets/archive_info_widget.dart';
-import '../widgets/file_list_widget.dart';
-import '../widgets/filter_controls_widget.dart';
-import '../widgets/download_controls_widget.dart';
 import '../widgets/download_manager_widget.dart';
+import 'archive_detail_screen.dart';
 import 'download_screen.dart';
 import 'help_screen.dart';
 import 'settings_screen.dart';
@@ -19,12 +16,44 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  bool _hasNavigated = false;
+  
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<IaGetService>().initialize();
+      
+      // Listen for metadata changes to navigate to detail screen
+      context.read<IaGetService>().addListener(_onServiceChanged);
     });
+  }
+  
+  @override
+  void dispose() {
+    context.read<IaGetService>().removeListener(_onServiceChanged);
+    super.dispose();
+  }
+  
+  void _onServiceChanged() {
+    final service = context.read<IaGetService>();
+    
+    // Navigate to detail screen when metadata is loaded (only once)
+    if (service.currentMetadata != null && mounted && !_hasNavigated) {
+      _hasNavigated = true;
+      
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (context) => const ArchiveDetailScreen(),
+        ),
+      ).then((_) {
+        // Reset flag when returning from detail screen
+        _hasNavigated = false;
+      });
+    } else if (service.currentMetadata == null) {
+      // Reset flag when metadata is cleared
+      _hasNavigated = false;
+    }
   }
 
   @override
@@ -82,7 +111,7 @@ class _HomeScreenState extends State<HomeScreen> {
               // Search bar
               const SearchBarWidget(),
               
-              // Error display
+              // Error display with circuit breaker reset option
               if (service.error != null)
                 Container(
                   width: double.infinity,
@@ -93,16 +122,42 @@ class _HomeScreenState extends State<HomeScreen> {
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: Colors.red.shade300),
                   ),
-                  child: Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(Icons.error_outline, color: Colors.red.shade700),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          service.error!,
-                          style: TextStyle(color: Colors.red.shade700),
-                        ),
+                      Row(
+                        children: [
+                          Icon(Icons.error_outline, color: Colors.red.shade700),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              service.error!,
+                              style: TextStyle(color: Colors.red.shade700),
+                            ),
+                          ),
+                        ],
                       ),
+                      // Add reset button if circuit breaker is open
+                      if (service.error!.contains('temporarily unavailable') ||
+                          service.error!.contains('circuit breaker'))
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: ElevatedButton.icon(
+                            onPressed: () {
+                              service.resetCircuitBreaker();
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Service reset. You can try searching again.'),
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Reset Service'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.orange,
+                            ),
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -148,53 +203,47 @@ class _HomeScreenState extends State<HomeScreen> {
               if (service.isLoading)
                 const LinearProgressIndicator(),
 
-              // Archive information
-              if (service.currentMetadata != null)
-                ArchiveInfoWidget(metadata: service.currentMetadata!),
-
-              // Filter controls
-              if (service.currentMetadata != null)
-                const FilterControlsWidget(),
-
-              // File list
-              Expanded(
-                child: service.currentMetadata != null
-                    ? FileListWidget(files: service.filteredFiles)
-                    : const Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              Icons.search,
-                              size: 64,
-                              color: Colors.grey,
-                            ),
-                            SizedBox(height: 16),
-                            Text(
-                              'Search for an Internet Archive identifier',
-                              style: TextStyle(
-                                fontSize: 16,
-                                color: Colors.grey,
-                              ),
-                            ),
-                            SizedBox(height: 8),
-                            Text(
-                              'e.g., "commute_test" or "nasa_images"',
-                              style: TextStyle(
-                                fontSize: 14,
-                                color: Colors.grey,
-                              ),
-                            ),
-                          ],
+              // Empty state when not loading and no metadata
+              if (!service.isLoading && 
+                  service.currentMetadata == null && 
+                  service.suggestions.isEmpty &&
+                  service.error == null)
+                Expanded(
+                  child: Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.search,
+                          size: 64,
+                          color: Colors.grey.shade400,
                         ),
-                      ),
-              ),
-
-              // Download controls
-              if (service.currentMetadata != null)
-                const DownloadControlsWidget(),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Search for an Internet Archive identifier',
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'e.g., "commute_test" or "nasa_images"',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey.shade500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
                 
-              // Active downloads manager
+              // Spacer to push suggestions up when present
+              if (service.suggestions.isNotEmpty || service.error != null)
+                const Spacer(),
+                
+              // Active downloads manager at bottom
               const DownloadManagerWidget(),
             ],
           );

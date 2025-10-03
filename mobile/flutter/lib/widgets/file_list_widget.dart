@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../models/archive_metadata.dart';
 import '../services/ia_get_service.dart';
 import '../screens/file_preview_screen.dart';
+import '../screens/filters_screen.dart';
 
 class FileListWidget extends StatefulWidget {
   final List<ArchiveFile> files;
@@ -20,6 +21,11 @@ class _FileListWidgetState extends State<FileListWidget> {
   bool _selectAll = false;
   String _sortBy = 'name'; // name, size, format
   bool _sortAscending = true;
+  
+  // Filter state
+  List<String> _selectedIncludeFormats = [];
+  List<String> _selectedExcludeFormats = [];
+  String? _maxSize;
 
   @override
   Widget build(BuildContext context) {
@@ -64,6 +70,46 @@ class _FileListWidgetState extends State<FileListWidget> {
               
               const Spacer(),
               
+              // Filter button with badge
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.filter_list, size: 20),
+                    onPressed: _openFiltersScreen,
+                    tooltip: 'Filter files',
+                  ),
+                  if (_hasActiveFilters())
+                    Positioned(
+                      right: 4,
+                      top: 4,
+                      child: Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          color: Colors.red,
+                          shape: BoxShape.circle,
+                        ),
+                        constraints: const BoxConstraints(
+                          minWidth: 16,
+                          minHeight: 16,
+                        ),
+                        child: Center(
+                          child: Text(
+                            '${_getActiveFilterCount()}',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 9,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              
+              const SizedBox(width: 4),
+              
               // Sort dropdown
               PopupMenuButton<String>(
                 icon: Row(
@@ -76,6 +122,7 @@ class _FileListWidgetState extends State<FileListWidget> {
                     ),
                   ],
                 ),
+                tooltip: 'Sort files',
                 onSelected: (value) {
                   setState(() {
                     if (_sortBy == value) {
@@ -456,5 +503,41 @@ class _FileListWidgetState extends State<FileListWidget> {
         ],
       ),
     );
+  }
+  
+  bool _hasActiveFilters() {
+    return _selectedIncludeFormats.isNotEmpty ||
+           _selectedExcludeFormats.isNotEmpty ||
+           _maxSize != null;
+  }
+
+  int _getActiveFilterCount() {
+    int count = 0;
+    if (_selectedIncludeFormats.isNotEmpty) count++;
+    if (_selectedExcludeFormats.isNotEmpty) count++;
+    if (_maxSize != null) count++;
+    return count;
+  }
+  
+  void _openFiltersScreen() async {
+    final result = await Navigator.push<Map<String, dynamic>>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => FiltersScreen(
+          initialIncludeFormats: _selectedIncludeFormats,
+          initialExcludeFormats: _selectedExcludeFormats,
+          initialMaxSize: _maxSize,
+        ),
+      ),
+    );
+    
+    // Update local state with returned filter values
+    if (result != null && mounted) {
+      setState(() {
+        _selectedIncludeFormats = List<String>.from(result['includeFormats'] ?? []);
+        _selectedExcludeFormats = List<String>.from(result['excludeFormats'] ?? []);
+        _maxSize = result['maxSize'] as String?;
+      });
+    }
   }
 }

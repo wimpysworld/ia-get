@@ -22,8 +22,19 @@ class ArchiveMetadata {
   
   factory ArchiveMetadata.fromJson(Map<String, dynamic> json) {
     final filesList = json['files'] as List<dynamic>? ?? [];
+    final server = json['server'] as String? ?? json['d1'] as String? ?? '';
+    final dir = json['dir'] as String? ?? '';
+    
     final files = filesList
-        .map((file) => ArchiveFile.fromJson(file as Map<String, dynamic>))
+        .map((file) {
+          final fileMap = file as Map<String, dynamic>;
+          // Generate download URL from server and directory if not present
+          if (fileMap['download_url'] == null && server.isNotEmpty && dir.isNotEmpty) {
+            final fileName = fileMap['name'] as String? ?? '';
+            fileMap['download_url'] = 'https://$server$dir/$fileName';
+          }
+          return ArchiveFile.fromJson(fileMap);
+        })
         .toList();
     
     return ArchiveMetadata(
@@ -58,6 +69,7 @@ class ArchiveFile {
   final String name;
   final int? size;
   final String? format;
+  final String? source;
   final String? downloadUrl;
   final String? md5;
   final String? sha1;
@@ -67,6 +79,7 @@ class ArchiveFile {
     required this.name,
     this.size,
     this.format,
+    this.source,
     this.downloadUrl,
     this.md5,
     this.sha1,
@@ -78,6 +91,7 @@ class ArchiveFile {
       name: json['name'] ?? '',
       size: json['size'],
       format: json['format'],
+      source: json['source'],
       downloadUrl: json['download_url'],
       md5: json['md5'],
       sha1: json['sha1'],
@@ -90,6 +104,7 @@ class ArchiveFile {
       'name': name,
       'size': size,
       'format': format,
+      'source': source,
       'download_url': downloadUrl,
       'md5': md5,
       'sha1': sha1,
@@ -119,5 +134,22 @@ class ArchiveFile {
       cleanName = cleanName.split('/').last;
     }
     return cleanName;
+  }
+  
+  /// Check if this is an original file
+  bool get isOriginal => source?.toLowerCase() == 'original';
+  
+  /// Check if this is a derivative file
+  bool get isDerivative => source?.toLowerCase() == 'derivative';
+  
+  /// Check if this is a metadata file
+  bool get isMetadata => source?.toLowerCase() == 'metadata';
+  
+  /// Get a user-friendly source type name
+  String get sourceTypeName {
+    if (isOriginal) return 'Original';
+    if (isDerivative) return 'Derivative';
+    if (isMetadata) return 'Metadata';
+    return 'Unknown';
   }
 }

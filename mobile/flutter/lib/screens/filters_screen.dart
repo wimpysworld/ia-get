@@ -22,6 +22,11 @@ class _FiltersScreenState extends State<FiltersScreen> {
   late List<String> _selectedIncludeFormats;
   late List<String> _selectedExcludeFormats;
   late String? _maxSize;
+  
+  // Source type filtering
+  bool _includeOriginal = true;
+  bool _includeDerivative = true;
+  bool _includeMetadata = true;
 
   // Will be populated from available formats in the archive
   List<String> _availableFormats = [];
@@ -93,8 +98,79 @@ class _FiltersScreenState extends State<FiltersScreen> {
           
           const SizedBox(height: 24),
           
+          // Source Type filtering section
+          _buildSectionHeader('Content Source Type'),
+          const SizedBox(height: 8),
+          const Text(
+            'Filter by where files originate from',
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.grey,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilterChip(
+                label: const Text('ORIGINAL'),
+                selected: _includeOriginal,
+                onSelected: (selected) {
+                  setState(() {
+                    _includeOriginal = selected;
+                  });
+                },
+                selectedColor: Colors.green.shade200,
+                checkmarkColor: Colors.green.shade700,
+                avatar: _includeOriginal ? null : const Icon(Icons.upload_file, size: 18),
+              ),
+              FilterChip(
+                label: const Text('DERIVATIVE'),
+                selected: _includeDerivative,
+                onSelected: (selected) {
+                  setState(() {
+                    _includeDerivative = selected;
+                  });
+                },
+                selectedColor: Colors.orange.shade200,
+                checkmarkColor: Colors.orange.shade700,
+                avatar: _includeDerivative ? null : const Icon(Icons.auto_awesome, size: 18),
+              ),
+              FilterChip(
+                label: const Text('METADATA'),
+                selected: _includeMetadata,
+                onSelected: (selected) {
+                  setState(() {
+                    _includeMetadata = selected;
+                  });
+                },
+                selectedColor: Colors.purple.shade200,
+                checkmarkColor: Colors.purple.shade700,
+                avatar: _includeMetadata ? null : const Icon(Icons.info, size: 18),
+              ),
+            ],
+          ),
+          
+          const SizedBox(height: 16),
+          Text(
+            '• Original: Files uploaded by users\n'
+            '• Derivative: Generated versions (e.g., lower quality)\n'
+            '• Metadata: Archive-generated metadata files',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.grey.shade600,
+              fontStyle: FontStyle.italic,
+            ),
+          ),
+          
+          const SizedBox(height: 24),
+          const Divider(),
+          const SizedBox(height: 24),
+          
           // Include formats section
-          _buildSectionHeader('Include Formats'),
+          _buildSectionHeader('File Type Filters'),
+          _buildSectionSubheader('Include Formats'),
           const SizedBox(height: 8),
           Text(
             _availableFormats.isEmpty 
@@ -143,7 +219,7 @@ class _FiltersScreenState extends State<FiltersScreen> {
           const SizedBox(height: 24),
           
           // Exclude formats section
-          _buildSectionHeader('Exclude Formats'),
+          _buildSectionSubheader('Exclude Formats'),
           const SizedBox(height: 8),
           const Text(
             'Hide these file formats',
@@ -293,11 +369,24 @@ class _FiltersScreenState extends State<FiltersScreen> {
       ),
     );
   }
+  
+  Widget _buildSectionSubheader(String title) {
+    return Text(
+      title,
+      style: const TextStyle(
+        fontSize: 16,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+  }
 
   bool _hasActiveFilters() {
     return _selectedIncludeFormats.isNotEmpty ||
            _selectedExcludeFormats.isNotEmpty ||
-           _maxSize != null;
+           _maxSize != null ||
+           !_includeOriginal ||
+           !_includeDerivative ||
+           !_includeMetadata;
   }
 
   int _getActiveFilterCount() {
@@ -305,6 +394,7 @@ class _FiltersScreenState extends State<FiltersScreen> {
     if (_selectedIncludeFormats.isNotEmpty) count++;
     if (_selectedExcludeFormats.isNotEmpty) count++;
     if (_maxSize != null) count++;
+    if (!_includeOriginal || !_includeDerivative || !_includeMetadata) count++;
     return count;
   }
 
@@ -313,6 +403,9 @@ class _FiltersScreenState extends State<FiltersScreen> {
       _selectedIncludeFormats.clear();
       _selectedExcludeFormats.clear();
       _maxSize = null;
+      _includeOriginal = true;
+      _includeDerivative = true;
+      _includeMetadata = true;
     });
   }
 
@@ -326,6 +419,9 @@ class _FiltersScreenState extends State<FiltersScreen> {
           ? _selectedExcludeFormats
           : null,
       maxSize: _maxSize,
+      includeOriginal: _includeOriginal,
+      includeDerivative: _includeDerivative,
+      includeMetadata: _includeMetadata,
     );
     
     // Return the filter state to the caller
@@ -333,6 +429,9 @@ class _FiltersScreenState extends State<FiltersScreen> {
       'includeFormats': _selectedIncludeFormats,
       'excludeFormats': _selectedExcludeFormats,
       'maxSize': _maxSize,
+      'includeOriginal': _includeOriginal,
+      'includeDerivative': _includeDerivative,
+      'includeMetadata': _includeMetadata,
     });
   }
 }

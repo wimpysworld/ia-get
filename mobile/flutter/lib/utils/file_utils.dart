@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:math';
+import 'package:disk_space/disk_space.dart';
 
 /// Utility class for file operations and formatting
 class FileUtils {
@@ -133,35 +134,39 @@ class FileUtils {
   /// Returns available space in bytes, or null if unable to determine
   static Future<int?> getAvailableSpace(String path) async {
     try {
-      // For Android, we can use the StatFs class through platform channels
-      // or use the disk_space package. For now, we'll use a method channel approach.
-      // This is a placeholder that will work with the disk_space package if added,
-      // or can be implemented with platform channels.
+      // Use the disk_space package to get available space
+      final freeSpace = await DiskSpace.getFreeDiskSpace;
       
-      // Try to get space using dart:io's FileStat
-      final directory = Directory(path);
-      
-      // Ensure the directory exists or use its parent
-      Directory targetDir;
-      if (await directory.exists()) {
-        targetDir = directory;
-      } else {
-        // If directory doesn't exist, try parent
-        final parent = directory.parent;
-        if (await parent.exists()) {
-          targetDir = parent;
-        } else {
-          return null;
-        }
+      if (freeSpace != null) {
+        // Convert MB to bytes
+        return (freeSpace * 1024 * 1024).round();
       }
       
-      // For Android, we'll use the disk_space package functionality
-      // This requires adding disk_space package to pubspec.yaml
-      // For now, return null as a safe fallback
-      // TODO: Implement platform-specific disk space check using disk_space package
       return null;
     } catch (e) {
-      return null;
+      // If disk_space fails, try alternative approach
+      try {
+        final directory = Directory(path);
+        
+        // Ensure the directory exists or use its parent
+        Directory targetDir;
+        if (await directory.exists()) {
+          targetDir = directory;
+        } else {
+          // If directory doesn't exist, try parent
+          final parent = directory.parent;
+          if (await parent.exists()) {
+            targetDir = parent;
+          } else {
+            return null;
+          }
+        }
+        
+        // Fallback: return null if we can't determine
+        return null;
+      } catch (e2) {
+        return null;
+      }
     }
   }
   

@@ -50,6 +50,8 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
             children: [
               _buildHeader(context, downloadService),
               const Divider(height: 1),
+              if (downloadService.activeDownloadCount > 0)
+                _buildStatisticsBar(context, downloadService),
               _buildDownloadList(context, downloadService),
             ],
           ),
@@ -108,6 +110,75 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
           ),
           onPressed: () => _toggleAllDownloads(service),
           tooltip: _hasActiveDownloads(service) ? 'Pause all' : 'Resume all',
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStatisticsBar(BuildContext context, BackgroundDownloadService service) {
+    final stats = service.getStatistics();
+    final averageSpeed = stats['averageSpeed'] as double;
+    final activeBytesDownloaded = stats['activeBytesDownloaded'] as int;
+    
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          _buildStatItem(
+            context,
+            icon: Icons.speed_rounded,
+            label: 'Speed',
+            value: averageSpeed > 0 
+                ? FileUtils.formatTransferSpeed(averageSpeed)
+                : '-',
+          ),
+          _buildStatItem(
+            context,
+            icon: Icons.cloud_download_rounded,
+            label: 'Downloaded',
+            value: FileUtils.formatBytes(activeBytesDownloaded),
+          ),
+          _buildStatItem(
+            context,
+            icon: Icons.schedule_rounded,
+            label: 'Session',
+            value: _formatSessionDuration(service.sessionDuration),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  Widget _buildStatItem(
+    BuildContext context, {
+    required IconData icon,
+    required String label,
+    required String value,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: Theme.of(context).colorScheme.primary),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: Theme.of(context).textTheme.labelLarge?.copyWith(
+            fontWeight: FontWeight.w600,
+          ),
         ),
       ],
     );
@@ -394,6 +465,22 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
     return service.activeDownloads.values.any(
       (d) => d.status == DownloadStatus.downloading,
     );
+  }
+  
+  String _formatSessionDuration(Duration? duration) {
+    if (duration == null) return '-';
+    
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes.remainder(60);
+    final seconds = duration.inSeconds.remainder(60);
+    
+    if (hours > 0) {
+      return '${hours}h ${minutes}m';
+    } else if (minutes > 0) {
+      return '${minutes}m ${seconds}s';
+    } else {
+      return '${seconds}s';
+    }
   }
 
   Future<void> _toggleAllDownloads(BackgroundDownloadService service) async {
