@@ -2,6 +2,99 @@
 
 This document details the fixes applied to address all issues reported during user testing of the mobile application.
 
+## Latest Fixes (Current PR)
+
+### 9. Back Button Navigation from Archive Page Not Working ✅
+
+**Problem**: The back button from the archive detail page was broken and would navigate to nothing, requiring app restart or causing navigation issues.
+
+**Root Cause**: The `WillPopScope` was handling navigation, but the back button in the AppBar needed explicit handling. Additionally, the navigation check wasn't verifying if the navigator could actually pop before attempting to do so.
+
+**Solution**:
+- Added explicit `leading` IconButton in the AppBar to handle back button presses
+- Added `Navigator.of(context).canPop()` check before popping in the metadata clear callback
+- Ensured metadata is cleared properly on all back navigation paths
+- This provides consistent behavior for both gesture and button navigation
+
+**Files Modified**:
+- `mobile/flutter/lib/screens/archive_detail_screen.dart`
+
+---
+
+### 10. Storage Permissions Not Requested Before Downloads ✅
+
+**Problem**: Downloads would fail with errors about missing storage permissions, but the app never requested these permissions at runtime. This is especially critical for Android 13+ which requires explicit permission requests.
+
+**Root Cause**: While `permission_handler` was in dependencies, it wasn't being used to request storage permissions before downloads. Android 13+ requires runtime permission requests for storage access.
+
+**Solution**:
+- Created comprehensive `PermissionUtils` class with Android version-specific permission handling
+- For Android 13+: Request photos, videos, and audio permissions
+- For Android 10-12: Request storage permission with optional MANAGE_EXTERNAL_STORAGE
+- For Android 9 and below: Request legacy storage permissions
+- Added permission rationale dialogs explaining why permissions are needed
+- Added settings redirect when permissions are permanently denied
+- Integrated permission checks into download flow before attempting downloads
+
+**Files Modified**:
+- `mobile/flutter/lib/utils/permission_utils.dart` (new file)
+- `mobile/flutter/lib/widgets/download_controls_widget.dart`
+
+---
+
+### 11. Download Error Messages Not Helpful ✅
+
+**Problem**: When downloads failed, error messages didn't provide actionable guidance or retry options, leaving users stuck.
+
+**Root Cause**: Error handling was generic and didn't account for common failure scenarios like missing permissions or uninitialized services.
+
+**Solution**:
+- Enhanced error dialog with specific possible causes
+- Added helpful tip box highlighting the most common issue (storage permissions)
+- Added "Retry" button that checks permissions and allows immediate retry
+- Retry action proactively checks permissions and opens settings if needed
+- Technical details still shown for debugging purposes
+
+**Files Modified**:
+- `mobile/flutter/lib/widgets/download_controls_widget.dart`
+
+---
+
+### 12. Source Type Filtering Results Not Clear ✅
+
+**Problem**: When applying source type filters (ORIGINAL, DERIVATIVE, METADATA) that resulted in zero matches, users saw an empty list with minimal feedback about why, making it unclear if the filter was working or broken.
+
+**Root Cause**: The file list widget showed a simple "no files" message without distinguishing between "no files at all" vs "no files matching filters" or providing a way to recover.
+
+**Solution**:
+- Enhanced empty state UI to show different messages based on whether filters are active
+- Added clear icon and messaging: "No files match the current filters"
+- Added helpful subtext: "Try adjusting your filters to see more results"
+- Added "Clear All Filters" button for quick recovery when filters result in zero matches
+- Different icon and message when archive genuinely has no files
+
+**Files Modified**:
+- `mobile/flutter/lib/widgets/file_list_widget.dart`
+
+---
+
+### 13. Notification Permissions Not Requested ✅
+
+**Problem**: Download notifications wouldn't appear on Android 13+ because notification permissions weren't being requested.
+
+**Root Cause**: Android 13+ requires explicit notification permission requests, but the app wasn't requesting them during initialization.
+
+**Solution**:
+- Added notification permission request during app initialization
+- Request is non-blocking and won't interrupt onboarding flow
+- Permission check is version-aware (only requests on Android 13+)
+- Gracefully handles errors without blocking app functionality
+
+**Files Modified**:
+- `mobile/flutter/lib/main.dart`
+
+---
+
 ## Issues Fixed
 
 ### 1. Black Page on Swipe Back from Download Screen ✅
@@ -152,7 +245,42 @@ This document details the fixes applied to address all issues reported during us
 
 ## Testing Recommendations
 
-### For Each Fix:
+### For Each Fix (Latest):
+
+1. **Back Navigation from Archive Page**: 
+   - Navigate to an archive detail screen
+   - Press the back button in the AppBar
+   - Verify smooth return to home screen without black screen
+   - Try using gesture navigation (swipe from left edge)
+   - Confirm both methods work correctly
+
+2. **Storage Permissions**:
+   - Fresh install the app or clear app data
+   - Navigate to an archive and select files
+   - Attempt to start a download
+   - Verify permission rationale dialog appears
+   - Grant or deny permissions and verify appropriate behavior
+   - If denied, verify settings dialog appears with option to open settings
+
+3. **Download Error Handling**:
+   - Trigger a download failure (e.g., by denying permissions)
+   - Verify enhanced error dialog shows with helpful tips
+   - Click "Retry" button
+   - Verify it checks permissions and retries appropriately
+
+4. **Source Type Filtering with No Results**:
+   - Select an archive with multiple file types
+   - Apply source type filter that results in no matches (e.g., only ORIGINAL when none exist)
+   - Verify clear message: "No files match the current filters"
+   - Verify "Clear All Filters" button appears
+   - Click the button and verify all files reappear
+
+5. **Notification Permissions**:
+   - Fresh install on Android 13+
+   - Launch app and check that notification permission is requested
+   - Verify it doesn't block onboarding or app usage if denied
+
+### For Previously Fixed Issues:
 
 1. **Back Navigation**: 
    - Navigate to Downloads screen
@@ -201,13 +329,15 @@ This document details the fixes applied to address all issues reported during us
 
 ## Summary
 
-All eight issues reported during user testing have been addressed with targeted, minimal changes:
+All thirteen issues reported during user testing have been addressed with targeted, minimal changes:
 
-- **Navigation Issues**: Fixed with proper back handling
-- **Search UX**: Improved with immediate suggestions and scrolling
-- **Circuit Breaker**: Proactive reset prevents failures
-- **Filtering**: State persistence now works correctly for all filter types
-- **UI Feedback**: Badge and error messages now accurately reflect system state
-- **Error Handling**: Better user feedback for download issues
+- **Navigation Issues**: Fixed back button with explicit handler and proper canPop checks
+- **Permission Handling**: Comprehensive Android version-aware permission requests for storage and notifications
+- **Error Feedback**: Enhanced error messages with actionable tips and retry functionality
+- **Filter UX**: Clear feedback when filters result in no matches with quick recovery option
+- **Search UX**: Improved with immediate suggestions and scrolling (previously fixed)
+- **Circuit Breaker**: Proactive reset prevents failures (previously fixed)
+- **Filtering**: State persistence works correctly for all filter types (previously fixed)
+- **UI Feedback**: Badge and error messages accurately reflect system state (previously fixed)
 
 The fixes maintain code quality and follow Flutter best practices while addressing each specific issue with surgical precision.

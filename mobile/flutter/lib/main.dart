@@ -7,6 +7,7 @@ import 'services/deep_link_service.dart';
 import 'screens/home_screen.dart';
 import 'widgets/onboarding_widget.dart';
 import 'utils/theme.dart';
+import 'utils/permission_utils.dart';
 
 void main() async {
   // Ensure Flutter is initialized
@@ -131,7 +132,25 @@ class _AppInitializerState extends State<AppInitializer> {
           iaGetService.fetchMetadata(identifier);
         }
       };
+      
+      // Request notification permissions (non-blocking, Android 13+)
+      _requestNotificationPermissions();
     });
+  }
+  
+  /// Request notification permissions for download notifications
+  Future<void> _requestNotificationPermissions() async {
+    try {
+      // Check if already granted
+      final hasPermission = await PermissionUtils.hasNotificationPermissions();
+      if (hasPermission) return;
+      
+      // Request permission (will be silently skipped on older Android versions)
+      await PermissionUtils.requestNotificationPermissions();
+    } catch (e) {
+      // Non-critical - just log and continue
+      debugPrint('Failed to request notification permissions: $e');
+    }
   }
 
   Future<void> _checkOnboardingStatus() async {

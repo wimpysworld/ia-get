@@ -188,25 +188,64 @@ class _FileListWidgetState extends State<FileListWidget> {
         // File list
         Expanded(
           child: sortedFiles.isEmpty
-              ? const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.filter_list_off,
-                        size: 48,
-                        color: Colors.grey,
-                      ),
-                      SizedBox(height: 16),
-                      Text(
-                        'No files match the current filters',
-                        style: TextStyle(
-                          fontSize: 16,
-                          color: Colors.grey,
+              ? Consumer<IaGetService>(
+                  builder: (context, service, child) {
+                    final hasActiveFilters = _hasActiveFilters();
+                    return Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24.0),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              hasActiveFilters 
+                                ? Icons.filter_list_off
+                                : Icons.inbox_outlined,
+                              size: 64,
+                              color: Colors.grey.shade400,
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              hasActiveFilters
+                                ? 'No files match the current filters'
+                                : 'No files available',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w500,
+                                color: Colors.grey.shade700,
+                              ),
+                            ),
+                            if (hasActiveFilters) ...[
+                              const SizedBox(height: 12),
+                              Text(
+                                'Try adjusting your filters to see more results',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: Colors.grey.shade600,
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                              const SizedBox(height: 24),
+                              ElevatedButton.icon(
+                                onPressed: () {
+                                  // Clear all filters
+                                  setState(() {
+                                    _selectedIncludeFormats.clear();
+                                    _selectedExcludeFormats.clear();
+                                    _maxSize = null;
+                                  });
+                                  // Re-apply with no filters
+                                  service.filterFiles();
+                                },
+                                icon: const Icon(Icons.clear_all),
+                                label: const Text('Clear All Filters'),
+                              ),
+                            ],
+                          ],
                         ),
                       ),
-                    ],
-                  ),
+                    );
+                  },
                 )
               : ListView.builder(
                   itemCount: sortedFiles.length,

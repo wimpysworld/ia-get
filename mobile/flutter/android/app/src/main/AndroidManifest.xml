@@ -10,10 +10,11 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" 
         android:maxSdkVersion="32" />
     
-    <!-- Storage permissions for Android 13+ -->
+    <!-- Storage permissions for Android 13+ (API 33+) -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     
     <!-- Network state permission for connection monitoring -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -21,19 +22,19 @@
     <!-- Wake lock for background downloads -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     
-    <!-- Foreground service permission for background downloads -->
+    <!-- Foreground service permissions for background downloads -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     
-    <!-- Post notifications permission for Android 13+ -->
+    <!-- Post notifications permission for Android 13+ (API 33+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     
-    <!-- Android 10+ scoped storage support (optional) -->
+    <!-- Optional: Full storage access for Android 11+ (API 30+) -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" 
         android:minSdkVersion="30"
         tools:ignore="ScopedStorage" />
 
-    <!-- Hardware requirements -->
+    <!-- Hardware requirements (not required to allow installation on more devices) -->
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
 

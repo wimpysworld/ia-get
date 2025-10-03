@@ -644,6 +644,11 @@ class IaGetService extends ChangeNotifier {
     
     final hasSourceFilter = !includeOriginal || !includeDerivative || !includeMetadata;
     
+    // Check if any files in the archive actually have source field populated
+    final hasSourceField = _currentMetadata!.files.any((file) => 
+      file.source != null && file.source!.isNotEmpty
+    );
+    
     // If no filters are active, show all files (default behavior)
     if ((includeFormats == null || includeFormats.isEmpty) &&
         (excludeFormats == null || excludeFormats.isEmpty) &&
@@ -668,6 +673,7 @@ class IaGetService extends ChangeNotifier {
       if (kDebugMode) {
         print('Filtering files - include: $includeFormatsStr, exclude: $excludeFormatsStr, maxSize: $maxSize');
         print('Source filters - original: $includeOriginal, derivative: $includeDerivative, metadata: $includeMetadata');
+        print('Archive has source field: $hasSourceField');
       }
       
       final filteredJson = IaGetFFI.filterFiles(
@@ -684,8 +690,8 @@ class IaGetService extends ChangeNotifier {
               .map((json) => ArchiveFile.fromJson(json as Map<String, dynamic>))
               .toList();
           
-          // Apply source type filtering on the Dart side
-          if (hasSourceFilter) {
+          // Apply source type filtering on the Dart side only if source field exists
+          if (hasSourceFilter && hasSourceField) {
             files = files.where((file) {
               final source = file.source?.toLowerCase() ?? '';
               // Treat empty/null source as original (most common case in IA)
@@ -695,6 +701,15 @@ class IaGetService extends ChangeNotifier {
               // Include files with unknown source types by default to avoid hiding content
               return true;
             }).toList();
+            
+            if (kDebugMode) {
+              print('Applied source type filtering: ${files.length} files after filter');
+            }
+          } else if (hasSourceFilter && !hasSourceField) {
+            // If source filter is active but archive has no source field, warn user
+            if (kDebugMode) {
+              print('Source type filter active but archive has no source field - ignoring source filter');
+            }
           }
           
           _filteredFiles = files;

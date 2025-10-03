@@ -15,22 +15,17 @@ class _DownloadScreenState extends State<DownloadScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: () async {
-        // Always allow back navigation
-        return true;
-      },
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Downloads'),
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.clear_all),
-              onPressed: _activeDownloads.isEmpty ? null : _clearAllDownloads,
-            ),
-          ],
-        ),
-        body: _activeDownloads.isEmpty && _completedDownloads.isEmpty
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Downloads'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.clear_all),
+            onPressed: _activeDownloads.isEmpty ? null : _clearAllDownloads,
+          ),
+        ],
+      ),
+      body: _activeDownloads.isEmpty && _completedDownloads.isEmpty
             ? const Center(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -87,9 +82,9 @@ class _DownloadScreenState extends State<DownloadScreen> {
                   ],
                 ],
               ),
-      ),
-    );
-  }
+        ),
+      );
+    }
 
   Widget _buildActiveDownloadCard(DownloadProgress progress) {
     return Card(
