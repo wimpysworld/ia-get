@@ -33,7 +33,7 @@ fn string_to_jstring<'local>(
 
 /// Initialize the ia-get library
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetInit(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetInit(
     _env: JNIEnv,
     _class: JClass,
 ) -> jint {
@@ -49,7 +49,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
 /// Cleanup the ia-get library
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetCleanup(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetCleanup(
     _env: JNIEnv,
     _class: JClass,
 ) {
@@ -58,7 +58,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
 /// Fetch metadata for an archive
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetFetchMetadata(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetFetchMetadata(
     mut env: JNIEnv,
     _class: JClass,
     identifier: JString,
@@ -150,7 +150,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
 /// Get cached metadata as JSON
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetGetMetadataJson(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetGetMetadataJson(
     mut env: JNIEnv,
     _class: JClass,
     identifier: JString,
@@ -226,7 +226,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
 /// Filter files based on criteria
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetFilterFiles(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetFilterFiles(
     mut env: JNIEnv,
     _class: JClass,
     metadata_json: JString,
@@ -317,7 +317,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
 /// Create a download session
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetCreateSession(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetCreateSession(
     mut env: JNIEnv,
     _class: JClass,
     identifier: JString,
@@ -358,7 +358,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
 /// Start a download
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetStartDownload(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetStartDownload(
     mut env: JNIEnv,
     _class: JClass,
     session_id: jint,
@@ -403,7 +403,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
 /// Pause a download
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetPauseDownload(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetPauseDownload(
     _env: JNIEnv,
     _class: JClass,
     session_id: jint,
@@ -413,7 +413,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
 /// Resume a download
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetResumeDownload(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetResumeDownload(
     _env: JNIEnv,
     _class: JClass,
     session_id: jint,
@@ -423,7 +423,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
 /// Cancel a download
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetCancelDownload(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetCancelDownload(
     _env: JNIEnv,
     _class: JClass,
     session_id: jint,
@@ -433,7 +433,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
 /// Get download progress
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetGetDownloadProgress(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetGetDownloadProgress(
     mut env: JNIEnv,
     _class: JClass,
     session_id: jint,
@@ -459,7 +459,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
     // Create DownloadProgressInfo object
     let class = match env
-        .find_class("com/gameaday/ia_get_mobile/IaGetNativeWrapper$DownloadProgressInfo")
+        .find_class("com/gameaday/internet_archive_helper/IaGetNativeWrapper$DownloadProgressInfo")
     {
         Ok(cls) => cls,
         Err(_) => return JObject::null().as_raw(),
@@ -509,7 +509,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
 /// Calculate total size of files
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetCalculateTotalSize(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetCalculateTotalSize(
     mut env: JNIEnv,
     _class: JClass,
     files_json: JString,
@@ -529,7 +529,7 @@ pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGe
 
 /// Free a native string
 #[no_mangle]
-pub extern "system" fn Java_com_gameaday_ia_1get_1mobile_IaGetNativeWrapper_iaGetFreeString(
+pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWrapper_iaGetFreeString(
     _env: JNIEnv,
     _class: JClass,
     ptr: jlong,
