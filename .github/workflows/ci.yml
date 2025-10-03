@@ -419,6 +419,13 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
+    - name: Install Android NDK
+      run: |
+        echo "Installing Android NDK..."
+        sdkmanager --install "ndk;27.3.13750724"
+        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.3.13750724" >> $GITHUB_ENV
+        echo "NDK installed at: $ANDROID_HOME/ndk/27.3.13750724"
+
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
@@ -429,6 +436,7 @@ jobs:
     - name: Setup Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
+        toolchain: stable
         targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
 
     - name: Install cargo-ndk
