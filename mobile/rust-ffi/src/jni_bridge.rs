@@ -487,7 +487,10 @@ pub extern "system" fn Java_com_gameaday_internet_1archive_1helper_IaGetNativeWr
             match CStr::from_ptr(progress.current_file).to_str() {
                 Ok(s) => s.to_string(),
                 Err(e) => {
-                    eprintln!("JNI getDownloadProgress: Invalid UTF-8 in current_file: {:?}", e);
+                    eprintln!(
+                        "JNI getDownloadProgress: Invalid UTF-8 in current_file: {:?}",
+                        e
+                    );
                     "".to_string()
                 }
             }

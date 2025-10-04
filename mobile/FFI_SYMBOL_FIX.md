@@ -28,12 +28,17 @@ This mismatch caused:
 4. All metadata and search operations to fail
 
 ## Solution
-Updated the import path in `mobile/rust-ffi/src/lib.rs`:
+Updated the import path in `mobile/rust-ffi/src/lib.rs` to explicitly list each FFI function:
 
 ```rust
 // CORRECT (after fix):
-pub use ia_get::interface::ffi_simple::*;
+pub use ia_get::interface::ffi_simple::{
+    ia_get_decompress_file, ia_get_download_file, ia_get_fetch_metadata, ia_get_free_string,
+    ia_get_last_error, ia_get_validate_checksum, IaGetResult,
+};
 ```
+
+This explicit listing ensures that all FFI functions are properly re-exported and available to the Flutter/Dart code.
 
 Additionally removed the incompatible `ia_get_mobile_init()` function that was calling a non-existent `ia_get_init()` function. The simplified FFI doesn't have an initialization function - it's stateless by design.
 

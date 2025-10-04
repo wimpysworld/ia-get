@@ -4,7 +4,11 @@
 //! with mobile-optimized defaults and convenience functions.
 
 // Re-export all FFI functions from the main library's simplified FFI interface
-pub use ia_get::interface::ffi_simple::*;
+// Explicitly list each function to ensure they are included in the binary
+pub use ia_get::interface::ffi_simple::{
+    ia_get_decompress_file, ia_get_download_file, ia_get_fetch_metadata, ia_get_free_string,
+    ia_get_last_error, ia_get_validate_checksum, IaGetResult,
+};
 
 // JNI bridge for Android integration
 // NOTE: This module is legacy code that references the old FFI interface (14+ functions).
