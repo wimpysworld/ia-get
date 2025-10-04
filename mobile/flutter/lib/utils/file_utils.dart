@@ -19,6 +19,11 @@ class FileUtils {
     return '${size.toStringAsFixed(size < 10 ? 1 : 0)} ${_byteSuffixes[i]}';
   }
 
+  /// Format size (alias for formatBytes for backward compatibility)
+  static String formatSize(int bytes) {
+    return formatBytes(bytes);
+  }
+
   /// Format transfer speed (bytes per second) into human readable string
   static String formatTransferSpeed(double bytesPerSecond) {
     if (bytesPerSecond <= 0) return '0 B/s';

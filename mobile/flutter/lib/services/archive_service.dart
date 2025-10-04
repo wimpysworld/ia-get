@@ -1,3 +1,7 @@
+import 'package:flutter/foundation.dart';
+import '../models/archive_metadata.dart';
+import 'ia_get_simple_service.dart';
+
 /// Archive Service - Unified service using simplified FFI
 ///
 /// This service replaces the old IaGetService with a cleaner implementation
@@ -8,11 +12,6 @@
 /// - Simpler error handling
 /// - Better performance
 /// - All state managed in Dart
-
-import 'package:flutter/foundation.dart';
-import 'dart:convert';
-import '../models/archive_metadata.dart';
-import 'ia_get_simple_service.dart';
 
 class ArchiveService extends ChangeNotifier {
   final IaGetSimpleService _ffi = IaGetSimpleService();
@@ -315,6 +314,11 @@ class ArchiveService extends ChangeNotifier {
       _filteredFiles = _currentMetadata!.files;
       notifyListeners();
     }
+  }
+
+  /// Calculate total size of selected files
+  int calculateTotalSize(List<ArchiveFile> files) {
+    return files.fold<int>(0, (sum, file) => sum + (file.size ?? 0));
   }
 
   /// Search for archives (mock implementation - returns suggestions)

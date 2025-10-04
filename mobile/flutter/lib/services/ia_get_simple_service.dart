@@ -1,3 +1,12 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:ffi' as ffi;
+import 'dart:isolate';
+import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart';
+import '../models/archive_metadata.dart';
+import '../models/download_progress.dart';
+
 /// Simplified FFI Service for ia-get
 ///
 /// This service uses the new simplified FFI interface with just 6 functions,
@@ -8,16 +17,6 @@
 /// - Rust: Stateless computation engine (6 FFI functions)
 /// - Dart: All state management, progress tracking, session handling
 /// - Isolates: Used for all blocking Rust calls
-
-import 'dart:async';
-import 'dart:convert';
-import 'dart:ffi' as ffi;
-import 'dart:isolate';
-import 'dart:io';
-import 'package:ffi/ffi.dart';
-import 'package:flutter/foundation.dart';
-import '../models/archive_metadata.dart';
-import '../models/download_progress.dart';
 
 // ============================================================================
 // FFI Type Definitions

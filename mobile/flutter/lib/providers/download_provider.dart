@@ -1,13 +1,13 @@
-/// Download State Management Provider
-///
-/// Manages all download state in Dart, using the simplified FFI interface.
-/// This eliminates race conditions by having a single source of truth in Dart.
-
 import 'package:flutter/foundation.dart';
 import '../models/archive_metadata.dart';
 import '../models/download_progress.dart' hide DownloadStatus;
 import '../models/file_filter.dart';
 import '../services/ia_get_simple_service.dart';
+
+/// Download State Management Provider
+///
+/// Manages all download state in Dart, using the simplified FFI interface.
+/// This eliminates race conditions by having a single source of truth in Dart.
 
 /// Download state machine for clear state transitions
 enum DownloadStatus {
@@ -400,8 +400,8 @@ class DownloadProvider extends ChangeNotifier {
           _downloads[identifier]!.fileProgress,
         );
         updatedProgress[file.name] = updatedProgress[file.name]!.copyWith(
-          percentage: 100.0,
-          status: 'complete',
+          progress: 1.0,
+          status: DownloadStatus.completed,
         );
         
         _downloads[identifier] = _downloads[identifier]!.copyWith(
@@ -664,7 +664,6 @@ class DownloadProvider extends ChangeNotifier {
       }
       
       // Pattern filtering (filename-based)
-      final fileName = file.filename.toLowerCase();
       final fullPath = file.name.toLowerCase();
       
       if (filter.includePatterns.isNotEmpty) {

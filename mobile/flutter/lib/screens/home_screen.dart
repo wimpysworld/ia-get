@@ -184,7 +184,7 @@ class _HomeScreenState extends State<HomeScreen> {
               // Search bar
               const SearchBarWidget(),
 
-              // Error display with circuit breaker reset option
+              // Error display
               if (service.error != null)
                 Container(
                   width: double.infinity,
@@ -210,29 +210,6 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                         ],
                       ),
-                      // Add reset button if circuit breaker is open
-                      if (service.error!.contains('temporarily unavailable') ||
-                          service.error!.contains('circuit breaker'))
-                        Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: ElevatedButton.icon(
-                            onPressed: () {
-                              service.resetCircuitBreaker();
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text(
-                                    'Service reset. You can try searching again.',
-                                  ),
-                                ),
-                              );
-                            },
-                            icon: const Icon(Icons.refresh),
-                            label: const Text('Reset Service'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.orange,
-                            ),
-                          ),
-                        ),
                     ],
                   ),
                 ),
@@ -270,8 +247,6 @@ class _HomeScreenState extends State<HomeScreen> {
                                   subtitle: Text(suggestion['identifier']!),
                                   trailing: const Icon(Icons.arrow_forward),
                                   onTap: () {
-                                    // Reset circuit breaker before fetching
-                                    service.resetCircuitBreaker();
                                     // Fetch metadata for the suggested archive
                                     service.fetchMetadata(
                                       suggestion['identifier']!,

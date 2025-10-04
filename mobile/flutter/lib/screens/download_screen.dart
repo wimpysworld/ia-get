@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:percent_indicator/percent_indicator.dart';
 import 'package:open_file/open_file.dart';
-import '../models/download_progress.dart';
+import '../models/download_progress.dart' hide DownloadStatus;
 import '../providers/download_provider.dart';
 import '../utils/file_utils.dart';
 
