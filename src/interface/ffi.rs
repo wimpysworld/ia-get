@@ -1683,6 +1683,7 @@ mod tests {
                 include_formats.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
+                std::ptr::null(),
             )
         };
 

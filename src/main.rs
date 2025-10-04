@@ -90,10 +90,10 @@ async fn launch_gui_with_mode_switching() -> Result<()> {
     use std::sync::{Arc, Mutex};
 
     // Set up logging for GUI with error handling
-    if let Err(e) = env_logger::try_init() {
+    if let Err(_e) = env_logger::try_init() {
         // Only warn in debug builds to avoid noise
         #[cfg(debug_assertions)]
-        eprintln!("Warning: Failed to initialize logger: {}", e);
+        eprintln!("Warning: Failed to initialize logger: {}", _e);
     }
 
     // Configure GUI options with better responsiveness
@@ -126,26 +126,27 @@ async fn launch_gui_with_mode_switching() -> Result<()> {
     match gui_result {
         Ok(()) => {
             // Check if we should switch to CLI mode
-            match switch_to_cli.lock() {
-                Ok(should_switch) if *should_switch => {
-                    println!("{} Switching to CLI mode...", "🔄".blue());
-
-                    // Reset terminal state after GUI closes
-                    reset_terminal_for_cli();
-
-                    // Give the terminal a moment to reset
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-                    show_interactive_menu().await
-                }
-                Ok(_) => {
-                    // GUI closed normally
-                    Ok(())
-                }
+            let should_switch = match switch_to_cli.lock() {
+                Ok(guard) => *guard,
                 Err(e) => {
                     eprintln!("Error checking mode switch state: {}", e);
-                    Ok(())
+                    return Ok(());
                 }
+            };
+
+            if should_switch {
+                println!("{} Switching to CLI mode...", "🔄".blue());
+
+                // Reset terminal state after GUI closes
+                reset_terminal_for_cli();
+
+                // Give the terminal a moment to reset
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                show_interactive_menu().await
+            } else {
+                // GUI closed normally
+                Ok(())
             }
         }
         Err(e) => {
