@@ -491,6 +491,8 @@ class _AdvancedFiltersScreenState extends State<AdvancedFiltersScreen> {
       excludePatterns: _excludePatterns,
       includeSubfolders: _includeSubfolders,
       excludeSubfolders: _excludeSubfolders,
+      includeFormats: _includeFormats,
+      excludeFormats: _excludeFormats,
       minSize: _minSize,
       maxSize: _maxSize,
       includeOriginal: _includeOriginal,

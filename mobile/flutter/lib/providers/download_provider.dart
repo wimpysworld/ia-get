@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 import '../models/archive_metadata.dart';
-import '../models/download_progress.dart' hide DownloadStatus;
+import '../models/download_progress.dart' as progress_model;
 import '../models/file_filter.dart';
 import '../services/ia_get_simple_service.dart';
 
@@ -401,7 +401,7 @@ class DownloadProvider extends ChangeNotifier {
         );
         updatedProgress[file.name] = updatedProgress[file.name]!.copyWith(
           progress: 1.0,
-          status: DownloadStatus.complete,
+          status: progress_model.DownloadStatus.completed,
         );
         
         _downloads[identifier] = _downloads[identifier]!.copyWith(
