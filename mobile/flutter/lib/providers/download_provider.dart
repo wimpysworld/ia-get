@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import '../models/archive_metadata.dart';
-import '../models/download_progress.dart' as progress_model;
+import '../models/download_progress.dart' hide DownloadStatus;
+import '../models/download_progress.dart' as progress_model show DownloadStatus;
 import '../models/file_filter.dart';
 import '../services/ia_get_simple_service.dart';
 
