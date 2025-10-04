@@ -10,6 +10,15 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
+/// Archive.org compliant User-Agent string
+/// Format: ProjectName/Version (contact; purpose)
+const USER_AGENT: &str = concat!(
+    "ia-get/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/Gameaday/ia-get-cli; ",
+    "Internet Archive download helper)"
+);
+
 /// Progress callback type for downloads
 ///
 /// Arguments: (bytes_downloaded, total_bytes)
@@ -21,6 +30,7 @@ pub type ProgressCallback = Box<dyn Fn(u64, u64)>;
 /// Download a file synchronously with progress tracking
 ///
 /// This is a stateless function - all state managed by caller.
+/// Supports resuming partial downloads using HTTP range requests.
 ///
 /// # Arguments
 ///
@@ -32,6 +42,12 @@ pub type ProgressCallback = Box<dyn Fn(u64, u64)>;
 ///
 /// * `Ok(u64)` - Number of bytes downloaded
 /// * `Err(IaGetError)` - Download failed
+///
+/// # Archive.org Compliance
+///
+/// - Uses proper User-Agent
+/// - Includes respectful headers (X-Accept-Reduced-Priority)
+/// - Supports resuming downloads (saves bandwidth)
 pub fn download_file_sync<P>(
     url: &str,
     output_path: P,
@@ -40,32 +56,83 @@ pub fn download_file_sync<P>(
 where
     P: AsRef<Path>,
 {
+    // Check if partial download exists
+    let path_ref = output_path.as_ref();
+    let resume_from = if path_ref.exists() {
+        std::fs::metadata(path_ref)
+            .ok()
+            .map(|m| m.len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
     let client = Client::builder()
+        .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(300)) // 5 minutes
         .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| IaGetError::Network(format!("Failed to create HTTP client: {}", e)))?;
 
-    let mut response = client
+    let mut request = client
         .get(url)
         .header("Accept-Encoding", "deflate, gzip") // Archive.org recommendation
-        .header("X-Accept-Reduced-Priority", "1") // Avoid rate limiting
+        .header("X-Accept-Reduced-Priority", "1"); // Avoid rate limiting
+
+    // Add Range header if resuming
+    if resume_from > 0 {
+        request = request.header("Range", format!("bytes={}-", resume_from));
+    }
+
+    let mut response = request
         .send()
         .map_err(|e| IaGetError::Network(format!("Failed to send request: {}", e)))?;
 
-    if !response.status().is_success() {
+    // Check if resume was accepted (206 Partial Content) or full download (200 OK)
+    let status = response.status();
+    if !status.is_success() && status.as_u16() != 206 {
         return Err(IaGetError::Network(format!(
             "HTTP error {}: {}",
-            response.status().as_u16(),
-            response.status().canonical_reason().unwrap_or("Unknown")
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown")
         )));
     }
 
-    let total_size = response.content_length().unwrap_or(0);
-    let mut file = File::create(output_path.as_ref())
-        .map_err(|e| IaGetError::FileSystem(format!("Failed to create file: {}", e)))?;
+    // If server doesn't support resume (200 instead of 206), start from beginning
+    let starting_position = if status.as_u16() == 206 {
+        resume_from
+    } else {
+        0
+    };
 
-    let mut downloaded = 0u64;
+    let total_size = if status.as_u16() == 206 {
+        // For partial content, calculate total from Content-Range header
+        response
+            .headers()
+            .get("Content-Range")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| {
+                // Format: "bytes START-END/TOTAL"
+                s.split('/').nth(1).and_then(|t| t.parse::<u64>().ok())
+            })
+            .or_else(|| response.content_length().map(|l| l + starting_position))
+            .unwrap_or(0)
+    } else {
+        response.content_length().unwrap_or(0)
+    };
+
+    // Open file in append mode if resuming, create if new
+    let mut file = if starting_position > 0 {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path_ref)
+            .map_err(|e| IaGetError::FileSystem(format!("Failed to open file for resume: {}", e)))?
+    } else {
+        File::create(path_ref)
+            .map_err(|e| IaGetError::FileSystem(format!("Failed to create file: {}", e)))?
+    };
+
+    let mut downloaded = starting_position;
     let mut buffer = vec![0u8; 8192];
 
     loop {

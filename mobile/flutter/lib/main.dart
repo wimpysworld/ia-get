@@ -46,19 +46,20 @@ class IAGetMobileApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider<ArchiveService>(
           create: (_) => ArchiveService(),
-          lazy: false, // Initialize immediately for better startup performance
+          lazy: true, // Lazy load for faster startup
         ),
         ChangeNotifierProvider<DownloadProvider>(
           create: (_) => DownloadProvider(),
-          lazy: false, // Initialize immediately for downloads
+          lazy: true, // Lazy load for faster startup
         ),
         ChangeNotifierProvider<BackgroundDownloadService>(
           create: (_) => BackgroundDownloadService(),
-          lazy: false, // Initialize immediately for background downloads
+          lazy: true, // Lazy load for faster startup
         ),
         Provider<DeepLinkService>(
           create: (_) => DeepLinkService(),
           dispose: (_, service) => service.dispose(),
+          lazy: true, // Lazy load for faster startup
         ),
       ],
       child: MaterialApp(
@@ -139,23 +140,20 @@ class _AppInitializerState extends State<AppInitializer> {
 
   /// Initialize app with proper sequencing and error handling
   /// 
-  /// Startup sequence:
+  /// Startup sequence (optimized for fast app launch):
   /// 1. Check onboarding status (fast, local operation)
-  /// 2. After first frame: Initialize services sequentially
-  ///    a. BackgroundDownloadService (no dependencies)
-  ///    b. DeepLinkService (independent)
-  ///    c. Set up deep link handler (with service validation)
-  ///    d. Request notification permissions (fire-and-forget)
+  /// 2. Show UI immediately (deferred service initialization)
+  /// 3. Initialize services lazily on first access
   /// 
-  /// All operations have timeout and error handling to prevent app hangs.
+  /// Services are now lazy-loaded through Provider, eliminating startup bottleneck.
   Future<void> _initializeApp() async {
     try {
-      // Step 1: Check onboarding status (fast, local check)
+      // Check onboarding status (fast, local check)
       await _checkOnboardingStatus();
 
-      // Step 2: Initialize services in proper order after first frame
+      // Initialize critical services after first frame
       WidgetsBinding.instance.addPostFrameCallback((_) async {
-        await _initializeServices();
+        await _initializeCriticalServices();
       });
     } catch (e) {
       if (mounted) {
@@ -168,28 +166,38 @@ class _AppInitializerState extends State<AppInitializer> {
     }
   }
 
-  /// Initialize all services with proper error handling and sequencing
-  Future<void> _initializeServices() async {
+  /// Initialize only critical services that need early setup
+  Future<void> _initializeCriticalServices() async {
     if (!mounted) return;
 
     try {
-      // Initialize BackgroundDownloadService first (no dependencies)
-      await context.read<BackgroundDownloadService>().initialize();
+      // Initialize BackgroundDownloadService (needs early setup for notifications)
+      final bgService = context.read<BackgroundDownloadService>();
+      await bgService.initialize().timeout(
+        const Duration(seconds: 10),
+        onTimeout: () {
+          debugPrint('Background service initialization timed out');
+        },
+      );
 
-      // Initialize DeepLinkService and set up handler only after mount check
+      // Initialize DeepLinkService (needs early setup for app links)
       final deepLinkService = context.read<DeepLinkService>();
-      await deepLinkService.initialize();
+      await deepLinkService.initialize().timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          debugPrint('DeepLink service initialization timed out');
+        },
+      );
 
-      // Set up deep link handler with validation
+      // Set up deep link handler
       deepLinkService.onArchiveLinkReceived = (identifier) {
         if (!mounted) return;
         
         final archiveService = context.read<ArchiveService>();
-        // Fetch metadata (new service doesn't need explicit initialization)
         archiveService.fetchMetadata(identifier);
       };
 
-      // Request notification permissions (non-blocking, fire-and-forget)
+      // Request notification permissions (non-blocking)
       _requestNotificationPermissions();
 
     } catch (e) {

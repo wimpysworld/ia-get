@@ -23,17 +23,35 @@ class _DownloadScreenState extends State<DownloadScreen> {
       builder: (context, downloadProvider, child) {
         final downloads = downloadProvider.downloads;
         final activeDownloads = downloads.values
-            .where((d) => d.status == 'downloading' || d.status == 'fetching_metadata')
+            .where((d) => d.downloadStatus.isActive)
             .toList();
         final completedDownloads = downloads.values
-            .where((d) => d.status == 'complete')
+            .where((d) => d.downloadStatus == DownloadStatus.complete)
             .toList();
 
         return PopScope(
           canPop: true,
           child: Scaffold(
             appBar: AppBar(
-              title: const Text('Downloads'),
+              title: Row(
+                children: [
+                  const Text('Downloads'),
+                  if (downloadProvider.activeDownloadCount > 0 || 
+                      downloadProvider.queuedDownloadCount > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 8),
+                      child: Text(
+                        '(${downloadProvider.activeDownloadCount} active'
+                        '${downloadProvider.queuedDownloadCount > 0 
+                            ? ', ${downloadProvider.queuedDownloadCount} queued' 
+                            : ''})',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Colors.grey.shade300,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
               actions: [
                 if (downloads.isNotEmpty)
                   IconButton(
@@ -121,7 +139,7 @@ class _DownloadScreenState extends State<DownloadScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              downloadState.status == 'fetching_metadata' 
+              downloadState.downloadStatus == DownloadStatus.fetchingMetadata
                 ? 'Fetching metadata...' 
                 : 'Downloading ${downloadState.fileProgress.length} files',
               style: TextStyle(color: Colors.grey.shade600),

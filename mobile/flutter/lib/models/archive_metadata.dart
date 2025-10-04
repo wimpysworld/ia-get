@@ -85,6 +85,52 @@ class ArchiveFile {
     this.sha1,
     this.selected = false,
   });
+  
+  /// Get the directory path of this file (everything before the last /)
+  String get directory {
+    final lastSlash = name.lastIndexOf('/');
+    if (lastSlash == -1) return '';
+    return name.substring(0, lastSlash);
+  }
+  
+  /// Get just the filename (after the last /)
+  String get filename {
+    final lastSlash = name.lastIndexOf('/');
+    if (lastSlash == -1) return name;
+    return name.substring(lastSlash + 1);
+  }
+  
+  /// Check if file is in a specific subfolder (supports wildcards)
+  bool isInSubfolder(String pattern) {
+    if (pattern.isEmpty) return true;
+    
+    final dir = directory;
+    final patternLower = pattern.toLowerCase();
+    final dirLower = dir.toLowerCase();
+    
+    // Exact match
+    if (dirLower == patternLower) return true;
+    
+    // Starts with pattern (subfolder matching)
+    if (dirLower.startsWith(patternLower)) return true;
+    
+    // Wildcard pattern matching
+    if (patternLower.contains('*')) {
+      final regexPattern = patternLower
+          .replaceAll('\\', '\\\\')
+          .replaceAll('.', '\\.')
+          .replaceAll('*', '.*')
+          .replaceAll('?', '.');
+      try {
+        final regex = RegExp('^$regexPattern\$');
+        return regex.hasMatch(dirLower);
+      } catch (_) {
+        return false;
+      }
+    }
+    
+    return false;
+  }
 
   factory ArchiveFile.fromJson(Map<String, dynamic> json) {
     return ArchiveFile(

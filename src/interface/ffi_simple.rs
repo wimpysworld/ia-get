@@ -1,11 +1,31 @@
 //! Simplified FFI Interface for Mobile Platforms
 //!
 //! This module provides a minimal, stateless C-compatible interface for Flutter/mobile integration.
-//! Key principles:
-//! - Only 5 core functions (down from 14+)
-//! - No state management in Rust
-//! - Simple request-response pattern
-//! - All state managed by caller (Dart/Flutter)
+//!
+//! ## Key Principles
+//!
+//! - **Only 5 core functions** (down from 14+) - Simplified API surface
+//! - **No state management in Rust** - All state owned by caller (Dart/Flutter)
+//! - **Simple request-response pattern** - No callbacks or complex async
+//! - **Stateless operations** - Each call is independent
+//! - **Safe by design** - Helper functions minimize unsafe code blocks
+//!
+//! ## Safety Improvements
+//!
+//! This module uses safe helper functions to minimize direct `unsafe` operations:
+//! - `safe_c_str_to_str` - Safely converts C strings to Rust strings with validation
+//! - `safe_str_to_c_string` - Safely converts Rust strings to C strings
+//!
+//! These helpers encapsulate all pointer validation and UTF-8 checking, reducing
+//! the surface area of unsafe code and making the FFI layer more maintainable.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! Flutter (Dart) --> FFI Bindings --> Safe Helpers --> Stateless Core Functions
+//! ```
+//!
+//! All complex logic lives in stateless core modules, keeping this FFI layer thin.
 
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::{c_char, c_int};
@@ -44,6 +64,31 @@ fn clear_last_error() {
 }
 
 // ═══════════════════════════════════════════════════════════
+// SAFE HELPER FUNCTIONS - Minimize unsafe usage
+// ═══════════════════════════════════════════════════════════
+
+/// Safely convert a C string pointer to a Rust string
+///
+/// Returns None if pointer is null or contains invalid UTF-8
+fn safe_c_str_to_str<'a>(c_str: *const c_char) -> Option<&'a str> {
+    if c_str.is_null() {
+        return None;
+    }
+
+    unsafe { CStr::from_ptr(c_str).to_str().ok() }
+}
+
+/// Safely convert a Rust string to a C string pointer
+///
+/// Returns null pointer if conversion fails
+fn safe_str_to_c_string(s: String) -> *mut c_char {
+    match CString::new(s) {
+        Ok(c_string) => c_string.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
 // SIMPLIFIED FFI FUNCTIONS - Only 5 core functions
 // ═══════════════════════════════════════════════════════════
 
@@ -71,30 +116,18 @@ fn clear_last_error() {
 pub unsafe extern "C" fn ia_get_fetch_metadata(identifier: *const c_char) -> *mut c_char {
     clear_last_error();
 
-    // Validate input
-    if identifier.is_null() {
-        set_last_error("Identifier cannot be null");
-        return ptr::null_mut();
-    }
-
-    // Convert C string to Rust string
-    let identifier_str = match CStr::from_ptr(identifier).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_last_error("Invalid UTF-8 in identifier");
+    // Use safe helper for conversion
+    let identifier_str = match safe_c_str_to_str(identifier) {
+        Some(s) => s,
+        None => {
+            set_last_error("Identifier is null or contains invalid UTF-8");
             return ptr::null_mut();
         }
     };
 
     // Call stateless core function
     match stateless::metadata::fetch_metadata_json(identifier_str) {
-        Ok(json) => match CString::new(json) {
-            Ok(c_string) => c_string.into_raw(),
-            Err(_) => {
-                set_last_error("Failed to create C string from JSON");
-                ptr::null_mut()
-            }
-        },
+        Ok(json) => safe_str_to_c_string(json),
         Err(e) => {
             set_last_error(&format!("Failed to fetch metadata: {}", e));
             ptr::null_mut()
@@ -136,25 +169,19 @@ pub unsafe extern "C" fn ia_get_download_file(
 ) -> IaGetResult {
     clear_last_error();
 
-    // Validate inputs
-    if url.is_null() || output_path.is_null() {
-        set_last_error("URL and output path cannot be null");
-        return IaGetResult::ErrorInvalidInput;
-    }
-
-    // Convert C strings to Rust strings
-    let url_str = match CStr::from_ptr(url).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_last_error("Invalid UTF-8 in URL");
+    // Use safe helpers for conversion
+    let url_str = match safe_c_str_to_str(url) {
+        Some(s) => s,
+        None => {
+            set_last_error("URL is null or contains invalid UTF-8");
             return IaGetResult::ErrorInvalidInput;
         }
     };
 
-    let path_str = match CStr::from_ptr(output_path).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_last_error("Invalid UTF-8 in output path");
+    let path_str = match safe_c_str_to_str(output_path) {
+        Some(s) => s,
+        None => {
+            set_last_error("Output path is null or contains invalid UTF-8");
             return IaGetResult::ErrorInvalidInput;
         }
     };
@@ -212,38 +239,26 @@ pub unsafe extern "C" fn ia_get_decompress_file(
 ) -> *mut c_char {
     clear_last_error();
 
-    // Validate inputs
-    if archive_path.is_null() || output_dir.is_null() {
-        set_last_error("Archive path and output directory cannot be null");
-        return ptr::null_mut();
-    }
-
-    // Convert C strings to Rust strings
-    let archive_str = match CStr::from_ptr(archive_path).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_last_error("Invalid UTF-8 in archive path");
+    // Use safe helpers for conversion
+    let archive_str = match safe_c_str_to_str(archive_path) {
+        Some(s) => s,
+        None => {
+            set_last_error("Archive path is null or contains invalid UTF-8");
             return ptr::null_mut();
         }
     };
 
-    let output_str = match CStr::from_ptr(output_dir).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_last_error("Invalid UTF-8 in output directory");
+    let output_str = match safe_c_str_to_str(output_dir) {
+        Some(s) => s,
+        None => {
+            set_last_error("Output directory is null or contains invalid UTF-8");
             return ptr::null_mut();
         }
     };
 
     // Call stateless core function
     match stateless::compression::decompress_archive_json(archive_str, output_str) {
-        Ok(json) => match CString::new(json) {
-            Ok(c_string) => c_string.into_raw(),
-            Err(_) => {
-                set_last_error("Failed to create C string from JSON");
-                ptr::null_mut()
-            }
-        },
+        Ok(json) => safe_str_to_c_string(json),
         Err(e) => {
             set_last_error(&format!("Decompression failed: {}", e));
             ptr::null_mut()
@@ -276,33 +291,27 @@ pub unsafe extern "C" fn ia_get_validate_checksum(
 ) -> c_int {
     clear_last_error();
 
-    // Validate inputs
-    if file_path.is_null() || expected_hash.is_null() || hash_type.is_null() {
-        set_last_error("File path, expected hash, and hash type cannot be null");
-        return -1;
-    }
-
-    // Convert C strings to Rust strings
-    let path_str = match CStr::from_ptr(file_path).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_last_error("Invalid UTF-8 in file path");
+    // Use safe helpers for conversion
+    let path_str = match safe_c_str_to_str(file_path) {
+        Some(s) => s,
+        None => {
+            set_last_error("File path is null or contains invalid UTF-8");
             return -1;
         }
     };
 
-    let hash_str = match CStr::from_ptr(expected_hash).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_last_error("Invalid UTF-8 in expected hash");
+    let hash_str = match safe_c_str_to_str(expected_hash) {
+        Some(s) => s,
+        None => {
+            set_last_error("Expected hash is null or contains invalid UTF-8");
             return -1;
         }
     };
 
-    let type_str = match CStr::from_ptr(hash_type).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_last_error("Invalid UTF-8 in hash type");
+    let type_str = match safe_c_str_to_str(hash_type) {
+        Some(s) => s,
+        None => {
+            set_last_error("Hash type is null or contains invalid UTF-8");
             return -1;
         }
     };

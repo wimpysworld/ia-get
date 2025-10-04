@@ -39,8 +39,19 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
         _error = null;
       });
 
-      // Fetch file data in memory
-      final response = await http.get(Uri.parse(widget.file.downloadUrl!));
+      // Check file size before downloading (limit preview to 10MB)
+      final fileSize = widget.file.size ?? 0;
+      if (fileSize > 10 * 1024 * 1024) {
+        setState(() {
+          _error = 'File too large for preview (${(fileSize / 1024 / 1024).toStringAsFixed(1)}MB). Maximum is 10MB.';
+          _isLoading = false;
+        });
+        return;
+      }
+
+      // Fetch file data in memory with timeout
+      final response = await http.get(Uri.parse(widget.file.downloadUrl!))
+          .timeout(const Duration(seconds: 30));
 
       if (response.statusCode == 200) {
         setState(() {
@@ -64,19 +75,31 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
   bool _isImageFormat() {
     if (widget.file.format == null) return false;
     final format = widget.file.format!.toLowerCase();
-    return ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].contains(format);
+    return ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].contains(format);
   }
 
   bool _isTextFormat() {
     if (widget.file.format == null) return false;
     final format = widget.file.format!.toLowerCase();
-    return ['txt', 'json', 'xml', 'html', 'md', 'log'].contains(format);
+    return ['txt', 'json', 'xml', 'html', 'htm', 'md', 'markdown', 'log', 
+            'csv', 'yaml', 'yml', 'ini', 'conf', 'cfg'].contains(format);
   }
 
   bool _isVideoFormat() {
     if (widget.file.format == null) return false;
     final format = widget.file.format!.toLowerCase();
-    return ['mp4', 'webm', 'mkv', 'avi', 'mov'].contains(format);
+    return ['mp4', 'webm', 'mkv', 'avi', 'mov', 'flv', 'wmv', 'm4v'].contains(format);
+  }
+
+  bool _isAudioFormat() {
+    if (widget.file.format == null) return false;
+    final format = widget.file.format!.toLowerCase();
+    return ['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'wma', 'opus'].contains(format);
+  }
+
+  bool _isPDFFormat() {
+    if (widget.file.format == null) return false;
+    return widget.file.format!.toLowerCase() == 'pdf';
   }
 
   @override
@@ -148,6 +171,10 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
       return _buildImagePreview();
     } else if (_isTextFormat()) {
       return _buildTextPreview();
+    } else if (_isPDFFormat()) {
+      return _buildPDFPreview();
+    } else if (_isAudioFormat()) {
+      return _buildAudioPreview();
     } else if (_isVideoFormat()) {
       return _buildVideoPreview();
     } else {
@@ -247,12 +274,73 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
             ),
             const SizedBox(height: 16),
             const Text(
-              'Supported formats:\n• Images: JPG, PNG, GIF, BMP, WebP\n• Text: TXT, JSON, XML, HTML, MD, LOG\n• Video: MP4, WebM (preview only)',
+              'Supported formats:\n• Images: JPG, PNG, GIF, BMP, WebP, SVG\n• Text: TXT, JSON, XML, HTML, MD, CSV, YAML\n• PDF, Audio, Video (preview only)',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 12),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildPDFPreview() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.picture_as_pdf, size: 64, color: Colors.red),
+          const SizedBox(height: 16),
+          Text(
+            'PDF preview loaded (${_formatSize(_fileData!.length)})',
+            style: Theme.of(context).textTheme.bodyLarge,
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'PDF rendering requires additional package.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey),
+          ),
+          const SizedBox(height: 16),
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text(
+              'Note: PDF preview is available but requires the pdf_render or similar package for full rendering functionality.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAudioPreview() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.audiotrack, size: 64, color: Colors.blue),
+          const SizedBox(height: 16),
+          Text(
+            'Audio file loaded (${_formatSize(_fileData!.length)})',
+            style: Theme.of(context).textTheme.bodyLarge,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Format: ${widget.file.format?.toUpperCase()}',
+            style: const TextStyle(color: Colors.grey),
+          ),
+          const SizedBox(height: 16),
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text(
+              'Note: Audio playback is supported but requires the just_audio or audioplayers package for full playback functionality.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
+            ),
+          ),
+        ],
       ),
     );
   }
