@@ -154,8 +154,19 @@ impl FfiSession {
 
 // Global state management for mobile platforms
 lazy_static::lazy_static! {
+    /// Tokio runtime for async operations
+    /// Uses a multi-threaded runtime with reasonable defaults
     static ref RUNTIME: Arc<Runtime> = Arc::new(
-        Runtime::new().expect("Failed to create Tokio runtime")
+        Runtime::new()
+            .unwrap_or_else(|e| {
+                eprintln!("FATAL: Failed to create Tokio runtime: {}", e);
+                eprintln!("This is likely due to system resource constraints");
+                // Fallback to basic runtime
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create fallback runtime")
+            })
     );
     static ref SESSIONS: Arc<Mutex<HashMap<i32, FfiSession>>> = Arc::new(Mutex::new(HashMap::new()));
     static ref METADATA_CACHE: Arc<Mutex<HashMap<String, ArchiveMetadata>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -269,6 +280,7 @@ fn next_session_id() -> i32 {
 
 /// Initialize the FFI interface
 /// Must be called once before using any other functions
+/// Returns 0 on success, non-zero error code on failure
 #[no_mangle]
 pub extern "C" fn ia_get_init() -> IaGetErrorCode {
     // Initialize logging for mobile debugging (optional)
@@ -277,6 +289,35 @@ pub extern "C" fn ia_get_init() -> IaGetErrorCode {
         // Simple logging initialization without external dependencies
         println!("ia-get FFI initialized");
     }
+
+    // Verify that critical global state is accessible
+    // This helps catch initialization issues early
+    match CIRCUIT_BREAKER.lock() {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("ia_get_init: failed to verify circuit breaker: {}", e);
+            return IaGetErrorCode::UnknownError;
+        }
+    }
+
+    match REQUEST_TRACKER.lock() {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("ia_get_init: failed to verify request tracker: {}", e);
+            return IaGetErrorCode::UnknownError;
+        }
+    }
+
+    match PERFORMANCE_METRICS.lock() {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("ia_get_init: failed to verify performance metrics: {}", e);
+            return IaGetErrorCode::UnknownError;
+        }
+    }
+
+    // Verify runtime is accessible
+    let _ = RUNTIME.handle();
 
     IaGetErrorCode::Success
 }

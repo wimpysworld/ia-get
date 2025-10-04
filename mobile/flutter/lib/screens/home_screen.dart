@@ -22,6 +22,9 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      
+      // Initialize the service
       context.read<IaGetService>().initialize();
 
       // Listen for metadata changes to navigate to detail screen
@@ -31,7 +34,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
-    context.read<IaGetService>().removeListener(_onServiceChanged);
+    // Safe removal - only if context is still valid
+    try {
+      context.read<IaGetService>().removeListener(_onServiceChanged);
+    } catch (e) {
+      // Context may already be invalid during disposal
+      debugPrint('Warning: Could not remove listener during dispose: $e');
+    }
     super.dispose();
   }
 

@@ -23,9 +23,12 @@ class MainActivity: FlutterActivity() {
         // This ensures the library is available when Dart FFI initializes
         try {
             System.loadLibrary("ia_get_mobile")
-            android.util.Log.d("MainActivity", "Native library loaded successfully")
+            android.util.Log.i("MainActivity", "Native library loaded successfully")
+        } catch (e: UnsatisfiedLinkError) {
+            android.util.Log.e("MainActivity", "Failed to load native library: UnsatisfiedLinkError", e)
+            // Library not found - likely missing for this architecture
         } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Failed to load native library", e)
+            android.util.Log.e("MainActivity", "Failed to load native library: unexpected error", e)
         }
         
         // Set up platform method channel for native integration

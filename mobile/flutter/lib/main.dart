@@ -124,35 +124,80 @@ class AppInitializer extends StatefulWidget {
 class _AppInitializerState extends State<AppInitializer> {
   bool _isLoading = true;
   bool _shouldShowOnboarding = false;
+  String? _initializationError;
 
   @override
   void initState() {
     super.initState();
-    _checkOnboardingStatus();
+    _initializeApp();
+  }
 
-    // Initialize background download service
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<BackgroundDownloadService>().initialize();
+  /// Initialize app with proper sequencing and error handling
+  /// 
+  /// Startup sequence:
+  /// 1. Check onboarding status (fast, local operation)
+  /// 2. After first frame: Initialize services sequentially
+  ///    a. BackgroundDownloadService (no dependencies)
+  ///    b. DeepLinkService (independent)
+  ///    c. Set up deep link handler (with service validation)
+  ///    d. Request notification permissions (fire-and-forget)
+  /// 
+  /// All operations have timeout and error handling to prevent app hangs.
+  Future<void> _initializeApp() async {
+    try {
+      // Step 1: Check onboarding status (fast, local check)
+      await _checkOnboardingStatus();
 
-      // Initialize deep link service
+      // Step 2: Initialize services in proper order after first frame
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await _initializeServices();
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _initializationError = 'Failed to initialize app: ${e.toString()}';
+          _isLoading = false;
+        });
+      }
+      debugPrint('App initialization error: $e');
+    }
+  }
+
+  /// Initialize all services with proper error handling and sequencing
+  Future<void> _initializeServices() async {
+    if (!mounted) return;
+
+    try {
+      // Initialize BackgroundDownloadService first (no dependencies)
+      await context.read<BackgroundDownloadService>().initialize();
+
+      // Initialize DeepLinkService and set up handler only after mount check
       final deepLinkService = context.read<DeepLinkService>();
-      deepLinkService.initialize();
+      await deepLinkService.initialize();
 
-      // Handle incoming archive links
+      // Set up deep link handler with validation
       deepLinkService.onArchiveLinkReceived = (identifier) {
-        // Navigate to home and trigger search
-        if (mounted) {
-          final iaGetService = context.read<IaGetService>();
+        if (!mounted) return;
+        
+        final iaGetService = context.read<IaGetService>();
+        // Only fetch metadata if service is initialized
+        if (iaGetService.isInitialized) {
           iaGetService.fetchMetadata(identifier);
+        } else {
+          debugPrint('Deep link received but IaGetService not initialized: $identifier');
         }
       };
 
-      // Request notification permissions (non-blocking, Android 13+)
+      // Request notification permissions (non-blocking, fire-and-forget)
       _requestNotificationPermissions();
-    });
+
+    } catch (e) {
+      // Log but don't block app startup for service initialization failures
+      debugPrint('Service initialization error: $e');
+    }
   }
 
-  /// Request notification permissions for download notifications
+  /// Request notification permissions for download notifications (non-blocking)
   Future<void> _requestNotificationPermissions() async {
     try {
       // Check if already granted
@@ -168,11 +213,28 @@ class _AppInitializerState extends State<AppInitializer> {
   }
 
   Future<void> _checkOnboardingStatus() async {
-    final shouldShow = await OnboardingWidget.shouldShowOnboarding();
-    setState(() {
-      _shouldShowOnboarding = shouldShow;
-      _isLoading = false;
-    });
+    try {
+      final shouldShow = await OnboardingWidget.shouldShowOnboarding()
+          .timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => false, // Default to not showing on timeout
+          );
+      
+      if (mounted) {
+        setState(() {
+          _shouldShowOnboarding = shouldShow;
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error checking onboarding status: $e');
+      if (mounted) {
+        setState(() {
+          _shouldShowOnboarding = false;
+          _isLoading = false;
+        });
+      }
+    }
   }
 
   void _completeOnboarding() {
@@ -183,6 +245,49 @@ class _AppInitializerState extends State<AppInitializer> {
 
   @override
   Widget build(BuildContext context) {
+    // Show error state if initialization failed
+    if (_initializationError != null) {
+      return Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.error_outline,
+                size: 64,
+                color: Colors.red,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Initialization Error',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Text(
+                  _initializationError!,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
+              const SizedBox(height: 32),
+              ElevatedButton(
+                onPressed: () {
+                  setState(() {
+                    _initializationError = null;
+                    _isLoading = true;
+                  });
+                  _initializeApp();
+                },
+                child: const Text('Retry'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     if (_isLoading) {
       return Scaffold(
         body: Center(

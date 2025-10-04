@@ -68,22 +68,44 @@ class BackgroundDownloadService extends ChangeNotifier {
 
   /// Initialize the background download service
   Future<void> initialize() async {
-    if (_isInitialized) return;
+    if (_isInitialized) {
+      debugPrint('BackgroundDownloadService already initialized');
+      return;
+    }
 
     try {
       // Setup method channel communication with Android
-      _platform.setMethodCallHandler(_handleMethodCall);
+      // Use try-catch to handle platform-specific errors gracefully
+      try {
+        _platform.setMethodCallHandler(_handleMethodCall);
+      } catch (e) {
+        debugPrint('Failed to setup method channel handler: $e');
+        // Continue initialization even if method channel fails
+        // as core functionality may still work
+      }
 
       // Start periodic status updates (faster for better feedback)
       _statusUpdateTimer = Timer.periodic(
         const Duration(milliseconds: 500),
-        (_) => _updateDownloadStatuses(),
+        (_) {
+          try {
+            _updateDownloadStatuses();
+          } catch (e) {
+            debugPrint('Error updating download statuses: $e');
+          }
+        },
       );
 
       // Start retry timer for failed downloads
       _retryTimer = Timer.periodic(
         const Duration(seconds: 10),
-        (_) => _retryFailedDownloads(),
+        (_) {
+          try {
+            _retryFailedDownloads();
+          } catch (e) {
+            debugPrint('Error retrying failed downloads: $e');
+          }
+        },
       );
 
       // Initialize session tracking
@@ -94,6 +116,8 @@ class BackgroundDownloadService extends ChangeNotifier {
       debugPrint('BackgroundDownloadService initialized successfully');
     } catch (e) {
       debugPrint('Failed to initialize background download service: $e');
+      // Don't rethrow - service can be partially functional
+      _isInitialized = false;
     }
   }
 

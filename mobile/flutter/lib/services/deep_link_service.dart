@@ -13,8 +13,17 @@ class DeepLinkService {
   /// Initialize deep link listening
   Future<void> initialize() async {
     try {
-      // Handle initial link if app was opened from a link
-      final initialUri = await _appLinks.getInitialLink();
+      // Add timeout to prevent hanging on initial link retrieval
+      final initialUri = await _appLinks.getInitialLink().timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {
+          if (kDebugMode) {
+            print('Deep link: getInitialLink timed out');
+          }
+          return null;
+        },
+      );
+      
       if (initialUri != null) {
         _handleDeepLink(initialUri);
       }
@@ -29,6 +38,7 @@ class DeepLinkService {
             print('Deep link error: $err');
           }
         },
+        cancelOnError: false, // Continue listening even after errors
       );
 
       if (kDebugMode) {
@@ -38,6 +48,7 @@ class DeepLinkService {
       if (kDebugMode) {
         print('Failed to initialize deep link service: $e');
       }
+      // Non-critical error - app can continue without deep linking
     }
   }
 
@@ -47,16 +58,28 @@ class DeepLinkService {
       print('Received deep link: $uri');
     }
 
-    final identifier = _extractArchiveIdentifier(uri);
-    if (identifier != null && onArchiveLinkReceived != null) {
-      onArchiveLinkReceived!(identifier);
+    try {
+      final identifier = _extractArchiveIdentifier(uri);
+      if (identifier != null && identifier.isNotEmpty) {
+        if (onArchiveLinkReceived != null) {
+          onArchiveLinkReceived!(identifier);
 
-      if (kDebugMode) {
-        print('Extracted archive identifier: $identifier');
+          if (kDebugMode) {
+            print('Extracted archive identifier: $identifier');
+          }
+        } else {
+          if (kDebugMode) {
+            print('Deep link handler not set for identifier: $identifier');
+          }
+        }
+      } else {
+        if (kDebugMode) {
+          print('Could not extract archive identifier from: $uri');
+        }
       }
-    } else {
+    } catch (e) {
       if (kDebugMode) {
-        print('Could not extract archive identifier from: $uri');
+        print('Error handling deep link: $e');
       }
     }
   }

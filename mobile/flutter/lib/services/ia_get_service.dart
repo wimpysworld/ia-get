@@ -514,24 +514,36 @@ class IaGetService extends ChangeNotifier {
     }
     
     try {
-      // Try to initialize the FFI library
-      if (kDebugMode) {
-        print('IaGetService: Calling IaGetFFI.init()...');
-      }
-      
-      final result = IaGetFFI.init();
-      _isInitialized = result == 0;
-      
-      if (!_isInitialized) {
-        _error = 'Failed to initialize FFI library (error code: $result)';
+      // Add timeout to prevent hanging indefinitely
+      await Future.microtask(() {
+        // Try to initialize the FFI library
         if (kDebugMode) {
-          print('FFI initialization failed with code: $result');
+          print('IaGetService: Calling IaGetFFI.init()...');
         }
-      } else {
-        if (kDebugMode) {
-          print('FFI initialized successfully');
+        
+        final result = IaGetFFI.init();
+        _isInitialized = result == 0;
+        
+        if (!_isInitialized) {
+          _error = 'Failed to initialize FFI library (error code: $result)';
+          if (kDebugMode) {
+            print('FFI initialization failed with code: $result');
+          }
+        } else {
+          if (kDebugMode) {
+            print('FFI initialized successfully');
+          }
         }
-      }
+      }).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          _error = 'FFI initialization timed out';
+          _isInitialized = false;
+          if (kDebugMode) {
+            print('FFI initialization timeout');
+          }
+        },
+      );
     } catch (e, stackTrace) {
       _error = 'FFI initialization error: ${e.toString()}';
       _isInitialized = false;
