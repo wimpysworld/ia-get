@@ -1,5 +1,9 @@
 name: Build 🏗️ and Publish 📦️
 
+# This workflow builds release artifacts for all platforms using the new simplified architecture.
+# Builds include CLI, GUI, and FFI (ffi_simple) features as appropriate for each platform.
+# Android builds use the simplified FFI interface (ffi_simple) for Flutter integration.
+
 # Cancel previous runs when new tags are pushed
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -28,6 +32,8 @@ jobs:
     name: Android APK Release Build
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
+    # This job builds production Android artifacts using the new simplified FFI architecture
+    # (ffi_simple) for Flutter integration via the mobile/flutter app
 
     steps:
       - name: Checkout repository
@@ -333,6 +339,8 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: 10.7
         shell: bash
         run: |
+          # Build with default features (CLI + GUI) for release
+          # The new simplified architecture (ffi_simple) is available via --features ffi
           if [[ "${{ matrix.job.use-cross }}" == "true" ]]; then
             cross build --release --target ${{ matrix.job.target }}
           else

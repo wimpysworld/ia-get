@@ -1,5 +1,11 @@
 name: CI
 
+# This workflow tests the new simplified architecture:
+# - CLI: Command-line interface (default feature)
+# - GUI: Graphical user interface using egui
+# - FFI: Foreign Function Interface (ffi_simple) for mobile/Flutter integration
+# Note: Old deprecated FFI (ffi.rs) and main_old.rs have been removed as part of Phase 1 architecture cleanup
+
 on:
   push:
     branches: [ main, master ]
@@ -62,7 +68,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        features: [cli, gui]
+        features: [cli, gui, ffi]
         include:
           - features: cli
             feature_flags: "--no-default-features --features cli"
@@ -70,6 +76,9 @@ jobs:
           - features: gui  
             feature_flags: "--features gui"
             cache_suffix: "gui"
+          - features: ffi
+            feature_flags: "--no-default-features --features ffi"
+            cache_suffix: "ffi"
 
     steps:
     - name: Checkout repository
@@ -217,7 +226,7 @@ jobs:
       shell: pwsh
 
     - name: Create artifact (Unix)
-      if: matrix.features == 'gui' && runner.os != 'Windows'
+      if: (matrix.features == 'gui' || matrix.features == 'ffi') && runner.os != 'Windows'
       shell: bash
       run: |
         # Ensure artifacts directory exists and is properly populated
@@ -295,7 +304,7 @@ jobs:
         fi
 
     - name: Create artifact (Windows)
-      if: matrix.features == 'gui' && runner.os == 'Windows'
+      if: (matrix.features == 'gui' || matrix.features == 'ffi') && runner.os == 'Windows'
       shell: pwsh
       run: |
         # Ensure artifacts directory exists and is properly populated
@@ -372,7 +381,7 @@ jobs:
         }
 
     - name: Upload artifact
-      if: matrix.features == 'gui'
+      if: matrix.features == 'gui' || matrix.features == 'ffi'
       uses: actions/upload-artifact@v4.6.2
       with:
         name: ia-get-${{ runner.os }}-${{ matrix.features }}
@@ -405,6 +414,8 @@ jobs:
     name: Android APK & App Bundle Build (Development)
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # This job builds Android artifacts using the new simplified FFI architecture (ffi_simple)
+    # for Flutter integration via the mobile/flutter app
     
     steps:
     - name: Checkout repository

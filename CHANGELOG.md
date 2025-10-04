@@ -1,5 +1,29 @@
 # Changelog
 
+## [Unreleased]
+
+### 🏗️ CI/CD Architecture Improvements
+
+#### Simplified Architecture Integration
+- **✨ FFI Feature Testing**: Added comprehensive testing for the new simplified FFI (`ffi_simple`) across all platforms (Linux, Windows, macOS)
+- **📦 FFI Artifact Generation**: CI now builds and packages FFI libraries (`.dylib`/`.so`/`.dll`) for mobile integration
+- **📋 Architecture Documentation**: Updated workflows with clear comments explaining the three feature sets (CLI, GUI, FFI)
+- **🧹 Cleanup Documentation**: Noted removal of deprecated code (`ffi.rs`, `main_old.rs`) as part of Phase 1 architecture cleanup
+
+#### Enhanced Test Coverage
+- **🔬 Expanded Matrix Testing**: Now tests CLI, GUI, and FFI features across all platforms (9 test jobs vs previous 6)
+- **✅ Complete Validation**: All features validated with clippy, tests, and release builds
+- **🎯 Mobile Support**: FFI builds are validated before Android builds to ensure library compatibility
+- **📊 Better Artifact Organization**: Separate artifacts for GUI binaries and FFI libraries
+
+#### Developer Experience
+- **📖 Workflow Clarity**: Added inline comments explaining feature usage and build process
+- **🔄 Architecture Alignment**: CI/CD now reflects the simplified architecture from `ARCHITECTURE_ANALYSIS.md`
+- **📚 Documentation**: Created `docs/CICD_ARCHITECTURE_IMPROVEMENTS.md` with complete change details
+- **🚀 Release Process**: Release workflow clearly documents feature usage and cross-compilation behavior
+
+See `docs/CICD_ARCHITECTURE_IMPROVEMENTS.md` for complete technical details and testing matrix.
+
 ## [1.6.0] - 2025-09-02
 
 ### 🚀 Windows Long Path Support & CI/CD Optimization
