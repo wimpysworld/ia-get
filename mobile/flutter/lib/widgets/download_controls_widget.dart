@@ -529,9 +529,10 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
                     await PermissionUtils.hasStoragePermissions();
                 if (!mounted) return;
                 
+                final currentContext = context;
                 if (!hasPermission) {
                   await PermissionUtils.showSettingsDialog(
-                    context: context,
+                    context: currentContext,
                     message:
                         'Storage permission is required. Please enable it in Settings.',
                   );

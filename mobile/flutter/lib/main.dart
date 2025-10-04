@@ -173,6 +173,9 @@ class _AppInitializerState extends State<AppInitializer> {
     try {
       // Initialize BackgroundDownloadService (needs early setup for notifications)
       final bgService = context.read<BackgroundDownloadService>();
+      // Initialize DeepLinkService (needs early setup for app links)
+      final deepLinkService = context.read<DeepLinkService>();
+      
       await bgService.initialize().timeout(
         const Duration(seconds: 10),
         onTimeout: () {
@@ -180,8 +183,6 @@ class _AppInitializerState extends State<AppInitializer> {
         },
       );
 
-      // Initialize DeepLinkService (needs early setup for app links)
-      final deepLinkService = context.read<DeepLinkService>();
       await deepLinkService.initialize().timeout(
         const Duration(seconds: 5),
         onTimeout: () {
@@ -261,7 +262,7 @@ class _AppInitializerState extends State<AppInitializer> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(
+              const Icon(
                 Icons.error_outline,
                 size: 64,
                 color: Colors.red,

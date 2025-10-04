@@ -25,6 +25,8 @@ class _AdvancedFiltersScreenState extends State<AdvancedFiltersScreen> {
   late List<String> _excludePatterns;
   late List<String> _includeSubfolders;
   late List<String> _excludeSubfolders;
+  late List<String> _includeFormats;
+  late List<String> _excludeFormats;
   late bool _includeOriginal;
   late bool _includeDerivative;
   late bool _includeMetadata;

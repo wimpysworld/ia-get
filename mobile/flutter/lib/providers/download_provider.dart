@@ -178,9 +178,9 @@ class DownloadProvider extends ChangeNotifier {
   
   // Enhanced: Download statistics
   int _totalDownloadsStarted = 0;
-  int _totalDownloadsCompleted = 0;
+  final int _totalDownloadsCompleted = 0;
   int _totalDownloadsFailed = 0;
-  int _totalBytesDownloaded = 0;
+  final int _totalBytesDownloaded = 0;
 
   /// Get all downloads
   Map<String, DownloadState> get downloads => Map.unmodifiable(_downloads);
@@ -401,7 +401,7 @@ class DownloadProvider extends ChangeNotifier {
         );
         updatedProgress[file.name] = updatedProgress[file.name]!.copyWith(
           progress: 1.0,
-          status: DownloadStatus.completed,
+          status: DownloadStatus.complete,
         );
         
         _downloads[identifier] = _downloads[identifier]!.copyWith(

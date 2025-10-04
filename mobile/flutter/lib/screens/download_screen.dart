@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:percent_indicator/percent_indicator.dart';
 import 'package:open_file/open_file.dart';
-import '../models/download_progress.dart' hide DownloadStatus;
 import '../providers/download_provider.dart';
 import '../utils/file_utils.dart';
 
@@ -107,7 +106,7 @@ class _DownloadScreenState extends State<DownloadScreen> {
     );
   }
 
-  Widget _buildActiveDownloadCard(downloadState, DownloadProvider provider) {
+  Widget _buildActiveDownloadCard(DownloadState downloadState, DownloadProvider provider) {
     final identifier = downloadState.identifier;
     final overallProgress = downloadState.overallProgress / 100.0; // Convert to 0-1 range
     
@@ -171,7 +170,7 @@ class _DownloadScreenState extends State<DownloadScreen> {
       ),
     );
   }
-  Widget _buildCompletedDownloadCard(downloadState, DownloadProvider provider) {
+  Widget _buildCompletedDownloadCard(DownloadState downloadState, DownloadProvider provider) {
     final identifier = downloadState.identifier;
     final fileCount = downloadState.metadata?.files.length ?? 0;
     

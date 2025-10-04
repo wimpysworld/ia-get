@@ -303,8 +303,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
               if (!mounted) return;
               
-              Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(
+              final navigator = Navigator.of(context);
+              final messenger = ScaffoldMessenger.of(context);
+              
+              navigator.pop();
+              messenger.showSnackBar(
                 const SnackBar(content: Text('Settings reset to defaults')),
               );
             },
