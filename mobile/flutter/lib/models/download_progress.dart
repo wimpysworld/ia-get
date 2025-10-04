@@ -39,6 +39,58 @@ class DownloadProgress {
     this.retryCount = 0,
   }) : startTime = startTime ?? DateTime.now();
 
+  // Legacy compatibility getters for field access
+  int get downloaded => downloadedBytes ?? 0;
+  int get total => totalBytes ?? 0;
+  double get percentage => progress != null ? progress! * 100 : 0.0;
+
+  /// Legacy factory constructor for simple file progress tracking
+  /// Used by download_provider.dart and ia_get_simple_service.dart
+  factory DownloadProgress.simple({
+    required int downloaded,
+    required int total,
+    required double percentage,
+    required String status,
+    String? error,
+  }) {
+    // Parse status string to enum
+    DownloadStatus statusEnum;
+    switch (status) {
+      case 'queued':
+        statusEnum = DownloadStatus.queued;
+        break;
+      case 'downloading':
+        statusEnum = DownloadStatus.downloading;
+        break;
+      case 'paused':
+        statusEnum = DownloadStatus.paused;
+        break;
+      case 'completed':
+      case 'complete':
+        statusEnum = DownloadStatus.completed;
+        break;
+      case 'error':
+        statusEnum = DownloadStatus.error;
+        break;
+      case 'cancelled':
+        statusEnum = DownloadStatus.cancelled;
+        break;
+      default:
+        statusEnum = DownloadStatus.queued;
+    }
+
+    return DownloadProgress(
+      downloadId: 'file-${DateTime.now().millisecondsSinceEpoch}',
+      identifier: '',
+      downloadedBytes: downloaded,
+      totalBytes: total,
+      progress: total > 0 ? downloaded / total : 0.0,
+      totalFiles: 1,
+      status: statusEnum,
+      errorMessage: error,
+    );
+  }
+
   /// Create a copy with updated fields
   DownloadProgress copyWith({
     String? downloadId,

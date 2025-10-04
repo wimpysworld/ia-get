@@ -451,7 +451,7 @@ class IaGetSimpleService {
 
     try {
       // Initialize progress tracking
-      _downloadProgress[url] = DownloadProgress(
+      _downloadProgress[url] = DownloadProgress.simple(
         downloaded: 0,
         total: 0,
         percentage: 0.0,
@@ -472,7 +472,7 @@ class IaGetSimpleService {
             onProgress(downloaded, total);
 
             // Update state
-            _downloadProgress[url] = DownloadProgress(
+            _downloadProgress[url] = DownloadProgress.simple(
               downloaded: downloaded,
               total: total,
               percentage: total > 0 ? (downloaded / total) * 100 : 0.0,
@@ -497,7 +497,7 @@ class IaGetSimpleService {
       progressPort?.close();
 
       if (!response['success']) {
-        _downloadProgress[url] = DownloadProgress(
+        _downloadProgress[url] = DownloadProgress.simple(
           downloaded: 0,
           total: 0,
           percentage: 0.0,
@@ -509,7 +509,7 @@ class IaGetSimpleService {
 
       // Mark as complete
       final progress = _downloadProgress[url]!;
-      _downloadProgress[url] = DownloadProgress(
+      _downloadProgress[url] = DownloadProgress.simple(
         downloaded: progress.downloaded,
         total: progress.total,
         percentage: 100.0,

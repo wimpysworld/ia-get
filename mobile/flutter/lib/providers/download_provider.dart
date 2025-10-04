@@ -5,7 +5,7 @@
 
 import 'package:flutter/foundation.dart';
 import '../models/archive_metadata.dart';
-import '../models/download_progress.dart';
+import '../models/download_progress.dart' hide DownloadStatus;
 import '../models/file_filter.dart';
 import '../services/ia_get_simple_service.dart';
 
@@ -361,7 +361,7 @@ class DownloadProvider extends ChangeNotifier {
         final fileProgress = Map<String, DownloadProgress>.from(
           _downloads[identifier]!.fileProgress,
         );
-        fileProgress[file.name] = DownloadProgress(
+        fileProgress[file.name] = DownloadProgress.simple(
           downloaded: 0,
           total: file.size ?? 0,
           percentage: 0.0,
@@ -381,7 +381,7 @@ class DownloadProvider extends ChangeNotifier {
             final updatedProgress = Map<String, DownloadProgress>.from(
               _downloads[identifier]!.fileProgress,
             );
-            updatedProgress[file.name] = DownloadProgress(
+            updatedProgress[file.name] = DownloadProgress.simple(
               downloaded: downloaded,
               total: total,
               percentage: total > 0 ? (downloaded / total) * 100 : 0.0,
@@ -752,7 +752,7 @@ class _QueuedDownload {
   });
 }
 
-/// Extension to add copyWith to DownloadProgress
+/// Extension to add copyWith to DownloadProgress for simple file progress
 extension DownloadProgressCopyWith on DownloadProgress {
   DownloadProgress copyWith({
     int? downloaded,
@@ -761,12 +761,12 @@ extension DownloadProgressCopyWith on DownloadProgress {
     String? status,
     String? error,
   }) {
-    return DownloadProgress(
+    return DownloadProgress.simple(
       downloaded: downloaded ?? this.downloaded,
       total: total ?? this.total,
       percentage: percentage ?? this.percentage,
-      status: status ?? this.status,
-      error: error ?? this.error,
+      status: status ?? 'downloading',
+      error: error ?? errorMessage,
     );
   }
 }
