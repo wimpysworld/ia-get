@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../services/ia_get_service.dart';
+import '../services/archive_service.dart';
 import '../services/background_download_service.dart';
 import '../screens/download_screen.dart';
 import '../screens/settings_screen.dart';
@@ -44,7 +44,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<IaGetService>(
+    return Consumer<ArchiveService>(
       builder: (context, service, child) {
         final selectedFiles = service.filteredFiles
             .where((f) => f.selected)
@@ -272,7 +272,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
   }
 
   void _performDownload() async {
-    final service = context.read<IaGetService>();
+    final service = context.read<ArchiveService>();
     final downloadService = context.read<BackgroundDownloadService>();
     final selectedFiles = service.filteredFiles
         .where((f) => f.selected)

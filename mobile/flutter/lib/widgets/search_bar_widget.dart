@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../services/ia_get_service.dart';
+import '../services/archive_service.dart';
 
 class SearchBarWidget extends StatefulWidget {
   const SearchBarWidget({super.key});
@@ -51,7 +51,7 @@ class _SearchBarWidgetState extends State<SearchBarWidget> {
             ),
           ),
           const SizedBox(width: 8),
-          Consumer<IaGetService>(
+          Consumer<ArchiveService>(
             builder: (context, service, child) {
               final isLoading = service.isLoading;
               final canCancel = service.canCancel;
@@ -101,7 +101,7 @@ class _SearchBarWidgetState extends State<SearchBarWidget> {
 
     // Add error handling wrapper
     try {
-      context.read<IaGetService>().fetchMetadata(identifier.trim());
+      context.read<ArchiveService>().fetchMetadata(identifier.trim());
     } catch (e) {
       // Show error to user if service call fails
       if (mounted) {

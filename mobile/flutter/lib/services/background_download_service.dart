@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../models/download_progress.dart';
 import '../models/archive_metadata.dart';
-import 'ia_get_service.dart';
+import 'ia_get_simple_service.dart';
 import 'notification_service.dart';
 
 /// Service for managing background downloads with Android WorkManager integration
@@ -133,20 +133,12 @@ class BackgroundDownloadService extends ChangeNotifier {
   /// Checks if the archive exists and has downloadable files
   Future<bool> validateArchiveForDownload(String identifier) async {
     try {
-      // Use IaGetService to fetch and validate archive metadata
-      final service = IaGetService();
-      await service.initialize();
-      await service.fetchMetadata(identifier);
-
-      if (service.currentMetadata == null) {
-        debugPrint(
-          'Archive validation failed: metadata not found for $identifier',
-        );
-        return false;
-      }
+      // Use simplified FFI service to fetch and validate archive metadata
+      final service = IaGetSimpleService();
+      final metadata = await service.fetchMetadata(identifier);
 
       // Check if archive has files available for download
-      if (service.currentMetadata!.files.isEmpty) {
+      if (metadata.files.isEmpty) {
         debugPrint(
           'Archive validation failed: no files available in $identifier',
         );
@@ -154,7 +146,7 @@ class BackgroundDownloadService extends ChangeNotifier {
       }
 
       debugPrint(
-        'Archive $identifier validated successfully (${service.currentMetadata!.files.length} files)',
+        'Archive $identifier validated successfully (${metadata.files.length} files)',
       );
       return true;
     } catch (e) {
@@ -167,10 +159,9 @@ class BackgroundDownloadService extends ChangeNotifier {
   /// Useful for displaying file information before starting download
   Future<ArchiveMetadata?> getArchiveMetadata(String identifier) async {
     try {
-      final service = IaGetService();
-      await service.initialize();
-      await service.fetchMetadata(identifier);
-      return service.currentMetadata;
+      final service = IaGetSimpleService();
+      final metadata = await service.fetchMetadata(identifier);
+      return metadata;
     } catch (e) {
       debugPrint('Failed to fetch archive metadata for $identifier: $e');
       return null;

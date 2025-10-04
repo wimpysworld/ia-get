@@ -19,6 +19,7 @@ dependencies:
   # Storage and file management
   path_provider: ^2.1.5
   permission_handler: ^12.0.0
+  open_file: ^3.5.9
   
   # Network and download
   http: ^1.5.0

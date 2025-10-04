@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../services/ia_get_service.dart';
+import '../services/archive_service.dart';
 
 class FiltersScreen extends StatefulWidget {
   final List<String> initialIncludeFormats;
@@ -59,7 +59,7 @@ class _FiltersScreenState extends State<FiltersScreen> {
 
     // Load available formats from the current archive
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final service = context.read<IaGetService>();
+      final service = context.read<ArchiveService>();
       final formats = service.getAvailableFormats();
       setState(() {
         _availableFormats = formats.toList()..sort();
@@ -423,7 +423,7 @@ class _FiltersScreenState extends State<FiltersScreen> {
   }
 
   void _applyFilters() {
-    final service = context.read<IaGetService>();
+    final service = context.read<ArchiveService>();
     service.filterFiles(
       includeFormats: _selectedIncludeFormats.isNotEmpty
           ? _selectedIncludeFormats

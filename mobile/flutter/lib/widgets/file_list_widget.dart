@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/archive_metadata.dart';
-import '../services/ia_get_service.dart';
+import '../services/archive_service.dart';
 import '../screens/file_preview_screen.dart';
 import '../screens/filters_screen.dart';
 
@@ -54,7 +54,7 @@ class _FileListWidgetState extends State<FileListWidget> {
                     }
                   });
                   // Notify service that selection changed
-                  context.read<IaGetService>().notifyFileSelectionChanged();
+                  context.read<ArchiveService>().notifyFileSelectionChanged();
                 },
               ),
               Text(
@@ -184,7 +184,7 @@ class _FileListWidgetState extends State<FileListWidget> {
         // File list
         Expanded(
           child: sortedFiles.isEmpty
-              ? Consumer<IaGetService>(
+              ? Consumer<ArchiveService>(
                   builder: (context, service, child) {
                     final hasActiveFilters = _hasActiveFilters();
                     return Center(
@@ -263,7 +263,7 @@ class _FileListWidgetState extends State<FileListWidget> {
           _updateSelectAllState();
         });
         // Notify service that selection changed
-        context.read<IaGetService>().notifyFileSelectionChanged();
+        context.read<ArchiveService>().notifyFileSelectionChanged();
       },
       title: Text(
         file.displayName,

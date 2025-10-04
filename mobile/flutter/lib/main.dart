@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'services/ia_get_service.dart';
+import 'services/archive_service.dart';
 import 'services/background_download_service.dart';
 import 'services/deep_link_service.dart';
+import 'providers/download_provider.dart';
 import 'screens/home_screen.dart';
 import 'screens/archive_detail_screen.dart';
 import 'screens/download_screen.dart';
@@ -43,9 +44,13 @@ class IAGetMobileApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider<IaGetService>(
-          create: (_) => IaGetService(),
+        ChangeNotifierProvider<ArchiveService>(
+          create: (_) => ArchiveService(),
           lazy: false, // Initialize immediately for better startup performance
+        ),
+        ChangeNotifierProvider<DownloadProvider>(
+          create: (_) => DownloadProvider(),
+          lazy: false, // Initialize immediately for downloads
         ),
         ChangeNotifierProvider<BackgroundDownloadService>(
           create: (_) => BackgroundDownloadService(),
@@ -179,13 +184,9 @@ class _AppInitializerState extends State<AppInitializer> {
       deepLinkService.onArchiveLinkReceived = (identifier) {
         if (!mounted) return;
         
-        final iaGetService = context.read<IaGetService>();
-        // Only fetch metadata if service is initialized
-        if (iaGetService.isInitialized) {
-          iaGetService.fetchMetadata(identifier);
-        } else {
-          debugPrint('Deep link received but IaGetService not initialized: $identifier');
-        }
+        final archiveService = context.read<ArchiveService>();
+        // Fetch metadata (new service doesn't need explicit initialization)
+        archiveService.fetchMetadata(identifier);
       };
 
       // Request notification permissions (non-blocking, fire-and-forget)

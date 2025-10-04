@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../services/ia_get_service.dart';
+import '../services/archive_service.dart';
 import '../widgets/search_bar_widget.dart';
 import '../widgets/download_manager_widget.dart';
 import 'archive_detail_screen.dart';
@@ -25,10 +25,10 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) return;
       
       // Initialize the service
-      context.read<IaGetService>().initialize();
+      context.read<ArchiveService>().initialize();
 
       // Listen for metadata changes to navigate to detail screen
-      context.read<IaGetService>().addListener(_onServiceChanged);
+      context.read<ArchiveService>().addListener(_onServiceChanged);
     });
   }
 
@@ -36,7 +36,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     // Safe removal - only if context is still valid
     try {
-      context.read<IaGetService>().removeListener(_onServiceChanged);
+      context.read<ArchiveService>().removeListener(_onServiceChanged);
     } catch (e) {
       // Context may already be invalid during disposal
       debugPrint('Warning: Could not remove listener during dispose: $e');
@@ -45,7 +45,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _onServiceChanged() {
-    final service = context.read<IaGetService>();
+    final service = context.read<ArchiveService>();
 
     // Navigate to detail screen when metadata is loaded (only once)
     if (service.currentMetadata != null && mounted && !_hasNavigated) {
@@ -112,7 +112,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      body: Consumer<IaGetService>(
+      body: Consumer<ArchiveService>(
         builder: (context, service, child) {
           if (!service.isInitialized) {
             // Show error if initialization failed

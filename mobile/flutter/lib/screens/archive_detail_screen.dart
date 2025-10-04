@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../services/ia_get_service.dart';
+import '../services/archive_service.dart';
 import '../widgets/archive_info_widget.dart';
 import '../widgets/file_list_widget.dart';
 import '../widgets/download_controls_widget.dart';
@@ -28,13 +28,13 @@ class _ArchiveDetailScreenState extends State<ArchiveDetailScreen> {
         if (didPop) {
           // Clear metadata when going back to search
           // Use Provider.of with listen: false for safer context access in callbacks
-          final service = Provider.of<IaGetService>(context, listen: false);
+          final service = Provider.of<ArchiveService>(context, listen: false);
           service.clearMetadata();
         }
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Consumer<IaGetService>(
+          title: Consumer<ArchiveService>(
             builder: (context, service, child) {
               return Text(
                 service.currentMetadata?.identifier ?? 'Archive Details',
@@ -43,7 +43,7 @@ class _ArchiveDetailScreenState extends State<ArchiveDetailScreen> {
             },
           ),
         ),
-        body: Consumer<IaGetService>(
+        body: Consumer<ArchiveService>(
           builder: (context, service, child) {
             // If no metadata and not already popping, go back to search
             if (service.currentMetadata == null && !_isPopping) {
