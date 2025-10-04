@@ -19,13 +19,6 @@
     <!-- Network state permission for connection monitoring -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     
-    <!-- Wake lock for background downloads -->
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    
-    <!-- Foreground service permissions for background downloads -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    
     <!-- Post notifications permission for Android 13+ (API 33+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     
@@ -95,13 +88,6 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
-        
-        <!-- Service for background downloads -->
-        <service
-            android:name=".DownloadService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
             
         <!-- App metadata for store listing -->
         <meta-data

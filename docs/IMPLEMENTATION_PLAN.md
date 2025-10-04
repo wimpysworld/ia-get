@@ -9,8 +9,36 @@ Implementing the Simplified FFI (Hybrid) approach to keep Rust as computational 
 - [x] Phase 2: Simplify FFI layer ✅ COMPLETE
 - [x] Phase 3: Update Flutter integration ✅ COMPLETE
 - [x] Phase 4: Deprecate old FFI ✅ COMPLETE
+- [x] Phase 5: Remove deprecated code ✅ COMPLETE (2024-10-04)
 
 **ALL PHASES COMPLETE!** 🎉
+
+## Phase 5: Remove Deprecated Code ✅ COMPLETE
+
+### Goals
+- Remove broken JNI bridge attempting to use non-existent old FFI
+- Remove Kotlin wrapper code referencing old FFI functions
+- Clean up Android integration to use only simplified FFI
+- Reduce codebase complexity
+
+### Tasks Completed
+- [x] Remove `mobile/rust-ffi/src/jni_bridge.rs` (558 lines)
+- [x] Remove `IaGetNativeWrapper.kt` (79 lines)
+- [x] Remove `DownloadService.kt` (393 lines)
+- [x] Update `MainActivity.kt` to remove DownloadService calls
+- [x] Remove JNI dependency from `Cargo.toml`
+- [x] Update `AndroidManifest.xml` to remove DownloadService
+- [x] Remove unused foreground service permissions
+- [x] Update documentation with simplified architecture
+- [x] Create `SIMPLIFICATION_SUMMARY.md` documenting changes
+
+### Results
+- **1,030+ lines** of broken/deprecated code removed
+- Flutter app now uses **only** simplified FFI (6 functions)
+- Clear architectural separation: Rust (computation) ↔ FFI ↔ Dart (state)
+- No more confusion about which integration path to use
+
+See `docs/SIMPLIFICATION_SUMMARY.md` for detailed analysis.
 
 ## Phase 1: Redesign Rust Core
 

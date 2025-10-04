@@ -13,10 +13,6 @@ crate-type = ["cdylib", "staticlib"]
 ia-get = { path = "../../", features = ["ffi"] }
 tokio = { version = "1.47", features = ["rt-multi-thread"] }
 
-# JNI support for Android
-[target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
-
 [profile.release]
 strip = true
 opt-level = "z"  # Optimize for size on mobile

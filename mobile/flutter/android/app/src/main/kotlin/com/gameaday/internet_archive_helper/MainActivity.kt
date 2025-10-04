@@ -35,46 +35,6 @@ class MainActivity: FlutterActivity() {
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, methodChannelName)
         methodChannel.setMethodCallHandler { call, result ->
             when (call.method) {
-                "startDownloadService" -> {
-                    val identifier = call.argument<String>("identifier")
-                    val outputDir = call.argument<String>("outputDir")
-                    val configJson = call.argument<String>("configJson")
-                    val filesJson = call.argument<String>("filesJson")
-                    
-                    if (identifier != null && outputDir != null && configJson != null && filesJson != null) {
-                        startDownloadService(identifier, outputDir, configJson, filesJson)
-                        result.success(true)
-                    } else {
-                        result.error("INVALID_ARGUMENTS", "Missing required arguments", null)
-                    }
-                }
-                "pauseDownload" -> {
-                    val sessionId = call.argument<Int>("sessionId")
-                    if (sessionId != null) {
-                        pauseDownload(sessionId)
-                        result.success(true)
-                    } else {
-                        result.error("INVALID_ARGUMENTS", "Missing sessionId", null)
-                    }
-                }
-                "resumeDownload" -> {
-                    val sessionId = call.argument<Int>("sessionId")
-                    if (sessionId != null) {
-                        resumeDownload(sessionId)
-                        result.success(true)
-                    } else {
-                        result.error("INVALID_ARGUMENTS", "Missing sessionId", null)
-                    }
-                }
-                "cancelDownload" -> {
-                    val sessionId = call.argument<Int>("sessionId")
-                    if (sessionId != null) {
-                        cancelDownload(sessionId)
-                        result.success(true)
-                    } else {
-                        result.error("INVALID_ARGUMENTS", "Missing sessionId", null)
-                    }
-                }
                 "getAppVersion" -> {
                     try {
                         val packageInfo = packageManager.getPackageInfo(packageName, 0)
@@ -200,53 +160,6 @@ class MainActivity: FlutterActivity() {
             }
             else -> null
         }
-    }
-
-    /**
-     * Start the background download service
-     */
-    private fun startDownloadService(identifier: String, outputDir: String, configJson: String, filesJson: String) {
-        val serviceIntent = Intent(this, DownloadService::class.java).apply {
-            action = DownloadService.ACTION_START_DOWNLOAD
-            putExtra(DownloadService.EXTRA_IDENTIFIER, identifier)
-            putExtra(DownloadService.EXTRA_OUTPUT_DIR, outputDir)
-            putExtra(DownloadService.EXTRA_CONFIG_JSON, configJson)
-            putExtra(DownloadService.EXTRA_FILES_JSON, filesJson)
-        }
-        startForegroundService(serviceIntent)
-    }
-
-    /**
-     * Pause a download session
-     */
-    private fun pauseDownload(sessionId: Int) {
-        val serviceIntent = Intent(this, DownloadService::class.java).apply {
-            action = DownloadService.ACTION_PAUSE_DOWNLOAD
-            putExtra(DownloadService.EXTRA_SESSION_ID, sessionId)
-        }
-        startService(serviceIntent)
-    }
-
-    /**
-     * Resume a download session
-     */
-    private fun resumeDownload(sessionId: Int) {
-        val serviceIntent = Intent(this, DownloadService::class.java).apply {
-            action = DownloadService.ACTION_RESUME_DOWNLOAD
-            putExtra(DownloadService.EXTRA_SESSION_ID, sessionId)
-        }
-        startService(serviceIntent)
-    }
-
-    /**
-     * Cancel a download session
-     */
-    private fun cancelDownload(sessionId: Int) {
-        val serviceIntent = Intent(this, DownloadService::class.java).apply {
-            action = DownloadService.ACTION_CANCEL_DOWNLOAD
-            putExtra(DownloadService.EXTRA_SESSION_ID, sessionId)
-        }
-        startService(serviceIntent)
     }
 
     /**
