@@ -1,7 +1,22 @@
 //! JNI Bridge for Android Integration
 //!
-//! This module provides JNI bindings that bridge the Kotlin code to the Rust FFI implementation.
-//! It allows the Android app to call Rust functions through JNI.
+//! **LEGACY CODE - NOT CURRENTLY USED**
+//!
+//! This module provides JNI bindings for the old FFI interface (14+ functions).
+//! The Flutter app now uses the simplified FFI interface (6 functions) directly via Dart FFI,
+//! so this JNI bridge is no longer used or maintained.
+//!
+//! **Status**: Deprecated - References non-existent old FFI functions
+//! **Action needed**: Either rewrite for simplified FFI or remove entirely
+//!
+//! If JNI integration is required in the future, this should be rewritten to bridge
+//! the Kotlin code to the simplified FFI functions:
+//! - ia_get_fetch_metadata
+//! - ia_get_download_file
+//! - ia_get_decompress_file
+//! - ia_get_validate_checksum
+//! - ia_get_last_error
+//! - ia_get_free_string
 
 use jni::{
     objects::{JClass, JObject, JString, JValue},
@@ -11,8 +26,8 @@ use jni::{
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
-// Re-export the core FFI functions
-use ia_get::interface::ffi::*;
+// Re-export the core FFI functions from the simplified FFI interface
+use ia_get::interface::ffi_simple::*;
 
 /// Convert Java string to Rust String
 fn jstring_to_string(
