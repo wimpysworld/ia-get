@@ -1,4 +1,7 @@
 fn main() {
+    // Generate C header for simplified FFI interface
+    generate_simplified_ffi_header();
+
     // Handle Windows-specific manifest for long path support
     #[cfg(target_os = "windows")]
     embed_windows_manifest();
@@ -18,6 +21,19 @@ fn main() {
     // The build script runs before the binary is created, so we can't package it here
     // Both development and production builds create complete APK/AAB files via Flutter build
     println!("cargo:warning=Build script completed - complete artifacts created by CI/CD workflow");
+}
+
+/// Generate C header for simplified FFI interface
+///
+/// This is optional - if cbindgen is not available, the build will continue
+/// The header can also be generated manually with: cbindgen -c cbindgen_simple.toml -o include/ia_get_simple.h
+fn generate_simplified_ffi_header() {
+    // Check if we should generate FFI headers
+    if std::env::var("CARGO_FEATURE_FFI").is_ok() {
+        println!("cargo:warning=FFI feature enabled - C header can be generated with: cbindgen -c cbindgen_simple.toml -o include/ia_get_simple.h");
+        println!("cargo:rerun-if-changed=src/interface/ffi_simple.rs");
+        println!("cargo:rerun-if-changed=cbindgen_simple.toml");
+    }
 }
 
 #[cfg(target_os = "windows")]

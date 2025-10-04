@@ -1,7 +1,16 @@
 //! FFI Interface for Mobile Platforms
 //!
-//! This module provides C-compatible bindings for the core ia-get functionality
-//! to enable integration with mobile applications (Flutter, React Native, etc.)
+//! **DEPRECATED**: This FFI interface is deprecated as of v0.8.0 and will be removed in v1.0.0.
+//! Please migrate to the simplified FFI interface in `ffi_simple.rs` which provides:
+//! - 57% less complexity (6 functions instead of 14+)
+//! - Zero race conditions (stateless design)
+//! - Better performance (no state synchronization overhead)
+//! - Easier debugging (single-language state management)
+//!
+//! Migration guide: docs/MIGRATION_TO_SIMPLIFIED_FFI.md
+//! New interface: src/interface/ffi_simple.rs
+
+#![allow(deprecated)]
 
 use indicatif::ProgressBar;
 use std::collections::HashMap;

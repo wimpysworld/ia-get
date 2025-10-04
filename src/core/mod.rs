@@ -5,6 +5,7 @@
 pub mod archive;
 pub mod download;
 pub mod session;
+pub mod stateless; // NEW: Stateless functions for FFI integration
 
 // Re-export commonly used core types
 pub use archive::*;
