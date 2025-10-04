@@ -36,7 +36,7 @@ Required for Play Store listing:
 
 ### Full Description (4000 characters max)
 ```
-IA Get Mobile brings the power of the Internet Archive to your Android device with a fast, efficient, and user-friendly downloading experience.
+Internet Archive Helper brings the power of the Internet Archive to your Android device with a fast, efficient, and user-friendly downloading experience.
 
 🚀 KEY FEATURES
 • Smart Search: Find archives quickly with real-time search

@@ -106,13 +106,55 @@ class _HomeScreenState extends State<HomeScreen> {
       body: Consumer<IaGetService>(
         builder: (context, service, child) {
           if (!service.isInitialized) {
+            // Show error if initialization failed
+            if (service.error != null) {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(
+                        Icons.error_outline,
+                        color: Colors.red,
+                        size: 64,
+                      ),
+                      const SizedBox(height: 24),
+                      const Text(
+                        'Initialization Failed',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        service.error!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                      const SizedBox(height: 24),
+                      ElevatedButton(
+                        onPressed: () {
+                          // Try to re-initialize
+                          service.initialize();
+                        },
+                        child: const Text('Retry'),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }
+            
+            // Show loading if still initializing
             return const Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   CircularProgressIndicator(),
                   SizedBox(height: 16),
-                  Text('Initializing IA Get...'),
+                  Text('Initializing Internet Archive Helper...'),
                 ],
               ),
             );

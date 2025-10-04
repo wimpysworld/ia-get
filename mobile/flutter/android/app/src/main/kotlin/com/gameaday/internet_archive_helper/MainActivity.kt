@@ -19,6 +19,15 @@ class MainActivity: FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         
+        // Force loading of native library BEFORE Dart tries to access it
+        // This ensures the library is available when Dart FFI initializes
+        try {
+            System.loadLibrary("ia_get_mobile")
+            android.util.Log.d("MainActivity", "Native library loaded successfully")
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to load native library", e)
+        }
+        
         // Set up platform method channel for native integration
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, methodChannelName)
         methodChannel.setMethodCallHandler { call, result ->
