@@ -37,7 +37,6 @@ tar = "0.4"
 zip = "4.6.0"
 futures = "0.3.31"
 bytes = "1.0"
-lazy_static = "1.4"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 sys-info = "0.9.1"
