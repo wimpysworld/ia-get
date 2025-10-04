@@ -56,8 +56,20 @@ class IaGetFFI {
     return __iaGetInit!;
   }
 
-  static final _iaGetFetchMetadata = dylib
-      .lookupFunction<
+  static int Function(
+    Pointer<Utf8>,
+    Pointer<NativeFunction<ProgressCallbackNative>>,
+    Pointer<NativeFunction<CompletionCallbackNative>>,
+    int,
+  )? __iaGetFetchMetadata;
+  static int Function(
+    Pointer<Utf8>,
+    Pointer<NativeFunction<ProgressCallbackNative>>,
+    Pointer<NativeFunction<CompletionCallbackNative>>,
+    int,
+  ) get _iaGetFetchMetadata {
+    if (__iaGetFetchMetadata != null) return __iaGetFetchMetadata!;
+    __iaGetFetchMetadata = dylib.lookupFunction<
         Int32 Function(
           Pointer<Utf8>,
           Pointer<NativeFunction<ProgressCallbackNative>>,
@@ -71,9 +83,25 @@ class IaGetFFI {
           int,
         )
       >('ia_get_fetch_metadata');
+    return __iaGetFetchMetadata!;
+  }
 
-  static final _iaGetFilterFiles = dylib
-      .lookupFunction<
+  static Pointer<Utf8> Function(
+    Pointer<Utf8>,
+    Pointer<Utf8>,
+    Pointer<Utf8>,
+    Pointer<Utf8>,
+    Pointer<Utf8>,
+  )? __iaGetFilterFiles;
+  static Pointer<Utf8> Function(
+    Pointer<Utf8>,
+    Pointer<Utf8>,
+    Pointer<Utf8>,
+    Pointer<Utf8>,
+    Pointer<Utf8>,
+  ) get _iaGetFilterFiles {
+    if (__iaGetFilterFiles != null) return __iaGetFilterFiles!;
+    __iaGetFilterFiles = dylib.lookupFunction<
         Pointer<Utf8> Function(
           Pointer<Utf8>,
           Pointer<Utf8>,
@@ -89,69 +117,128 @@ class IaGetFFI {
           Pointer<Utf8>,
         )
       >('ia_get_filter_files');
+    return __iaGetFilterFiles!;
+  }
 
-  static final _iaGetFreeString = dylib
-      .lookupFunction<
+  static void Function(Pointer<Utf8>)? __iaGetFreeString;
+  static void Function(Pointer<Utf8>) get _iaGetFreeString {
+    if (__iaGetFreeString != null) return __iaGetFreeString!;
+    __iaGetFreeString = dylib.lookupFunction<
         Void Function(Pointer<Utf8>),
         void Function(Pointer<Utf8>)
       >('ia_get_free_string');
+    return __iaGetFreeString!;
+  }
 
-  static final _iaGetGetMetadataJson = dylib
-      .lookupFunction<
+  static Pointer<Utf8> Function(Pointer<Utf8>)? __iaGetGetMetadataJson;
+  static Pointer<Utf8> Function(Pointer<Utf8>) get _iaGetGetMetadataJson {
+    if (__iaGetGetMetadataJson != null) return __iaGetGetMetadataJson!;
+    __iaGetGetMetadataJson = dylib.lookupFunction<
         Pointer<Utf8> Function(Pointer<Utf8>),
         Pointer<Utf8> Function(Pointer<Utf8>)
       >('ia_get_get_metadata_json');
+    return __iaGetGetMetadataJson!;
+  }
 
-  static final _iaGetCalculateTotalSize = dylib
-      .lookupFunction<
+  static int Function(Pointer<Utf8>)? __iaGetCalculateTotalSize;
+  static int Function(Pointer<Utf8>) get _iaGetCalculateTotalSize {
+    if (__iaGetCalculateTotalSize != null) return __iaGetCalculateTotalSize!;
+    __iaGetCalculateTotalSize = dylib.lookupFunction<
         Uint64 Function(Pointer<Utf8>),
         int Function(Pointer<Utf8>)
       >('ia_get_calculate_total_size');
+    return __iaGetCalculateTotalSize!;
+  }
 
-  static final _iaGetIsRequestInProgress = dylib
-      .lookupFunction<
+  static bool Function(Pointer<Utf8>)? __iaGetIsRequestInProgress;
+  static bool Function(Pointer<Utf8>) get _iaGetIsRequestInProgress {
+    if (__iaGetIsRequestInProgress != null) return __iaGetIsRequestInProgress!;
+    __iaGetIsRequestInProgress = dylib.lookupFunction<
         Bool Function(Pointer<Utf8>),
         bool Function(Pointer<Utf8>)
       >('ia_get_is_request_in_progress');
+    return __iaGetIsRequestInProgress!;
+  }
 
-  static final _iaGetGetPerformanceMetrics = dylib
-      .lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>(
-        'ia_get_get_performance_metrics',
-      );
+  static Pointer<Utf8> Function()? __iaGetGetPerformanceMetrics;
+  static Pointer<Utf8> Function() get _iaGetGetPerformanceMetrics {
+    if (__iaGetGetPerformanceMetrics != null) return __iaGetGetPerformanceMetrics!;
+    __iaGetGetPerformanceMetrics = dylib.lookupFunction<
+        Pointer<Utf8> Function(), 
+        Pointer<Utf8> Function()
+      >('ia_get_get_performance_metrics');
+    return __iaGetGetPerformanceMetrics!;
+  }
 
-  static final _iaGetResetPerformanceMetrics = dylib
-      .lookupFunction<Int32 Function(), int Function()>(
-        'ia_get_reset_performance_metrics',
-      );
+  static int Function()? __iaGetResetPerformanceMetrics;
+  static int Function() get _iaGetResetPerformanceMetrics {
+    if (__iaGetResetPerformanceMetrics != null) return __iaGetResetPerformanceMetrics!;
+    __iaGetResetPerformanceMetrics = dylib.lookupFunction<
+        Int32 Function(), 
+        int Function()
+      >('ia_get_reset_performance_metrics');
+    return __iaGetResetPerformanceMetrics!;
+  }
 
-  static final _iaGetHealthCheck = dylib
-      .lookupFunction<Int32 Function(), int Function()>('ia_get_health_check');
+  static int Function()? __iaGetHealthCheck;
+  static int Function() get _iaGetHealthCheck {
+    if (__iaGetHealthCheck != null) return __iaGetHealthCheck!;
+    __iaGetHealthCheck = dylib.lookupFunction<
+        Int32 Function(), 
+        int Function()
+      >('ia_get_health_check');
+    return __iaGetHealthCheck!;
+  }
 
-  static final _iaGetClearStaleCache = dylib
-      .lookupFunction<Int32 Function(), int Function()>(
-        'ia_get_clear_stale_cache',
-      );
+  static int Function()? __iaGetClearStaleCache;
+  static int Function() get _iaGetClearStaleCache {
+    if (__iaGetClearStaleCache != null) return __iaGetClearStaleCache!;
+    __iaGetClearStaleCache = dylib.lookupFunction<
+        Int32 Function(), 
+        int Function()
+      >('ia_get_clear_stale_cache');
+    return __iaGetClearStaleCache!;
+  }
 
-  static final _iaGetGetCircuitBreakerStatus = dylib
-      .lookupFunction<Int32 Function(), int Function()>(
-        'ia_get_get_circuit_breaker_status',
-      );
+  static int Function()? __iaGetGetCircuitBreakerStatus;
+  static int Function() get _iaGetGetCircuitBreakerStatus {
+    if (__iaGetGetCircuitBreakerStatus != null) return __iaGetGetCircuitBreakerStatus!;
+    __iaGetGetCircuitBreakerStatus = dylib.lookupFunction<
+        Int32 Function(), 
+        int Function()
+      >('ia_get_get_circuit_breaker_status');
+    return __iaGetGetCircuitBreakerStatus!;
+  }
 
-  static final _iaGetResetCircuitBreaker = dylib
-      .lookupFunction<Int32 Function(), int Function()>(
-        'ia_get_reset_circuit_breaker',
-      );
+  static int Function()? __iaGetResetCircuitBreaker;
+  static int Function() get _iaGetResetCircuitBreaker {
+    if (__iaGetResetCircuitBreaker != null) return __iaGetResetCircuitBreaker!;
+    __iaGetResetCircuitBreaker = dylib.lookupFunction<
+        Int32 Function(), 
+        int Function()
+      >('ia_get_reset_circuit_breaker');
+    return __iaGetResetCircuitBreaker!;
+  }
 
-  static final _iaGetCancelOperation = dylib
-      .lookupFunction<Int32 Function(Int32), int Function(int)>(
-        'ia_get_cancel_operation',
-      );
+  static int Function(int)? __iaGetCancelOperation;
+  static int Function(int) get _iaGetCancelOperation {
+    if (__iaGetCancelOperation != null) return __iaGetCancelOperation!;
+    __iaGetCancelOperation = dylib.lookupFunction<
+        Int32 Function(Int32), 
+        int Function(int)
+      >('ia_get_cancel_operation');
+    return __iaGetCancelOperation!;
+  }
 
-  static final _iaGetSearchArchives = dylib
-      .lookupFunction<
+  static Pointer<Utf8> Function(Pointer<Utf8>, int)? __iaGetSearchArchives;
+  static Pointer<Utf8> Function(Pointer<Utf8>, int) get _iaGetSearchArchives {
+    if (__iaGetSearchArchives != null) return __iaGetSearchArchives!;
+    __iaGetSearchArchives = dylib.lookupFunction<
         Pointer<Utf8> Function(Pointer<Utf8>, Int32),
         Pointer<Utf8> Function(Pointer<Utf8>, int)
       >('ia_get_search_archives');
+    return __iaGetSearchArchives!;
+  }
 
   /// Initialize the FFI library
   /// Returns 0 on success, non-zero error code on failure

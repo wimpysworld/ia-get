@@ -29,7 +29,24 @@ The initialization could still hang because:
 
 ### 1. Lazy Function Pointer Loading
 
-Changed from eager static final to lazy getter:
+Changed ALL FFI function pointers from eager static final to lazy getters.
+
+**Applied to all 14 FFI functions:**
+- `_iaGetInit`
+- `_iaGetFetchMetadata`
+- `_iaGetFilterFiles`
+- `_iaGetFreeString`
+- `_iaGetGetMetadataJson`
+- `_iaGetCalculateTotalSize`
+- `_iaGetIsRequestInProgress`
+- `_iaGetGetPerformanceMetrics`
+- `_iaGetResetPerformanceMetrics`
+- `_iaGetHealthCheck`
+- `_iaGetClearStaleCache`
+- `_iaGetGetCircuitBreakerStatus`
+- `_iaGetResetCircuitBreaker`
+- `_iaGetCancelOperation`
+- `_iaGetSearchArchives`
 
 ```dart
 // BEFORE (eager, can throw outside try-catch):
@@ -197,7 +214,7 @@ IaGetService: Notifying listeners (isInitialized=false, error=...)
 ## Files Changed
 
 1. **mobile/flutter/lib/services/ia_get_service.dart**
-   - Made `_iaGetInit` a lazy getter instead of static final
+   - Made ALL 14 FFI function pointers lazy getters instead of static final
    - Wrapped `init()` with try-catch for all exceptions
    - Added `finally` block to guarantee `notifyListeners()` is called
    - Enhanced logging throughout
