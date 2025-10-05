@@ -99,7 +99,7 @@ fn safe_str_to_c_string(s: String) -> *mut c_char {
 ///
 /// # Arguments
 ///
-/// * `identifier` - Archive.org identifier (e.g., "commute_test")
+/// * `identifier` - Archive.org identifier (e.g., "goodytwoshoes00newyiala")
 ///
 /// # Returns
 ///

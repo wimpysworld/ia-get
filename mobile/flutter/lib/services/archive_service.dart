@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import '../models/archive_metadata.dart';
 import 'ia_get_simple_service.dart';
 
@@ -321,7 +323,7 @@ class ArchiveService extends ChangeNotifier {
     return files.fold<int>(0, (sum, file) => sum + (file.size ?? 0));
   }
 
-  /// Search for archives (mock implementation - returns suggestions)
+  /// Search for archives using Internet Archive API
   Future<void> searchArchives(String query) async {
     if (query.isEmpty) {
       _suggestions = [];
@@ -329,18 +331,44 @@ class ArchiveService extends ChangeNotifier {
       return;
     }
 
+    _isLoading = true;
+    notifyListeners();
+
     try {
-      // For now, create suggestions based on the query
-      // In the future, this could call an actual search API
-      _suggestions = [
-        {'identifier': query, 'title': 'Search for: $query'},
-      ];
+      // Use Internet Archive's search API
+      // https://archive.org/advancedsearch.php?q=<query>&output=json
+      final encodedQuery = Uri.encodeComponent(query);
+      final searchUrl = 'https://archive.org/advancedsearch.php?q=$encodedQuery&fl[]=identifier,title,description&rows=10&output=json';
+      
+      final response = await http.get(Uri.parse(searchUrl));
+      
+      if (response.statusCode == 200) {
+        final jsonData = json.decode(response.body);
+        final docs = jsonData['response']?['docs'] as List<dynamic>? ?? [];
+        
+        _suggestions = docs.map((doc) {
+          return {
+            'identifier': doc['identifier'] ?? '',
+            'title': doc['title'] ?? 'Untitled',
+            'description': doc['description'] ?? '',
+          };
+        }).toList();
+      } else {
+        if (kDebugMode) {
+          print('Search API returned status ${response.statusCode}');
+        }
+        _suggestions = [];
+      }
+      
       notifyListeners();
     } catch (e) {
       if (kDebugMode) {
         print('Error searching archives: $e');
       }
       _suggestions = [];
+      notifyListeners();
+    } finally {
+      _isLoading = false;
       notifyListeners();
     }
   }
