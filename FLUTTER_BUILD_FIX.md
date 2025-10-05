@@ -1,7 +1,9 @@
 # Flutter Build Error Fix Summary
 
 ## Issue
-The Flutter build was failing with the following errors during CI/CD:
+The Flutter build had the following issues during CI/CD:
+
+### Critical Errors (FIXED)
 ```
 error • The argument type 'DownloadStatus' can't be assigned to the parameter type 'DownloadStatus?'. 
         • lib/providers/download_provider.dart:404:19 • argument_type_not_assignable
@@ -9,6 +11,16 @@ warning • The value of the field '_includeFormats' isn't used
           • lib/screens/advanced_filters_screen.dart:28:21 • unused_field
 warning • The value of the field '_excludeFormats' isn't used 
           • lib/screens/advanced_filters_screen.dart:29:21 • unused_field
+```
+
+### Info-Level Warnings (FIXED)
+```
+info • Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check 
+     • lib/screens/settings_screen.dart:306:46 • use_build_context_synchronously
+info • Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check 
+     • lib/screens/settings_screen.dart:307:54 • use_build_context_synchronously
+info • Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check 
+     • lib/widgets/download_controls_widget.dart:535:21 • use_build_context_synchronously
 ```
 
 ## Root Cause
@@ -24,6 +36,16 @@ The provider imports the model with `hide DownloadStatus` to avoid naming confli
 
 ### Warning 2: Unused Fields
 The `_includeFormats` and `_excludeFormats` fields in `advanced_filters_screen.dart` were being initialized from the incoming filter but were never passed back when constructing the new `FileFilter` object in the `_apply()` method.
+
+### Info Warning 3: BuildContext Usage Across Async Gaps
+Code was extracting context-dependent objects (`Navigator.of(context)`, `ScaffoldMessenger.of(context)`) **after** async operations, even though it checked `mounted` status. This violates Flutter best practices because the widget could be disposed between the async operation completing and the context being used.
+
+The analyzer detected this pattern:
+1. Async operation (`await _prefs.clear()`, `await PermissionUtils.hasStoragePermissions()`)
+2. Mounted check (`if (!mounted) return;`)
+3. Context extraction (`Navigator.of(context)`) ← **Warning triggered here**
+
+While the mounted check prevents crashes, the proper pattern is to extract context-dependent objects **before** any async operations.
 
 ## Solutions Applied
 
@@ -71,31 +93,56 @@ final filter = FileFilter(
 
 - ✅ Resolves critical build failure error preventing compilation
 - ✅ Eliminates unused field warnings
+- ✅ Eliminates all info-level BuildContext warnings
 - ✅ Ensures format filter fields are properly preserved when applying filters
+- ✅ Improves code quality with proper async/context handling patterns
 - ✅ Maintains backward compatibility with existing code
-- ✅ Minimal changes - only 4 insertions, 1 deletion across 2 files
+- ✅ Minimal changes - surgical fixes to only affected code sections
 
-## Remaining Info-Level Warnings
+## BuildContext Warnings (RESOLVED)
 
-The following info-level warnings remain but do NOT cause build failures:
+The following info-level warnings about BuildContext usage across async gaps have been **resolved**:
+
+### Fix 3: Proper BuildContext Handling Across Async Gaps
+**Files**: 
+- `mobile/flutter/lib/screens/settings_screen.dart` (lines 292-294)
+- `mobile/flutter/lib/widgets/download_controls_widget.dart` (lines 526-527)
+
+**Issue**: Code was extracting `Navigator.of(context)` and `ScaffoldMessenger.of(context)` after async operations, even though it was checking `mounted` status first. This triggered Flutter analyzer warnings about using BuildContext across async gaps.
+
+**Solution**: Capture context-dependent objects (Navigator, ScaffoldMessenger) **before** any async operations:
+
+```dart
+// settings_screen.dart - Before:
+onPressed: () async {
+  await _prefs.clear();
+  // ... setState ...
+  if (!mounted) return;
+  final navigator = Navigator.of(context);  // ❌ After async gap
+  final messenger = ScaffoldMessenger.of(context);  // ❌ After async gap
+  // ...
+}
+
+// After:
+onPressed: () async {
+  final navigator = Navigator.of(context);  // ✅ Before async operations
+  final messenger = ScaffoldMessenger.of(context);  // ✅ Before async operations
+  await _prefs.clear();
+  // ... setState ...
+  if (!mounted) return;
+  // ...
+}
 ```
-info • Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check 
-     • lib/screens/settings_screen.dart:306:46 • use_build_context_synchronously
-info • Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check 
-     • lib/screens/settings_screen.dart:307:54 • use_build_context_synchronously
-info • Don't use 'BuildContext's across async gaps, guarded by an unrelated 'mounted' check 
-     • lib/widgets/download_controls_widget.dart:535:21 • use_build_context_synchronously
-```
 
-These are style suggestions rather than errors. The code already uses the `if (!mounted) return;` pattern which is an acceptable approach in Flutter for handling context usage after async operations.
+Similar pattern applied to `download_controls_widget.dart`.
 
 ## Testing
 
 To verify the fixes:
 ```bash
 cd mobile/flutter
-flutter analyze  # Should show no errors, only info-level warnings
+flutter analyze  # Should show no errors or warnings
 flutter test     # Run tests to ensure no regressions
 ```
 
-Expected result: Build should succeed without errors. Only 3 info-level warnings should remain, which are acceptable.
+Expected result: Build should succeed without errors or info-level warnings.

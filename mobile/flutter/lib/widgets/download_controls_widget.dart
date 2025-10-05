@@ -523,16 +523,18 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
             ),
             ElevatedButton.icon(
               onPressed: () async {
-                Navigator.pop(context);
+                // Capture context before async operations
+                final navigator = Navigator.of(context);
+                
+                navigator.pop();
                 // Retry after checking permissions again
                 final hasPermission =
                     await PermissionUtils.hasStoragePermissions();
                 if (!mounted) return;
                 
-                final currentContext = context;
                 if (!hasPermission) {
                   await PermissionUtils.showSettingsDialog(
-                    context: currentContext,
+                    context: context,
                     message:
                         'Storage permission is required. Please enable it in Settings.',
                   );

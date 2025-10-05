@@ -289,6 +289,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           ElevatedButton(
             onPressed: () async {
+              // Capture context-dependent objects before async operations
+              final navigator = Navigator.of(context);
+              final messenger = ScaffoldMessenger.of(context);
+              
               // Clear all preferences
               await _prefs.clear();
 
@@ -302,9 +306,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               });
 
               if (!mounted) return;
-              
-              final navigator = Navigator.of(context);
-              final messenger = ScaffoldMessenger.of(context);
               
               navigator.pop();
               messenger.showSnackBar(
