@@ -45,7 +45,7 @@ class DownloadProgress {
   double get percentage => progress != null ? progress! * 100 : 0.0;
 
   /// Legacy factory constructor for simple file progress tracking
-  /// Used by download_provider.dart and ia_get_simple_service.dart
+  /// Used by download_provider.dart and archive_service.dart
   factory DownloadProgress.simple({
     required int downloaded,
     required int total,

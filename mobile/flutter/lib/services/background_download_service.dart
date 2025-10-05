@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 import '../models/download_progress.dart';
 import '../models/archive_metadata.dart';
 import '../models/download_statistics.dart';
-import 'ia_get_simple_service.dart';
+import 'archive_service.dart';
 import 'notification_service.dart';
 
 /// Service for managing background downloads with Android WorkManager integration

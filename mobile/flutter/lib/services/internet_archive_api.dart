@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:crypto/crypto.dart';
 import '../models/archive_metadata.dart';
+import '../core/constants/internet_archive_constants.dart';
 
 /// Pure Dart/Flutter implementation of Internet Archive API client
 ///
@@ -15,17 +16,20 @@ import '../models/archive_metadata.dart';
 /// - Rate limiting and error handling
 ///
 /// API Reference: https://archive.org/developers/md-read.html
+/// 
+/// Compliance:
+/// - Respects rate limits (max 30 requests/minute)
+/// - Includes proper User-Agent header with contact info
+/// - Implements exponential backoff for retries
+/// - Handles all IA-specific HTTP status codes
 class InternetArchiveApi {
   final http.Client _client;
   DateTime? _lastRequestTime;
   int _requestCount = 0;
   final DateTime _sessionStart = DateTime.now();
-
-  // Rate limiting constants
-  static const int _minRequestDelayMs = 100;
-  static const int _httpTimeoutSeconds = 30;
-  static const int _maxRetries = 3;
-  static const int _defaultRetryDelaySecs = 30;
+  
+  /// App version for User-Agent header
+  static const String _appVersion = '1.6.0';
 
   InternetArchiveApi({http.Client? client})
       : _client = client ?? http.Client();
@@ -47,24 +51,18 @@ class InternetArchiveApi {
 
     // Retry logic for transient errors
     int retries = 0;
-    Duration retryDelay = Duration(seconds: _defaultRetryDelaySecs);
+    Duration retryDelay = Duration(seconds: IARateLimits.defaultRetryDelaySecs);
     
-    while (retries < _maxRetries) {
+    while (retries < IARateLimits.maxRetries) {
       try {
         await _enforceRateLimit();
         
         final response = await _client
             .get(
               Uri.parse(metadataUrl),
-              headers: {
-                'Accept': 'application/json, text/plain, */*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Cache-Control': 'no-cache',
-                'DNT': '1', // Do Not Track - be respectful
-                'User-Agent': 'ia-get-flutter/1.6.0',
-              },
+              headers: IAHeaders.standard(_appVersion),
             )
-            .timeout(Duration(seconds: _httpTimeoutSeconds));
+            .timeout(Duration(seconds: IAHttpConfig.timeoutSeconds));
 
         _lastRequestTime = DateTime.now();
         _requestCount++;
@@ -73,62 +71,66 @@ class InternetArchiveApi {
           final jsonData = json.decode(response.body);
           return ArchiveMetadata.fromJson(jsonData);
         } else if (response.statusCode == 429) {
-          // Rate limited
+          // Rate limited - respect Retry-After header
           final retryAfter = int.tryParse(
                   response.headers['retry-after'] ?? '') ??
-              _defaultRetryDelaySecs;
-          throw Exception(
-              'Rate limited by Archive.org. Please wait ${retryAfter}s before retrying.');
+              IARateLimits.defaultRetryDelaySecs;
+          throw Exception(IAErrorMessages.rateLimit + ' Wait ${retryAfter}s.');
         } else if (response.statusCode == 404) {
-          throw Exception(
-              'Archive item not found: $identifier. The identifier may be incorrect.');
+          throw Exception(IAErrorMessages.notFound);
         } else if (response.statusCode == 403) {
-          throw Exception(
-              'Access forbidden. This item may be restricted or require authentication.');
+          throw Exception(IAErrorMessages.forbidden);
         } else if (response.statusCode >= 500) {
-          // Server error - retry
-          if (retries < _maxRetries - 1) {
+          // Server error - retry with exponential backoff
+          if (retries < IARateLimits.maxRetries - 1) {
             if (kDebugMode) {
               print(
                   'Server error (${response.statusCode}), retrying in ${retryDelay.inSeconds}s...');
             }
             await Future.delayed(retryDelay);
             retries++;
-            retryDelay = Duration(seconds: retryDelay.inSeconds * 2);
+            retryDelay = Duration(
+                seconds: (retryDelay.inSeconds * IARateLimits.backoffMultiplier).toInt());
+            // Cap at max backoff delay
+            if (retryDelay.inSeconds > IARateLimits.maxBackoffDelaySecs) {
+              retryDelay = Duration(seconds: IARateLimits.maxBackoffDelaySecs);
+            }
             continue;
           }
-          throw Exception(
+          throw Exception(IAErrorMessages.serverError);
               'Archive.org server error (${response.statusCode}). This is likely temporary.');
         } else {
           throw Exception(
               'Failed to fetch metadata: HTTP ${response.statusCode}');
         }
       } on TimeoutException {
-        if (retries < _maxRetries - 1) {
+        if (retries < IARateLimits.maxRetries - 1) {
           if (kDebugMode) {
             print('Request timeout, retrying in ${retryDelay.inSeconds}s...');
           }
           await Future.delayed(retryDelay);
           retries++;
-          retryDelay = Duration(seconds: retryDelay.inSeconds * 2);
+          retryDelay = Duration(
+              seconds: (retryDelay.inSeconds * IARateLimits.backoffMultiplier).toInt());
           continue;
         }
         rethrow;
       } on SocketException catch (e) {
-        if (retries < _maxRetries - 1) {
+        if (retries < IARateLimits.maxRetries - 1) {
           if (kDebugMode) {
             print('Network error: $e, retrying in ${retryDelay.inSeconds}s...');
           }
           await Future.delayed(retryDelay);
           retries++;
-          retryDelay = Duration(seconds: retryDelay.inSeconds * 2);
+          retryDelay = Duration(
+              seconds: (retryDelay.inSeconds * IARateLimits.backoffMultiplier).toInt());
           continue;
         }
         rethrow;
       }
     }
 
-    throw Exception('Failed to fetch metadata after $_maxRetries attempts');
+    throw Exception('Failed to fetch metadata after ${IARateLimits.maxRetries} attempts');
   }
 
   /// Download a file from the Internet Archive
@@ -150,10 +152,7 @@ class InternetArchiveApi {
     }
 
     final request = http.Request('GET', Uri.parse(url));
-    request.headers.addAll({
-      'Accept': '*/*',
-      'User-Agent': 'ia-get-flutter/1.6.0',
-    });
+    request.headers.addAll(IAHeaders.standard(_appVersion));
 
     final response = await _client.send(request);
 
@@ -261,7 +260,7 @@ class InternetArchiveApi {
 
     if (trimmed.contains('/details/')) {
       return trimmed.replaceAll('/details/', '/metadata/');
-    } else if (trimmed.contains('://archive.org/metadata/')) {
+    } else if (trimmed.contains('://${IAEndpoints.base.replaceAll('https://', '')}/metadata/')) {
       return trimmed;
     } else if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
       // It's a URL but not a details or metadata URL - extract identifier
@@ -269,12 +268,15 @@ class InternetArchiveApi {
       final segments = uri.pathSegments;
       if (segments.isNotEmpty) {
         final identifier = segments.last;
-        return 'https://archive.org/metadata/$identifier';
+        return IAUtils.buildMetadataUrl(identifier);
       }
       throw Exception('Cannot extract identifier from URL: $trimmed');
     } else {
-      // Assume it's a bare identifier
-      return 'https://archive.org/metadata/$trimmed';
+      // Assume it's a bare identifier - validate it
+      if (!IAUtils.isValidIdentifier(trimmed)) {
+        throw Exception(IAErrorMessages.invalidIdentifier);
+      }
+      return IAUtils.buildMetadataUrl(trimmed);
     }
   }
 
@@ -282,7 +284,7 @@ class InternetArchiveApi {
   Future<void> _enforceRateLimit() async {
     if (_lastRequestTime != null) {
       final elapsed = DateTime.now().difference(_lastRequestTime!);
-      final minDelay = Duration(milliseconds: _minRequestDelayMs);
+      final minDelay = Duration(milliseconds: IARateLimits.minRequestDelayMs);
 
       if (elapsed < minDelay) {
         final waitTime = minDelay - elapsed;
@@ -311,7 +313,7 @@ class InternetArchiveApi {
     if (minutes <= 0) return true;
     
     final requestsPerMinute = _requestCount / minutes;
-    return requestsPerMinute < 30.0;
+    return requestsPerMinute < IARateLimits.maxRequestsPerMinute;
   }
 
   /// Close the HTTP client
