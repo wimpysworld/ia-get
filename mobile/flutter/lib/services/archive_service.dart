@@ -3,24 +3,25 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/archive_metadata.dart';
 import '../models/search_result.dart';
-import 'ia_get_simple_service.dart';
+import 'internet_archive_api.dart';
 
-/// Archive Service - Unified service using simplified FFI
+/// Archive Service - Pure Dart/Flutter implementation
 ///
-/// This service replaces the old IaGetService with a cleaner implementation
-/// using the new simplified FFI interface (6 functions instead of 14+).
+/// This service provides a clean interface for interacting with the Internet Archive,
+/// now using a pure Dart implementation instead of FFI.
 ///
-/// Benefits:
-/// - No race conditions (stateless FFI)
-/// - Simpler error handling
-/// - Better performance
-/// - All state managed in Dart
+/// Benefits of pure Dart approach:
+/// - No native library dependencies or build complexity
+/// - Works on all Flutter platforms (Android, iOS, Web, Desktop)
+/// - Easier to debug and maintain
+/// - Better error messages and handling
+/// - No race conditions from FFI boundaries
 
 class ArchiveService extends ChangeNotifier {
-  final IaGetSimpleService _ffi = IaGetSimpleService();
+  final InternetArchiveApi _api = InternetArchiveApi();
 
   // State
-  bool _isInitialized = true; // Simplified FFI doesn't need explicit init
+  bool _isInitialized = true; // No initialization needed for pure Dart
   bool _isLoading = false;
   String? _error;
   ArchiveMetadata? _currentMetadata;
@@ -42,7 +43,7 @@ class ArchiveService extends ChangeNotifier {
   bool get canCancel => _isLoading; // Simplified - no request tracking needed
   List<SearchResult> get suggestions => _suggestions;
 
-  /// Initialize the service (no-op for simplified FFI, but kept for compatibility)
+  /// Initialize the service
   Future<void> initialize() async {
     _isInitialized = true;
     _error = null;
@@ -66,8 +67,8 @@ class ArchiveService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Use simplified FFI to fetch metadata
-      final metadata = await _ffi.fetchMetadata(trimmedIdentifier);
+      // Use pure Dart API to fetch metadata
+      final metadata = await _api.fetchMetadata(trimmedIdentifier);
       
       _currentMetadata = metadata;
       _filteredFiles = metadata.files;
@@ -404,6 +405,7 @@ class ArchiveService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _api.dispose();
     _currentMetadata = null;
     _filteredFiles = [];
     _suggestions = [];
