@@ -37,6 +37,7 @@ tar = "0.4"
 zip = "4.6.0"
 futures = "0.3.31"
 bytes = "1.0"
+urlencoding = "2.1"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 sys-info = "0.9.1"
@@ -62,6 +63,7 @@ embed-manifest = "1.4.0"
 [features]
 default = ["cli"]
 cli = []
+# GUI feature available but not default - CLI-first approach
 gui = ["eframe", "egui", "egui_extras", "rfd", "env_logger"]
 
 [profile.release]
