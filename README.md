@@ -31,22 +31,24 @@
 - **Latest Changes**: [Development Release](https://github.com/Gameaday/ia-get-cli/releases/tag/development) (All platforms + Android)
 
 ### 📱 Mobile App
-The Internet Archive Helper mobile app provides a premium Android experience:
+The Internet Archive Helper mobile app provides a premium Android experience with a **pure Flutter/Dart implementation**:
 
 **Android App Features:**
 - **Material 3 Design** - Modern, accessible interface aligned with Android standards
 - **Intuitive Touch Interface** - Optimized for mobile browsing and downloading
 - **Background Downloads** - Continue downloads even when the app is closed
 - **Deep Link Support** - Open archive.org links directly in the app
+- **Pure Dart Implementation** - Fast, platform-independent code without native dependencies
+- **Easy to Build** - Standard Flutter build process, no complex native compilation
 
-**For Developers:**
-The project also provides native libraries for embedding into other applications:
-- **ARM64** (arm64-v8a) - Modern Android devices
-- **ARMv7** (armeabi-v7a) - Older Android devices  
-- **x86_64** - Intel emulators
-- **x86** - Legacy emulators
+**Platform Support:**
+The Flutter app now supports multiple platforms:
+- **Android** - Full-featured mobile experience
+- **iOS** - Coming soon (easy to add with pure Dart implementation)
+- **Web** - Access via browser (experimental)
+- **Desktop** - Windows, macOS, Linux support via Flutter
 
-See [Mobile Development Guide](docs/MOBILE_DEVELOPMENT_GUIDE.md) for integration instructions.
+See [Flutter App Documentation](mobile/flutter/README.md) for building and development instructions.
 
 ## 🌟 Project Vision
 
@@ -83,7 +85,7 @@ ia-get --help
 
 ### Cross-Platform Support
 - **🖥️ Desktop**: CLI and GUI modes for Linux, Windows, macOS
-- **📱 Mobile**: Android APK app + Native libraries for development
+- **📱 Mobile**: Android APK app (pure Flutter/Dart implementation)
 - **🔧 Development**: Hot-reload support and comprehensive debugging tools
 
 ### User Interfaces
@@ -146,30 +148,45 @@ cargo build --profile fast-dev --no-default-features --features cli
 
 # Optimized release
 cargo build --release --no-default-features --features cli
-
-# Android builds (requires Android NDK)
-./scripts/build-mobile.sh          # Complete APK build  
-./scripts/build-android-libs-only.sh  # Native libraries only
 ```
 
-### 📱 Android Development
+### 📱 Flutter/Android Development
+
+The Flutter mobile app now uses a **pure Dart implementation** - no native Rust compilation required!
 
 ```shell
-# Prerequisites for Android builds
-export ANDROID_NDK_HOME=/path/to/android/ndk
-export ANDROID_HOME=/path/to/android/sdk
-
-# Install Flutter (for APK builds)
+# Install Flutter (required)
 # See https://flutter.dev/docs/get-started/install
 
-# Build Android APK + Native Libraries
-./scripts/build-mobile.sh
+# Navigate to Flutter project
+cd mobile/flutter
 
-# Build only native libraries (faster, no Flutter required)  
-./scripts/build-android-libs-only.sh
+# Get dependencies
+flutter pub get
+
+# Run on connected device/emulator
+flutter run
+
+# Build Android APK
+flutter build apk
+
+# Build for other platforms
+flutter build ios          # iOS (coming soon)
+flutter build web          # Web version
+flutter build windows      # Windows desktop
+flutter build macos        # macOS desktop
+flutter build linux        # Linux desktop
 ```
 
-For complete Android deployment instructions including APK generation and Play Store submission, see **[ANDROID_DEPLOYMENT_GUIDE.md](ANDROID_DEPLOYMENT_GUIDE.md)**.
+**Benefits of Pure Dart:**
+- ✅ No Android NDK required
+- ✅ No Rust toolchain needed for Flutter development
+- ✅ Standard Flutter build process
+- ✅ Faster builds (no native compilation)
+- ✅ Easy debugging with Flutter DevTools
+- ✅ Works on all Flutter platforms
+
+For Android deployment and Play Store submission, see **[ANDROID_DEPLOYMENT_GUIDE.md](ANDROID_DEPLOYMENT_GUIDE.md)**.
 
 ### 🔧 Troubleshooting Build Issues
 
@@ -232,29 +249,56 @@ cargo clippy --no-default-features --features cli -- -D warnings
 The project now includes comprehensive CI/CD processes:
 
 ### Continuous Integration
-- **Multi-platform builds**: Automatic builds for Linux, Windows, macOS, and Android
+- **Multi-platform builds**: Automatic builds for Linux, Windows, macOS
+- **Flutter builds**: Separate workflow for Android APK building
 - **Code quality checks**: Formatting, linting, and compilation verification
-- **Standard toolchain**: Uses Rust's standard toolchain for reliable builds
+- **Standard toolchains**: Uses Rust's cargo and Flutter's build system
 
 ### Automated Artifacts
-- **Every commit**: Development releases with all platforms including Android
+- **Every commit**: Development releases with all desktop platforms + Android APK
 - **Tagged releases**: Production-quality binaries with comprehensive packaging
 - **Integrity verification**: SHA256 checksums for all downloads
 - **Multi-platform**: All supported architectures and operating systems
 
 ### Supported Platforms
+
+**Rust CLI/GUI:**
 - **Linux**: x86_64, ARM, musl variants
 - **Windows**: x86_64
-- **macOS**: Intel + Apple Silicon  
-- **Android**: APK apps + Native libraries for all major architectures
+- **macOS**: Intel + Apple Silicon
+
+**Flutter Mobile App:**
+- **Android**: APK for all architectures (arm64-v8a, armeabi-v7a, x86_64)
+- **iOS**: Coming soon (pure Dart makes this easy)
+- **Web**: Experimental support
+- **Desktop**: Windows, macOS, Linux via Flutter
 
 ## 🏗️ Modern Architecture & Development
 
-Internet Archive Helper is built with modern software development principles:
+Internet Archive Helper uses **two independent, optimized implementations**:
 
+### Rust CLI/GUI (Desktop)
 - **🔄 Modern JSON APIs**: Clean, efficient communication with Internet Archive services
 - **⚡ High-Performance Architecture**: Concurrent downloading with intelligent session management
 - **🧪 Comprehensive Testing**: Robust test suite ensuring reliability and stability
+- **🔧 Zero Unsafe Code**: Safe, reliable Rust code with minimal unsafe blocks
+- **📦 Standard Toolchain**: Uses standard Cargo for building - no special setup required
+
+### Flutter Mobile App  
+- **🎨 Pure Dart Implementation**: No native dependencies or FFI complexity
+- **📱 Cross-Platform Ready**: Android, iOS, Web, and Desktop from single codebase
+- **🚀 Fast Development**: Hot-reload and Flutter DevTools for rapid iteration
+- **🔄 Modern HTTP Client**: Direct API communication using Dart's http package
+- **✅ Easy Testing**: Standard Flutter testing framework with no native complications
+
+**Architecture Benefits:**
+- ✅ Clear separation of concerns
+- ✅ Independent optimization for each platform
+- ✅ Simplified development and maintenance
+- ✅ No build complexity from FFI bridges
+- ✅ Both implementations maintain full feature parity
+
+See [FFI Removal Migration Guide](docs/FFI_REMOVAL_MIGRATION_GUIDE.md) for details on the architectural change.
 - **📦 Professional CI/CD**: Automated builds and testing across all supported platforms
 - **🎯 Cross-Platform Excellence**: Native performance on desktop, mobile, and embedded systems
 
