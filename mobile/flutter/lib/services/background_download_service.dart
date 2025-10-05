@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../models/download_progress.dart';
 import '../models/archive_metadata.dart';
+import '../models/download_statistics.dart';
 import 'ia_get_simple_service.dart';
 import 'notification_service.dart';
 
@@ -559,7 +560,7 @@ class BackgroundDownloadService extends ChangeNotifier {
   }
 
   /// Get download statistics
-  Map<String, dynamic> getStatistics() {
+  DownloadStatistics getStatistics() {
     final activeBytes = _activeDownloads.values.fold<int>(
       0,
       (sum, download) => sum + (download.downloadedBytes ?? 0),
@@ -574,16 +575,16 @@ class BackgroundDownloadService extends ChangeNotifier {
             .toDouble()
             .clamp(1, double.infinity));
 
-    return {
-      'activeDownloads': activeDownloadCount,
-      'completedDownloads': completedDownloadCount,
-      'queuedDownloads': queuedDownloadCount,
-      'totalFiles': _totalFilesDownloaded,
-      'totalBytes': _totalBytesDownloaded,
-      'activeBytesDownloaded': activeBytes,
-      'averageSpeed': averageSpeed,
-      'sessionDuration': sessionDuration?.inSeconds ?? 0,
-    };
+    return DownloadStatistics(
+      activeDownloads: activeDownloadCount,
+      completedDownloads: completedDownloadCount,
+      queuedDownloads: queuedDownloadCount,
+      totalFiles: _totalFilesDownloaded,
+      totalBytes: _totalBytesDownloaded,
+      activeBytesDownloaded: activeBytes,
+      averageSpeed: averageSpeed,
+      sessionDurationSeconds: sessionDuration?.inSeconds ?? 0,
+    );
   }
 
   /// Compute download statistics in a background isolate

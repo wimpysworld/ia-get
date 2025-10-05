@@ -163,4 +163,58 @@ class FileFilter {
 
   /// Create an empty filter (no filtering)
   static const FileFilter empty = FileFilter();
+
+  /// Convert to JSON for serialization
+  Map<String, dynamic> toJson() {
+    return {
+      'includePatterns': includePatterns,
+      'excludePatterns': excludePatterns,
+      'includeSubfolders': includeSubfolders,
+      'excludeSubfolders': excludeSubfolders,
+      'includeFormats': includeFormats,
+      'excludeFormats': excludeFormats,
+      'minSize': minSize,
+      'maxSize': maxSize,
+      'includeOriginal': includeOriginal,
+      'includeDerivative': includeDerivative,
+      'includeMetadata': includeMetadata,
+      'useRegex': useRegex,
+    };
+  }
+
+  /// Create from JSON
+  factory FileFilter.fromJson(Map<String, dynamic> json) {
+    return FileFilter(
+      includePatterns: (json['includePatterns'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
+      excludePatterns: (json['excludePatterns'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
+      includeSubfolders: (json['includeSubfolders'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
+      excludeSubfolders: (json['excludeSubfolders'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
+      includeFormats: (json['includeFormats'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
+      excludeFormats: (json['excludeFormats'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
+      minSize: json['minSize'] as int?,
+      maxSize: json['maxSize'] as int?,
+      includeOriginal: json['includeOriginal'] as bool? ?? true,
+      includeDerivative: json['includeDerivative'] as bool? ?? true,
+      includeMetadata: json['includeMetadata'] as bool? ?? true,
+      useRegex: json['useRegex'] as bool? ?? false,
+    );
+  }
 }

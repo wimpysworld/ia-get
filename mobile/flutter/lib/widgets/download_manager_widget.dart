@@ -127,8 +127,6 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
     BackgroundDownloadService service,
   ) {
     final stats = service.getStatistics();
-    final averageSpeed = stats['averageSpeed'] as double;
-    final activeBytesDownloaded = stats['activeBytesDownloaded'] as int;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -140,15 +138,15 @@ class _DownloadManagerWidgetState extends State<DownloadManagerWidget> {
             context,
             icon: Icons.speed_rounded,
             label: 'Speed',
-            value: averageSpeed > 0
-                ? FileUtils.formatTransferSpeed(averageSpeed)
+            value: stats.averageSpeed > 0
+                ? FileUtils.formatTransferSpeed(stats.averageSpeed)
                 : '-',
           ),
           _buildStatItem(
             context,
             icon: Icons.cloud_download_rounded,
             label: 'Downloaded',
-            value: FileUtils.formatBytes(activeBytesDownloaded),
+            value: FileUtils.formatBytes(stats.activeBytesDownloaded),
           ),
           _buildStatItem(
             context,

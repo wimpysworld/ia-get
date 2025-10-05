@@ -243,13 +243,13 @@ class _HomeScreenState extends State<HomeScreen> {
                                 margin: const EdgeInsets.only(bottom: 8),
                                 child: ListTile(
                                   leading: const Icon(Icons.archive),
-                                  title: Text(suggestion['title']!),
-                                  subtitle: Text(suggestion['identifier']!),
+                                  title: Text(suggestion.title),
+                                  subtitle: Text(suggestion.identifier),
                                   trailing: const Icon(Icons.arrow_forward),
                                   onTap: () {
                                     // Fetch metadata for the suggested archive
                                     service.fetchMetadata(
-                                      suggestion['identifier']!,
+                                      suggestion.identifier,
                                     );
                                   },
                                 ),

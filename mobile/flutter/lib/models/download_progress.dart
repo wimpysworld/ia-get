@@ -191,4 +191,76 @@ class DownloadProgress {
 
     return '${bytes.toStringAsFixed(bytes >= 100 ? 0 : 1)} ${units[unitIndex]}';
   }
+
+  /// Convert to JSON for serialization
+  Map<String, dynamic> toJson() {
+    return {
+      'downloadId': downloadId,
+      'identifier': identifier,
+      'sessionId': sessionId,
+      'progress': progress,
+      'currentFile': currentFile,
+      'currentFileProgress': currentFileProgress,
+      'transferSpeed': transferSpeed,
+      'etaSeconds': etaSeconds,
+      'completedFiles': completedFiles,
+      'totalFiles': totalFiles,
+      'downloadedBytes': downloadedBytes,
+      'totalBytes': totalBytes,
+      'status': status.name,
+      'errorMessage': errorMessage,
+      'startTime': startTime.toIso8601String(),
+      'retryCount': retryCount,
+    };
+  }
+
+  /// Create from JSON
+  factory DownloadProgress.fromJson(Map<String, dynamic> json) {
+    // Parse status string to enum
+    DownloadStatus statusEnum;
+    final statusStr = json['status'] as String? ?? 'queued';
+    switch (statusStr) {
+      case 'queued':
+        statusEnum = DownloadStatus.queued;
+        break;
+      case 'downloading':
+        statusEnum = DownloadStatus.downloading;
+        break;
+      case 'paused':
+        statusEnum = DownloadStatus.paused;
+        break;
+      case 'completed':
+        statusEnum = DownloadStatus.completed;
+        break;
+      case 'error':
+        statusEnum = DownloadStatus.error;
+        break;
+      case 'cancelled':
+        statusEnum = DownloadStatus.cancelled;
+        break;
+      default:
+        statusEnum = DownloadStatus.queued;
+    }
+
+    return DownloadProgress(
+      downloadId: json['downloadId'] as String? ?? '',
+      identifier: json['identifier'] as String? ?? '',
+      sessionId: json['sessionId'] as int? ?? 0,
+      progress: (json['progress'] as num?)?.toDouble(),
+      currentFile: json['currentFile'] as String?,
+      currentFileProgress: (json['currentFileProgress'] as num?)?.toDouble(),
+      transferSpeed: (json['transferSpeed'] as num?)?.toDouble(),
+      etaSeconds: json['etaSeconds'] as int?,
+      completedFiles: json['completedFiles'] as int?,
+      totalFiles: json['totalFiles'] as int? ?? 0,
+      downloadedBytes: json['downloadedBytes'] as int?,
+      totalBytes: json['totalBytes'] as int?,
+      status: statusEnum,
+      errorMessage: json['errorMessage'] as String?,
+      startTime: json['startTime'] != null
+          ? DateTime.parse(json['startTime'] as String)
+          : null,
+      retryCount: json['retryCount'] as int? ?? 0,
+    );
+  }
 }
