@@ -62,7 +62,7 @@ class _FiltersScreenState extends State<FiltersScreen> {
       final service = context.read<ArchiveService>();
       final formats = service.getAvailableFormats();
       setState(() {
-        _availableFormats = formats.toList()..sort();
+        _availableFormats = List<String>.from(formats)..sort();
       });
     });
   }
