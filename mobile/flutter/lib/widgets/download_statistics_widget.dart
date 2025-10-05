@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/download_provider.dart';
+import '../core/utils/formatting_utils.dart';
 
 /// Widget to display download statistics dashboard
 /// 
@@ -105,7 +106,7 @@ class DownloadStatisticsWidget extends StatelessWidget {
                             style: Theme.of(context).textTheme.bodyMedium,
                           ),
                           Text(
-                            _formatBytes(provider.totalBytesDownloaded),
+                            FormattingUtils.formatBytes(provider.totalBytesDownloaded),
                             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                               fontWeight: FontWeight.bold,
                             ),
@@ -121,7 +122,7 @@ class DownloadStatisticsWidget extends StatelessWidget {
                             style: Theme.of(context).textTheme.bodyMedium,
                           ),
                           Text(
-                            '${_formatBytes(provider.averageDownloadSpeed.toInt())}/s',
+                            '${FormattingUtils.formatSpeed(provider.averageDownloadSpeed)}',
                             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                               fontWeight: FontWeight.bold,
                               color: Theme.of(context).primaryColor,
@@ -185,15 +186,6 @@ class DownloadStatisticsWidget extends StatelessWidget {
         );
       },
     );
-  }
-
-  String _formatBytes(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 }
 

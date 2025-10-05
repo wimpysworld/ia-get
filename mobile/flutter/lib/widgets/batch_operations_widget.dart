@@ -60,7 +60,7 @@ class BatchOperationsWidget extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  'Total: ${_formatBytes(totalSize)}',
+                  'Total: ${FormattingUtils.formatBytes(totalSize)}',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: Colors.grey.shade700,
                   ),
@@ -109,7 +109,7 @@ class BatchOperationsWidget extends StatelessWidget {
             Text('Download ${selectedFiles.length} selected file${selectedFiles.length == 1 ? '' : 's'}?'),
             const SizedBox(height: 12),
             Text(
-              'Total size: ${_formatBytes(selectedFiles.fold<int>(0, (sum, f) => sum + (f.size ?? 0)))}',
+              'Total size: ${FormattingUtils.formatBytes(selectedFiles.fold<int>(0, (sum, f) => sum + (f.size ?? 0)))}',
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                 color: Colors.grey.shade700,
               ),
@@ -187,14 +187,5 @@ class BatchOperationsWidget extends StatelessWidget {
         }
       }
     }
-  }
-
-  String _formatBytes(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 }
