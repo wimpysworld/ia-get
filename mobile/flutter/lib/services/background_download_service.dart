@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 import '../models/download_progress.dart';
 import '../models/archive_metadata.dart';
 import '../models/download_statistics.dart';
-import 'archive_service.dart';
+import 'internet_archive_api.dart';
 import 'notification_service.dart';
 
 /// Service for managing background downloads with Android WorkManager integration
@@ -134,21 +134,23 @@ class BackgroundDownloadService extends ChangeNotifier {
   /// Checks if the archive exists and has downloadable files
   Future<bool> validateArchiveForDownload(String identifier) async {
     try {
-      // Use simplified FFI service to fetch and validate archive metadata
-      final service = IaGetSimpleService();
-      final metadata = await service.fetchMetadata(identifier);
+      // Use Internet Archive API to fetch and validate archive metadata
+      final api = InternetArchiveApi();
+      final metadata = await api.fetchMetadata(identifier);
 
       // Check if archive has files available for download
       if (metadata.files.isEmpty) {
         debugPrint(
           'Archive validation failed: no files available in $identifier',
         );
+        api.dispose();
         return false;
       }
 
       debugPrint(
         'Archive $identifier validated successfully (${metadata.files.length} files)',
       );
+      api.dispose();
       return true;
     } catch (e) {
       debugPrint('Archive validation error for $identifier: $e');
@@ -160,8 +162,9 @@ class BackgroundDownloadService extends ChangeNotifier {
   /// Useful for displaying file information before starting download
   Future<ArchiveMetadata?> getArchiveMetadata(String identifier) async {
     try {
-      final service = IaGetSimpleService();
-      final metadata = await service.fetchMetadata(identifier);
+      final api = InternetArchiveApi();
+      final metadata = await api.fetchMetadata(identifier);
+      api.dispose();
       return metadata;
     } catch (e) {
       debugPrint('Failed to fetch archive metadata for $identifier: $e');

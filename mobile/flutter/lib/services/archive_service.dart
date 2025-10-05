@@ -52,12 +52,12 @@ class ArchiveService extends ChangeNotifier {
   }
 
   /// Fetch metadata for an archive
-  Future<void> fetchMetadata(String identifier) async {
+  Future<ArchiveMetadata> fetchMetadata(String identifier) async {
     final trimmedIdentifier = identifier.trim();
     if (trimmedIdentifier.isEmpty) {
       _error = 'Invalid identifier: cannot be empty';
       notifyListeners();
-      return;
+      throw Exception(_error);
     }
 
     _isLoading = true;
@@ -81,18 +81,23 @@ class ArchiveService extends ChangeNotifier {
       }
 
       _error = null;
+      _isLoading = false;
+      notifyListeners();
+      
+      return metadata;
     } catch (e, stackTrace) {
       _error = 'Failed to fetch metadata: ${e.toString()}';
       _currentMetadata = null;
       _filteredFiles = [];
+      _isLoading = false;
       
       if (kDebugMode) {
         print('Error fetching metadata: $e');
         print('Stack trace: $stackTrace');
       }
-    } finally {
-      _isLoading = false;
+      
       notifyListeners();
+      rethrow;
     }
   }
 
@@ -404,6 +409,68 @@ class ArchiveService extends ChangeNotifier {
       }
     }
     return formats;
+  }
+
+  /// Download a file from the given URL to the specified output path
+  /// 
+  /// [url] - The URL to download from
+  /// [outputPath] - The local file path where the file will be saved
+  /// [onProgress] - Optional callback for download progress updates (downloaded bytes, total bytes)
+  Future<void> downloadFile(
+    String url,
+    String outputPath, {
+    Function(int downloaded, int total)? onProgress,
+  }) async {
+    try {
+      await _api.downloadFile(url, outputPath, onProgress: onProgress);
+    } catch (e) {
+      if (kDebugMode) {
+        print('Error downloading file: $e');
+      }
+      rethrow;
+    }
+  }
+
+  /// Validate file checksum
+  /// 
+  /// [filePath] - Path to the file to validate
+  /// [expectedHash] - The expected hash value
+  /// [hashType] - Type of hash (md5, sha1, sha256, etc.)
+  /// 
+  /// Returns true if the checksum matches, false otherwise
+  Future<bool> validateChecksum(
+    String filePath,
+    String expectedHash, {
+    String hashType = 'md5',
+  }) async {
+    try {
+      return await _api.validateChecksum(filePath, expectedHash, hashType);
+    } catch (e) {
+      if (kDebugMode) {
+        print('Error validating checksum: $e');
+      }
+      rethrow;
+    }
+  }
+
+  /// Decompress/extract an archive file
+  /// 
+  /// [archivePath] - Path to the archive file
+  /// [outputDir] - Directory where files will be extracted
+  /// 
+  /// Returns a list of extracted file paths
+  Future<List<String>> decompressFile(
+    String archivePath,
+    String outputDir,
+  ) async {
+    try {
+      return await _api.decompressFile(archivePath, outputDir);
+    } catch (e) {
+      if (kDebugMode) {
+        print('Error decompressing file: $e');
+      }
+      rethrow;
+    }
   }
 
   @override

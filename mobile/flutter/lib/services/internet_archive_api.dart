@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:crypto/crypto.dart';
+import 'package:archive/archive.dart';
 import '../models/archive_metadata.dart';
 import '../core/constants/internet_archive_constants.dart';
 import '../core/errors/ia_exceptions.dart';
@@ -120,13 +121,12 @@ class InternetArchiveApi {
                   seconds: (retryDelay.inSeconds * IARateLimits.backoffMultiplier).toInt());
               // Cap at max backoff delay
               if (retryDelay.inSeconds > IARateLimits.maxBackoffDelaySecs) {
-                retryDelay = Duration(seconds: IARateLimits.maxBackoffDelaySecs);
+                retryDelay = const Duration(seconds: IARateLimits.maxBackoffDelaySecs);
               }
             }
             continue;
           }
-          throw Exception(IAErrorMessages.serverError);
-              'Archive.org server error (${response.statusCode}). This is likely temporary.');
+          throw Exception('${IAErrorMessages.serverError} (${response.statusCode}). This is likely temporary.');
         } else {
           throw Exception(
               'Failed to fetch metadata: HTTP ${response.statusCode}');
@@ -364,6 +364,115 @@ class InternetArchiveApi {
     }
 
     return matches;
+  }
+
+  /// Decompress/extract an archive file
+  ///
+  /// Supports ZIP, TAR, TAR.GZ, and GZ file formats.
+  /// Returns list of extracted file paths.
+  /// 
+  /// Throws [FileSystemException] if file doesn't exist or directory can't be created.
+  /// Throws [FormatException] if archive format is unsupported or corrupted.
+  Future<List<String>> decompressFile(
+    String archivePath,
+    String outputDir,
+  ) async {
+    final file = File(archivePath);
+    
+    if (!await file.exists()) {
+      throw FileSystemException('Archive file not found', archivePath);
+    }
+
+    // Create output directory if it doesn't exist
+    final outDir = Directory(outputDir);
+    if (!await outDir.exists()) {
+      await outDir.create(recursive: true);
+    }
+
+    final fileName = file.path.split(Platform.pathSeparator).last.toLowerCase();
+    final bytes = await file.readAsBytes();
+    
+    if (kDebugMode) {
+      print('Decompressing: $archivePath');
+      print('Output directory: $outputDir');
+      print('File size: ${bytes.length} bytes');
+    }
+
+    final extractedFiles = <String>[];
+
+    try {
+      if (fileName.endsWith('.zip')) {
+        // Handle ZIP archives
+        final archive = ZipDecoder().decodeBytes(bytes);
+        extractedFiles.addAll(await _extractArchive(archive, outputDir));
+        
+      } else if (fileName.endsWith('.tar.gz') || fileName.endsWith('.tgz')) {
+        // Handle TAR.GZ archives
+        final gzipBytes = GZipDecoder().decodeBytes(bytes);
+        final archive = TarDecoder().decodeBytes(gzipBytes);
+        extractedFiles.addAll(await _extractArchive(archive, outputDir));
+        
+      } else if (fileName.endsWith('.tar')) {
+        // Handle TAR archives
+        final archive = TarDecoder().decodeBytes(bytes);
+        extractedFiles.addAll(await _extractArchive(archive, outputDir));
+        
+      } else if (fileName.endsWith('.gz')) {
+        // Handle single GZIP files
+        final decompressed = GZipDecoder().decodeBytes(bytes);
+        final outputFileName = fileName.substring(0, fileName.length - 3); // Remove .gz
+        final outputPath = '$outputDir${Platform.pathSeparator}$outputFileName';
+        
+        final outputFile = File(outputPath);
+        await outputFile.writeAsBytes(decompressed);
+        extractedFiles.add(outputPath);
+        
+      } else {
+        throw FormatException(
+          'Unsupported archive format. Supported: .zip, .tar, .tar.gz, .tgz, .gz',
+          fileName,
+        );
+      }
+
+      if (kDebugMode) {
+        print('Successfully extracted ${extractedFiles.length} file(s)');
+      }
+
+      return extractedFiles;
+      
+    } catch (e) {
+      if (e is FormatException) {
+        rethrow;
+      }
+      throw FormatException('Failed to decompress archive: ${e.toString()}', archivePath);
+    }
+  }
+
+  /// Extract files from an Archive object to the output directory
+  Future<List<String>> _extractArchive(Archive archive, String outputDir) async {
+    final extractedFiles = <String>[];
+
+    for (final file in archive) {
+      if (file.isFile) {
+        final outputPath = '$outputDir${Platform.pathSeparator}${file.name}';
+        
+        // Create parent directories if needed
+        final outputFile = File(outputPath);
+        if (!await outputFile.parent.exists()) {
+          await outputFile.parent.create(recursive: true);
+        }
+
+        // Write file content
+        await outputFile.writeAsBytes(file.content as List<int>);
+        extractedFiles.add(outputPath);
+        
+        if (kDebugMode) {
+          print('Extracted: ${file.name} (${file.size} bytes)');
+        }
+      }
+    }
+
+    return extractedFiles;
   }
 
   /// Convert various input formats to metadata URL

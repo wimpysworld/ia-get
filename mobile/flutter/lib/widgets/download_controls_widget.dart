@@ -391,7 +391,7 @@ class _DownloadControlsWidgetState extends State<DownloadControlsWidget> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Note: Required size includes a safety margin for temporary files.',
+                'Includes safety margin for temporary files',
                 style: TextStyle(
                   fontSize: 12,
                   color: Colors.grey.shade600,

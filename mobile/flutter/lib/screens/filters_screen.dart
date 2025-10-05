@@ -286,7 +286,7 @@ class _FiltersScreenState extends State<FiltersScreen> {
           ),
           const SizedBox(height: 12),
           DropdownButtonFormField<String>(
-            initialValue: _maxSize,
+            value: _maxSize,
             decoration: const InputDecoration(
               hintText: 'No limit',
               border: OutlineInputBorder(),

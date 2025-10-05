@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/archive_metadata.dart';
 import '../providers/download_provider.dart';
+import '../core/utils/formatting_utils.dart';
 
 /// Widget for batch operations on selected files
 /// 

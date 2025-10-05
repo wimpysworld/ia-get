@@ -138,16 +138,10 @@ class FileUtils {
     }
   }
 
-  /// Get available disk space for a path
-  /// Returns available space in bytes, or null if unable to determine
-  ///
-  /// Note: On Android, this function returns null because reliable disk space
-  /// APIs are not consistently available across devices. The app handles this
-  /// gracefully by skipping disk space validation.
+  /// Returns available disk space in bytes.
+  /// Always returns null on Android due to platform API limitations.
   static Future<int?> getAvailableSpace(String path) async {
-    // On Android, disk space checks are unreliable and not supported
-    // Return null to skip validation (similar to Rust implementation)
-    // The app gracefully handles null by proceeding with download
+    // Android disk space APIs are unreliable - return null to skip validation
     return null;
   }
 

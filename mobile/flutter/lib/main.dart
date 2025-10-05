@@ -13,10 +13,8 @@ import 'utils/theme.dart';
 import 'utils/permission_utils.dart';
 
 void main() async {
-  // Ensure Flutter is initialized
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Set preferred orientations for mobile optimization
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
@@ -24,7 +22,6 @@ void main() async {
     DeviceOrientation.landscapeRight,
   ]);
 
-  // Configure system UI for immersive experience
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
@@ -44,22 +41,23 @@ class IAGetMobileApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
+        // Core services - lazy loaded to optimize startup time
         ChangeNotifierProvider<ArchiveService>(
           create: (_) => ArchiveService(),
-          lazy: true, // Lazy load for faster startup
+          lazy: true,
         ),
         ChangeNotifierProvider<DownloadProvider>(
           create: (_) => DownloadProvider(),
-          lazy: true, // Lazy load for faster startup
+          lazy: true,
         ),
         ChangeNotifierProvider<BackgroundDownloadService>(
           create: (_) => BackgroundDownloadService(),
-          lazy: true, // Lazy load for faster startup
+          lazy: true,
         ),
         Provider<DeepLinkService>(
           create: (_) => DeepLinkService(),
           dispose: (_, service) => service.dispose(),
-          lazy: true, // Lazy load for faster startup
+          lazy: true,
         ),
       ],
       child: MaterialApp(
@@ -70,9 +68,8 @@ class IAGetMobileApp extends StatelessWidget {
         home: const AppInitializer(),
         debugShowCheckedModeBanner: false,
 
-        // Performance optimizations
+        // Clamp text scaling to prevent layout issues
         builder: (context, child) {
-          // Disable text scaling for consistent UI
           final mediaQuery = MediaQuery.of(context);
           final scaleFactor = mediaQuery.textScaler.scale(1.0).clamp(0.8, 1.2);
           return MediaQuery(

@@ -168,6 +168,30 @@ class IABestPractices {
   ];
 }
 
+/// Error Messages
+class IAErrorMessages {
+  /// Item not found error
+  static const String notFound = 'Archive item not found (404)';
+  
+  /// Access forbidden error
+  static const String forbidden = 'Access to archive item is forbidden (403)';
+  
+  /// Server error
+  static const String serverError = 'Internet Archive server error';
+  
+  /// Invalid identifier error
+  static const String invalidIdentifier = 'Invalid identifier format';
+  
+  /// Rate limit error
+  static const String rateLimit = 'Rate limit exceeded. Please slow down requests.';
+  
+  /// Network error
+  static const String networkError = 'Network connection failed';
+  
+  /// Timeout error
+  static const String timeout = 'Request timed out';
+}
+
 /// Utility Functions
 class IAUtils {
   /// Validate an Internet Archive identifier
