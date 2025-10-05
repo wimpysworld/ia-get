@@ -63,7 +63,6 @@ embed-manifest = "1.4.0"
 default = ["cli"]
 cli = []
 gui = ["eframe", "egui", "egui_extras", "rfd", "env_logger"]
-ffi = []  # Foreign Function Interface for mobile platforms
 
 [profile.release]
 strip = true  # Automatically strip symbols from the binary.
