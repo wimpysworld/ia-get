@@ -12,56 +12,102 @@ ia_get_fetch_metadata
 This occurred regardless of the validity of the search term, preventing all search and metadata functionality from working.
 
 ## Root Cause
-The mobile FFI wrapper library (`mobile/rust-ffi/src/lib.rs`) was using an incorrect import path:
+The mobile FFI wrapper library (`mobile/rust-ffi/src/lib.rs`) was creating duplicate symbol definitions by re-wrapping FFI functions that were already marked with `#[no_mangle]` in the main library.
+
+The issue manifested during release builds with LTO (Link-Time Optimization) enabled:
 
 ```rust
-// INCORRECT (before fix):
-pub use ia_get::interface::ffi::*;
+// PROBLEMATIC CODE (before fix):
+// In mobile/rust-ffi/src/lib.rs
+#[no_mangle]
+pub unsafe extern "C" fn ia_get_fetch_metadata(identifier: *const c_char) -> *mut c_char {
+    ffi_simple::ia_get_fetch_metadata(identifier)  // This function is ALSO #[no_mangle]
+}
 ```
 
-However, the FFI interface module was renamed to `ffi_simple` as part of the simplified FFI architecture introduced in version 0.8.0+. The old complex FFI interface (with 14+ functions) was removed and replaced with a simplified 6-function interface.
+When building with `--release`, the linker would encounter the same symbol defined twice:
+1. Once in the main `ia-get` library (from `src/interface/ffi_simple.rs`)
+2. Once in the mobile wrapper library (from `mobile/rust-ffi/src/lib.rs`)
 
-This mismatch caused:
-1. The Rust compiler to fail building the mobile library with the old import
-2. No FFI symbols to be exported from the mobile library
-3. Flutter/Dart code unable to find `ia_get_fetch_metadata` and other FFI functions
-4. All metadata and search operations to fail
+This caused the build error:
+```
+warning: Linking globals named 'ia_get_fetch_metadata': symbol multiply defined!
+error: failed to load bitcode of module "ia_get.ia_get.df84771c3f58e6b-cgu.0.rcgu.o"
+```
 
 ## Solution
-Updated the import path in `mobile/rust-ffi/src/lib.rs` to explicitly list each FFI function:
+Removed the redundant wrapper functions from `mobile/rust-ffi/src/lib.rs`. The mobile library now simply depends on the main library with the `ffi` feature enabled, allowing the symbols to be automatically included in the final cdylib.
 
 ```rust
 // CORRECT (after fix):
-pub use ia_get::interface::ffi_simple::{
-    ia_get_decompress_file, ia_get_download_file, ia_get_fetch_metadata, ia_get_free_string,
-    ia_get_last_error, ia_get_validate_checksum, IaGetResult,
-};
+// In mobile/rust-ffi/src/lib.rs
+// Re-export the FFI functions from main library
+// The main library already has #[no_mangle] on these functions, so we just
+// need to ensure they're included in the compilation. We do this by depending
+// on the ia-get crate with the ffi feature enabled.
+//
+// Re-exporting types that Dart/Flutter might need
+pub use ia_get::interface::ffi_simple::{IaGetResult, ProgressCallback};
+
+// Only mobile-specific functions are defined here
+#[no_mangle]
+pub extern "C" fn ia_get_mobile_version() -> *const std::os::raw::c_char {
+    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const std::os::raw::c_char
+}
 ```
 
-This explicit listing ensures that all FFI functions are properly re-exported and available to the Flutter/Dart code.
-
-Additionally removed the incompatible `ia_get_mobile_init()` function that was calling a non-existent `ia_get_init()` function. The simplified FFI doesn't have an initialization function - it's stateless by design.
+The key insight is that when building a cdylib that depends on another crate with `#[no_mangle]` functions, those symbols are automatically included in the final library. There's no need to re-wrap them.
 
 ## Verification
-After the fix, all 6 FFI functions are properly exported:
+After the fix, all 6 FFI functions plus 2 mobile-specific functions are properly exported:
 
 ```
 $ nm -D target/release/libia_get_mobile.so | grep ia_get
-00000000001392be T ia_get_decompress_file
-0000000000138247 T ia_get_download_file
-0000000000137a10 T ia_get_fetch_metadata      ← The missing symbol is now present!
-000000000013a6d7 T ia_get_free_string
-000000000013a69f T ia_get_last_error
-00000000000fb502 T ia_get_mobile_supported_archs
-00000000000fb4a4 T ia_get_mobile_version
-0000000000139d28 T ia_get_validate_checksum
+000000000013919a T ia_get_decompress_file
+0000000000138123 T ia_get_download_file
+0000000000137858 T ia_get_fetch_metadata      ← The symbol is now present!
+000000000013a5b3 T ia_get_free_string
+000000000013a57b T ia_get_last_error
+00000000000fb201 T ia_get_mobile_supported_archs
+00000000000fb1f9 T ia_get_mobile_version
+0000000000139c04 T ia_get_validate_checksum
 ```
 
 ## Impact
-✅ **Fixed**: Search and metadata functionality now works
+✅ **Fixed**: Build succeeds in both debug and release modes
+✅ **Fixed**: No symbol duplication errors during linking
 ✅ **Fixed**: All 6 simplified FFI functions are accessible to Flutter/Dart code
-✅ **Fixed**: Both debug and release builds succeed
+✅ **Fixed**: Search and metadata functionality now works
 ✅ **Fixed**: FFI tests pass
+
+## Technical Details
+
+### Why the Previous Approach Failed
+The original approach tried to create wrapper functions in the mobile library:
+
+```rust
+// This caused duplicate symbols:
+#[no_mangle]
+pub unsafe extern "C" fn ia_get_fetch_metadata(identifier: *const c_char) -> *mut c_char {
+    ffi_simple::ia_get_fetch_metadata(identifier)
+}
+```
+
+This looked reasonable but caused issues because:
+1. The function `ffi_simple::ia_get_fetch_metadata` is already marked with `#[no_mangle]` in the main library
+2. When building a cdylib with LTO enabled, both definitions end up in the final library
+3. The linker sees two symbols with the same name and fails
+
+### Why the New Approach Works
+By removing the wrapper functions and simply depending on the main library with the `ffi` feature:
+
+```rust
+// Cargo.toml
+[dependencies]
+ia-get = { path = "../../", features = ["ffi"] }
+```
+
+The `#[no_mangle]` functions from the main library are automatically included in the mobile cdylib. No wrapper needed.
 
 ## Related Documentation
 - Main library FFI: `src/interface/ffi_simple.rs`
