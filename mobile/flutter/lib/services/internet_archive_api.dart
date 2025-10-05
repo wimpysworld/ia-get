@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:crypto/crypto.dart';
 import '../models/archive_metadata.dart';
 import '../core/constants/internet_archive_constants.dart';
+import '../core/errors/ia_exceptions.dart';
 
 /// Pure Dart/Flutter implementation of Internet Archive API client
 ///
@@ -71,29 +72,56 @@ class InternetArchiveApi {
           final jsonData = json.decode(response.body);
           return ArchiveMetadata.fromJson(jsonData);
         } else if (response.statusCode == 429) {
-          // Rate limited - respect Retry-After header
+          // Rate limited - respect Retry-After header and retry
           final retryAfter = int.tryParse(
                   response.headers['retry-after'] ?? '') ??
               IARateLimits.defaultRetryDelaySecs;
-          throw Exception(IAErrorMessages.rateLimit + ' Wait ${retryAfter}s.');
+          
+          if (retries < IARateLimits.maxRetries - 1) {
+            if (kDebugMode) {
+              print('Rate limited. Waiting ${retryAfter}s before retry (as requested by server)...');
+            }
+            // Wait the exact time the server told us to wait
+            await Future.delayed(Duration(seconds: retryAfter));
+            retries++;
+            // Reset retry delay for next iteration if needed
+            retryDelay = Duration(seconds: IARateLimits.defaultRetryDelaySecs);
+            continue;
+          }
+          // If we've exhausted retries, throw with the information
+          throw RateLimitException(retryAfter);
         } else if (response.statusCode == 404) {
           throw Exception(IAErrorMessages.notFound);
         } else if (response.statusCode == 403) {
           throw Exception(IAErrorMessages.forbidden);
         } else if (response.statusCode >= 500) {
-          // Server error - retry with exponential backoff
+          // Server error - check for Retry-After header first, then use exponential backoff
           if (retries < IARateLimits.maxRetries - 1) {
+            // Check if server provided a Retry-After header
+            final serverRetryAfter = int.tryParse(response.headers['retry-after'] ?? '');
+            final waitTime = serverRetryAfter != null 
+                ? Duration(seconds: serverRetryAfter)
+                : retryDelay;
+            
             if (kDebugMode) {
-              print(
-                  'Server error (${response.statusCode}), retrying in ${retryDelay.inSeconds}s...');
+              if (serverRetryAfter != null) {
+                print('Server error (${response.statusCode}), retrying in ${waitTime.inSeconds}s (as requested by server)...');
+              } else {
+                print('Server error (${response.statusCode}), retrying in ${waitTime.inSeconds}s (exponential backoff)...');
+              }
             }
-            await Future.delayed(retryDelay);
+            
+            await Future.delayed(waitTime);
             retries++;
-            retryDelay = Duration(
-                seconds: (retryDelay.inSeconds * IARateLimits.backoffMultiplier).toInt());
-            // Cap at max backoff delay
-            if (retryDelay.inSeconds > IARateLimits.maxBackoffDelaySecs) {
-              retryDelay = Duration(seconds: IARateLimits.maxBackoffDelaySecs);
+            
+            // Only apply exponential backoff if server didn't specify retry-after
+            if (serverRetryAfter == null) {
+              retryDelay = Duration(
+                  seconds: (retryDelay.inSeconds * IARateLimits.backoffMultiplier).toInt());
+              // Cap at max backoff delay
+              if (retryDelay.inSeconds > IARateLimits.maxBackoffDelaySecs) {
+                retryDelay = Duration(seconds: IARateLimits.maxBackoffDelaySecs);
+              }
             }
             continue;
           }
@@ -133,70 +161,159 @@ class InternetArchiveApi {
     throw Exception('Failed to fetch metadata after ${IARateLimits.maxRetries} attempts');
   }
 
-  /// Download a file from the Internet Archive
+  /// Download a file from a URL with progress tracking
   ///
-  /// [url] - Full download URL (typically constructed from metadata)
-  /// [outputPath] - Local file path to save the download
+  /// [url] - Full URL to the file
+  /// [outputPath] - Local path where file should be saved
   /// [onProgress] - Optional callback for progress updates (downloaded, total)
+  /// [cancellationToken] - Optional token to cancel the download
   ///
-  /// Returns the downloaded file path on success
+  /// Returns the path to the downloaded file
+  /// Throws exception on failure
+  ///
+  /// Automatically retries on transient errors and respects server Retry-After headers
   Future<String> downloadFile(
     String url,
     String outputPath, {
     void Function(int downloaded, int total)? onProgress,
     CancellationToken? cancellationToken,
   }) async {
-    if (kDebugMode) {
-      print('Downloading from: $url');
-      print('Saving to: $outputPath');
-    }
-
-    final request = http.Request('GET', Uri.parse(url));
-    request.headers.addAll(IAHeaders.standard(_appVersion));
-
-    final response = await _client.send(request);
-
-    if (response.statusCode != 200) {
-      throw Exception(
-          'Failed to download file: HTTP ${response.statusCode}');
-    }
-
-    final contentLength = response.contentLength ?? 0;
-    int downloaded = 0;
-
-    final outputFile = File(outputPath);
-    await outputFile.parent.create(recursive: true);
+    int retries = 0;
+    Duration retryDelay = Duration(seconds: IARateLimits.defaultRetryDelaySecs);
     
-    final sink = outputFile.openWrite();
-
-    try {
-      await for (final chunk in response.stream) {
-        if (cancellationToken?.isCancelled ?? false) {
-          throw Exception('Download cancelled by user');
+    while (retries < IARateLimits.maxRetries) {
+      try {
+        if (kDebugMode) {
+          print('Downloading from: $url (attempt ${retries + 1})');
+          print('Saving to: $outputPath');
         }
 
-        sink.add(chunk);
-        downloaded += chunk.length;
+        final request = http.Request('GET', Uri.parse(url));
+        request.headers.addAll(IAHeaders.standard(_appVersion));
 
-        onProgress?.call(downloaded, contentLength);
+        final response = await _client.send(request);
+
+        // Handle rate limiting and errors with retry-after support
+        if (response.statusCode == 429) {
+          // Rate limited - respect Retry-After header
+          final retryAfter = int.tryParse(
+                  response.headers['retry-after'] ?? '') ??
+              IARateLimits.defaultRetryDelaySecs;
+          
+          if (retries < IARateLimits.maxRetries - 1) {
+            if (kDebugMode) {
+              print('Download rate limited. Waiting ${retryAfter}s before retry (as requested by server)...');
+            }
+            await response.stream.drain(); // Drain the stream
+            await Future.delayed(Duration(seconds: retryAfter));
+            retries++;
+            continue;
+          }
+          await response.stream.drain();
+          throw RateLimitException(retryAfter);
+        } else if (response.statusCode >= 500) {
+          // Server error - check for Retry-After header
+          if (retries < IARateLimits.maxRetries - 1) {
+            final serverRetryAfter = int.tryParse(response.headers['retry-after'] ?? '');
+            final waitTime = serverRetryAfter != null 
+                ? Duration(seconds: serverRetryAfter)
+                : retryDelay;
+            
+            if (kDebugMode) {
+              if (serverRetryAfter != null) {
+                print('Download failed (${response.statusCode}), retrying in ${waitTime.inSeconds}s (as requested by server)...');
+              } else {
+                print('Download failed (${response.statusCode}), retrying in ${waitTime.inSeconds}s (exponential backoff)...');
+              }
+            }
+            
+            await response.stream.drain(); // Drain the stream
+            await Future.delayed(waitTime);
+            retries++;
+            
+            // Only apply exponential backoff if server didn't specify retry-after
+            if (serverRetryAfter == null) {
+              retryDelay = Duration(
+                  seconds: (retryDelay.inSeconds * IARateLimits.backoffMultiplier).toInt());
+              if (retryDelay.inSeconds > IARateLimits.maxBackoffDelaySecs) {
+                retryDelay = Duration(seconds: IARateLimits.maxBackoffDelaySecs);
+              }
+            }
+            continue;
+          }
+          await response.stream.drain();
+          throw ServerException(response.statusCode);
+        } else if (response.statusCode != 200) {
+          await response.stream.drain();
+          throw Exception(
+              'Failed to download file: HTTP ${response.statusCode}');
+        }
+
+        // Success - proceed with download
+        final contentLength = response.contentLength ?? 0;
+        int downloaded = 0;
+
+        final outputFile = File(outputPath);
+        await outputFile.parent.create(recursive: true);
+        
+        final sink = outputFile.openWrite();
+
+        try {
+          await for (final chunk in response.stream) {
+            if (cancellationToken?.isCancelled ?? false) {
+              throw Exception('Download cancelled by user');
+            }
+
+            sink.add(chunk);
+            downloaded += chunk.length;
+
+            onProgress?.call(downloaded, contentLength);
+          }
+
+          await sink.flush();
+          await sink.close();
+
+          if (kDebugMode) {
+            print('Download complete: $outputPath');
+          }
+
+          return outputPath;
+        } catch (e) {
+          await sink.close();
+          // Clean up partial download
+          if (await outputFile.exists()) {
+            await outputFile.delete();
+          }
+          rethrow;
+        }
+      } on SocketException catch (e) {
+        if (retries < IARateLimits.maxRetries - 1) {
+          if (kDebugMode) {
+            print('Network error during download: $e, retrying in ${retryDelay.inSeconds}s...');
+          }
+          await Future.delayed(retryDelay);
+          retries++;
+          retryDelay = Duration(
+              seconds: (retryDelay.inSeconds * IARateLimits.backoffMultiplier).toInt());
+          continue;
+        }
+        rethrow;
+      } on TimeoutException {
+        if (retries < IARateLimits.maxRetries - 1) {
+          if (kDebugMode) {
+            print('Download timeout, retrying in ${retryDelay.inSeconds}s...');
+          }
+          await Future.delayed(retryDelay);
+          retries++;
+          retryDelay = Duration(
+              seconds: (retryDelay.inSeconds * IARateLimits.backoffMultiplier).toInt());
+          continue;
+        }
+        rethrow;
       }
-
-      await sink.flush();
-      await sink.close();
-
-      if (kDebugMode) {
-        print('Download complete: $outputPath');
-      }
-
-      return outputPath;
-    } catch (e) {
-      await sink.close();
-      // Clean up partial download
-      if (await outputFile.exists()) {
-        await outputFile.delete();
-      }
-      rethrow;
     }
+
+    throw Exception('Failed to download file after ${IARateLimits.maxRetries} attempts');
   }
 
   /// Validate file checksum
