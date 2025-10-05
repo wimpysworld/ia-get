@@ -1,0 +1,54 @@
+# Build configuration for code generation
+targets:
+  $default:
+    builders:
+      # Freezed configuration
+      freezed:
+        enabled: true
+        options:
+          # Generate union types with when/map methods
+          union_key: 'type'
+          union_value_case: FreezedUnionCase.pascal
+          # Generate copyWith for all classes
+          copy_with: true
+          # Generate equality/hashCode
+          equal: true
+          # Generate toString
+          to_string: true
+          
+      # JSON Serializable configuration
+      json_serializable:
+        enabled: true
+        options:
+          # Use checked setters for better error messages
+          checked: true
+          # Create factories even if a class has custom deserialization
+          create_factory: true
+          # Create toJson even if a class has custom serialization
+          create_to_json: true
+          # Disallow extra keys in JSON (strict mode)
+          disallow_unrecognized_keys: false
+          # Include if null values for optional fields
+          explicit_to_json: true
+          # Use field rename for snake_case to camelCase
+          field_rename: none
+          # Generate code that handles null values gracefully
+          include_if_null: true
+          
+# Global builder options
+builders:
+  # Faster incremental builds
+  source_gen|combining_builder:
+    options:
+      # Run build_runner in optimized mode
+      ignore_for_file:
+        - type=lint
+        - prefer_const_constructors
+        - prefer_const_literals_to_create_immutables
+        - unnecessary_this
+        - avoid_print
+        
+  # Better error messages during development
+  json_serializable:
+    runs_before:
+      - source_gen|combining_builder
