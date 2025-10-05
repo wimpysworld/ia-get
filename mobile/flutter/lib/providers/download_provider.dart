@@ -4,6 +4,7 @@ import '../models/download_progress.dart' hide DownloadStatus;
 import '../models/download_progress.dart' as progress_model show DownloadStatus;
 import '../models/file_filter.dart';
 import '../services/archive_service.dart';
+import '../core/constants/internet_archive_constants.dart';
 
 /// Download State Management Provider
 ///
@@ -355,7 +356,7 @@ class DownloadProvider extends ChangeNotifier {
       _activeDownloads++;
       
       for (final file in filesToDownload) {
-        final url = 'https://archive.org/download/$identifier/${file.name}';
+        final url = IAUtils.buildDownloadUrl(identifier, file.name);
         final outputPath = '$downloadDir/${file.name}';
 
         // Initialize progress for this file

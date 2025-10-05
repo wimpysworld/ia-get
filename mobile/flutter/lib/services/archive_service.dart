@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import '../models/archive_metadata.dart';
 import '../models/search_result.dart';
 import 'internet_archive_api.dart';
+import '../core/constants/internet_archive_constants.dart';
 
 /// Archive Service - Pure Dart/Flutter implementation
 ///
@@ -337,10 +338,12 @@ class ArchiveService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Use Internet Archive's search API
-      // https://archive.org/advancedsearch.php?q=<query>&output=json
-      final encodedQuery = Uri.encodeComponent(query);
-      final searchUrl = 'https://archive.org/advancedsearch.php?q=$encodedQuery&fl[]=identifier,title,description&rows=10&output=json';
+      // Use standardized search URL builder
+      final searchUrl = IAUtils.buildSearchUrl(
+        query: query,
+        rows: IASearchParams.defaultRows,
+        fields: IASearchParams.defaultFields,
+      );
       
       final response = await http.get(Uri.parse(searchUrl));
       
