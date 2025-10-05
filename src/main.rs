@@ -305,6 +305,82 @@ async fn main() -> Result<()> {
 
     // Check for subcommands first
     match matches.subcommand() {
+        Some(("search", search_matches)) => {
+            use ia_get::interface::cli::advanced_commands;
+
+            let query = search_matches.get_one::<String>("query").unwrap().clone();
+            let limit = search_matches
+                .get_one::<String>("limit")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(20);
+            let sort = search_matches.get_one::<String>("sort").map(|s| s.as_str());
+            let mediatype = search_matches
+                .get_one::<String>("mediatype")
+                .map(|s| s.as_str());
+            let year = search_matches.get_one::<String>("year").map(|s| s.as_str());
+
+            println!("{} Searching Internet Archive...", "🔍".cyan().bold());
+
+            // Call with correct argument order: query, mediatype, year, sort, limit
+            match advanced_commands::search_archive(&query, mediatype, year, sort, limit).await {
+                Ok(results) => {
+                    advanced_commands::display_search_results(&results);
+                }
+                Err(e) => {
+                    eprintln!("{} Search failed: {}", "❌".red(), e);
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+        Some(("batch", batch_matches)) => {
+            use ia_get::interface::cli::advanced_commands;
+
+            let file_path = batch_matches.get_one::<String>("file").unwrap().clone();
+            let output_dir = batch_matches.get_one::<String>("output").cloned();
+            let parallel = batch_matches
+                .get_one::<String>("parallel")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(3);
+            let resume = batch_matches.get_flag("resume");
+            let verbose = batch_matches.get_flag("verbose");
+
+            println!("{} Starting batch download...", "📦".cyan().bold());
+
+            let config = advanced_commands::BatchConfig {
+                input_file: file_path,
+                parallel,
+                resume,
+                output_dir,
+                dry_run: false,
+            };
+
+            match advanced_commands::batch_download(config).await {
+                Ok(results) => {
+                    println!("\n{} Batch download completed!", "✅".green().bold());
+
+                    let successful = results.iter().filter(|r| r.success).count();
+                    let failed = results.iter().filter(|r| !r.success).count();
+
+                    println!("Successful: {}", successful);
+                    println!("Failed: {}", failed);
+
+                    if failed > 0 && verbose {
+                        println!("\n{} Failed downloads:", "⚠️".yellow());
+                        for item in results.iter().filter(|r| !r.success) {
+                            if let Some(error) = &item.error {
+                                println!("  • {}: {}", item.identifier, error);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{} Batch download failed: {}", "❌".red(), e);
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
         Some(("config", config_matches)) => {
             use ia_get::interface::cli::commands;
             match config_matches.subcommand() {
@@ -1015,7 +1091,101 @@ fn build_cli() -> Command {
                 .help("Display enhanced metadata analysis for the specified archive")
                 .action(ArgAction::SetTrue)
         )
-        // Add subcommands for configuration and history management
+        // Add subcommands for advanced features, configuration and history management
+        .subcommand(
+            Command::new("search")
+                .about("Search Internet Archive")
+                .long_about("Search the Internet Archive with advanced filtering options")
+                .arg(
+                    Arg::new("query")
+                        .help("Search query (e.g., 'vintage computers', 'nasa missions')")
+                        .required(true)
+                        .index(1)
+                )
+                .arg(
+                    Arg::new("limit")
+                        .short('l')
+                        .long("limit")
+                        .help("Maximum number of results to return")
+                        .value_name("NUM")
+                        .default_value("20")
+                )
+                .arg(
+                    Arg::new("sort")
+                        .short('s')
+                        .long("sort")
+                        .help("Sort results by field (downloads, date, title)")
+                        .value_name("FIELD")
+                        .value_parser(["downloads", "date", "title", "views"])
+                )
+                .arg(
+                    Arg::new("mediatype")
+                        .short('m')
+                        .long("mediatype")
+                        .help("Filter by media type (movies, audio, texts, software, etc.)")
+                        .value_name("TYPE")
+                )
+                .arg(
+                    Arg::new("year")
+                        .short('y')
+                        .long("year")
+                        .help("Filter by year or year range (e.g., '1970', '1970-1980')")
+                        .value_name("YEAR")
+                )
+                .arg(
+                    Arg::new("creator")
+                        .short('c')
+                        .long("creator")
+                        .help("Filter by creator name")
+                        .value_name("NAME")
+                )
+                .arg(
+                    Arg::new("subject")
+                        .long("subject")
+                        .help("Filter by subject/topic")
+                        .value_name("SUBJECT")
+                )
+        )
+        .subcommand(
+            Command::new("batch")
+                .about("Batch download multiple archives")
+                .long_about("Download multiple archives from a file containing identifiers or URLs, one per line")
+                .arg(
+                    Arg::new("file")
+                        .help("File containing archive identifiers or URLs (one per line)")
+                        .required(true)
+                        .index(1)
+                )
+                .arg(
+                    Arg::new("output")
+                        .short('o')
+                        .long("output")
+                        .help("Output directory for all downloads")
+                        .value_name("DIR")
+                )
+                .arg(
+                    Arg::new("parallel")
+                        .short('p')
+                        .long("parallel")
+                        .help("Number of parallel downloads (1-10)")
+                        .value_name("NUM")
+                        .default_value("3")
+                )
+                .arg(
+                    Arg::new("resume")
+                        .short('r')
+                        .long("resume")
+                        .help("Resume interrupted batch operations")
+                        .action(ArgAction::SetTrue)
+                )
+                .arg(
+                    Arg::new("verbose")
+                        .short('v')
+                        .long("verbose")
+                        .help("Show detailed progress for each download")
+                        .action(ArgAction::SetTrue)
+                )
+        )
         .subcommand(
             Command::new("config")
                 .about("Configuration and preference management")
