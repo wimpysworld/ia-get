@@ -222,71 +222,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.job.target }}
-          
-      - name: Cache Rust toolchain
-        uses: actions/cache@v4.2.4
-        with:
-          path: |
-            ~/.rustup/toolchains
-            ~/.rustup/update-hashes
-            ~/.rustup/settings.toml
-          key: ${{ runner.os }}-${{ matrix.job.target }}-rustup-stable-${{ hashFiles('Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.job.target }}-rustup-stable-
-            ${{ runner.os }}-${{ matrix.job.target }}-rustup-
-            ${{ runner.os }}-rustup-stable-
-
-      - name: Cache Cargo registry and dependencies
-        uses: actions/cache@v4.2.4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            # Windows-specific paths
-            ${{ runner.os == 'Windows' && 'C:\Users\runneradmin\.cargo\registry\' || '' }}
-            ${{ runner.os == 'Windows' && 'C:\Users\runneradmin\.cargo\git\' || '' }}
-          key: ${{ runner.os }}-${{ matrix.job.target }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.job.target }}-cargo-registry-
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache target directory for cross-compilation
-        uses: actions/cache@v4.2.4
-        with:
-          path: |
-            target/${{ matrix.job.target }}/release/deps/
-            target/${{ matrix.job.target }}/release/build/
-            target/${{ matrix.job.target }}/release/.fingerprint/
-            target/release/deps/
-            target/release/build/
-            target/release/.fingerprint/
-          key: ${{ runner.os }}-${{ matrix.job.target }}-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('src/**/*.rs') }}-${{ hashFiles('build.rs') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.job.target }}-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('src/**/*.rs') }}-
-            ${{ runner.os }}-${{ matrix.job.target }}-target-${{ hashFiles('**/Cargo.lock') }}-
-            ${{ runner.os }}-${{ matrix.job.target }}-target-
-            ${{ runner.os }}-target-
-
-      - name: Cache cross-compilation tools
-        if: matrix.job.use-cross
-        uses: actions/cache@v4.2.4
-        with:
-          path: |
-            ~/.cargo/bin/cross
-            ~/.cache/cross
-          key: ${{ runner.os }}-${{ matrix.job.target }}-cross-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.job.target }}-cross-
-            ${{ runner.os }}-cross-
-            
-      - name: Warm up dependency cache
-        run: |
-          # Pre-fetch dependencies for the target platform
-          cargo fetch --verbose
-          # Verify dependencies are available offline
-          echo "Dependencies cached successfully"
-
+      - name: Checkout repository
+        uses: actions/checkout@v5
       - name: Install cross
         if: matrix.job.use-cross
         uses: taiki-e/install-action@v2
