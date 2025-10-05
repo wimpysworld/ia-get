@@ -19,19 +19,8 @@ class MainActivity: FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         
-        // Force loading of native library BEFORE Dart tries to access it
-        // This ensures the library is available when Dart FFI initializes
-        try {
-            System.loadLibrary("ia_get_mobile")
-            android.util.Log.i("MainActivity", "Native library loaded successfully")
-        } catch (e: UnsatisfiedLinkError) {
-            android.util.Log.e("MainActivity", "Failed to load native library: UnsatisfiedLinkError", e)
-            // Library not found - likely missing for this architecture
-        } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Failed to load native library: unexpected error", e)
-        }
-        
         // Set up platform method channel for native integration
+        // Note: Rust FFI has been removed - using pure Dart implementation instead
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, methodChannelName)
         methodChannel.setMethodCallHandler { call, result ->
             when (call.method) {

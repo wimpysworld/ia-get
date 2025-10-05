@@ -9,9 +9,6 @@ dependencies:
   flutter:
     sdk: flutter
   
-  # FFI for Rust integration
-  ffi: ^2.1.4
-  
   # UI and state management
   cupertino_icons: ^1.0.8
   provider: ^6.1.5
@@ -24,6 +21,9 @@ dependencies:
   # Network and download
   http: ^1.5.0
   dio: ^5.9.0
+  
+  # Cryptography for checksum validation
+  crypto: ^3.0.5
   
   # UI enhancements
   flutter_spinkit: ^5.2.2
