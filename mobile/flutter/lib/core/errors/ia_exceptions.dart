@@ -1,5 +1,5 @@
 /// Custom exceptions for Internet Archive operations
-library ia_exceptions;
+library;
 
 /// Base exception for all Internet Archive related errors
 abstract class IAException implements Exception {

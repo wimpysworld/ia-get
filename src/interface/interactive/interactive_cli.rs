@@ -4,11 +4,11 @@
 //! with live updating progress, non-scrolling interface, and unified API usage.
 
 use crate::{
+    Result,
     core::download::{DownloadRequest, DownloadResult, DownloadService, ProgressUpdate},
     core::session::{ArchiveFile, DownloadSession},
     infrastructure::config::{Config, ConfigManager},
     utilities::filters::format_size,
-    Result,
 };
 use colored::*;
 use std::io::{self, Write};
@@ -520,7 +520,7 @@ impl InteractiveCli {
 
         // Create a test API client
         use crate::{
-            infrastructure::api::{get_archive_servers, EnhancedArchiveApiClient},
+            infrastructure::api::{EnhancedArchiveApiClient, get_archive_servers},
             utilities::common::get_user_agent,
         };
 

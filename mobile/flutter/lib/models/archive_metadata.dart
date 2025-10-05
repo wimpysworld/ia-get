@@ -37,8 +37,28 @@ class ArchiveMetadata {
       return ArchiveFile.fromJson(fileMap);
     }).toList();
 
+    // Try multiple strategies to extract identifier
+    String identifier = 'unknown';
+    
+    // Strategy 1: Check metadata.identifier
+    if (json['metadata'] != null && json['metadata']['identifier'] != null) {
+      identifier = json['metadata']['identifier'];
+    } 
+    // Strategy 2: Check top-level identifier
+    else if (json['identifier'] != null) {
+      identifier = json['identifier'];
+    }
+    // Strategy 3: Extract from directory path (e.g., /21/items/commute_test -> commute_test)
+    else if (dir.isNotEmpty) {
+      final parts = dir.split('/').where((p) => p.isNotEmpty).toList();
+      if (parts.length >= 2) {
+        // Directory format is usually /digits/items/identifier
+        identifier = parts.last;
+      }
+    }
+
     return ArchiveMetadata(
-      identifier: json['metadata']?['identifier'] ?? 'unknown',
+      identifier: identifier,
       title: json['metadata']?['title'],
       description: json['metadata']?['description'],
       creator: json['metadata']?['creator'],

@@ -3,9 +3,9 @@
 //! Simple tests for metadata functionality without complex validation
 
 use ia_get::{
+    DownloadRequest, DownloadResult, DownloadService,
     metadata::{get_json_url, parse_archive_metadata},
     url_processing::{construct_metadata_url, extract_identifier_from_url},
-    DownloadRequest, DownloadResult, DownloadService,
 };
 use std::path::PathBuf;
 

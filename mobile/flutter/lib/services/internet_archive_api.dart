@@ -53,7 +53,7 @@ class InternetArchiveApi {
 
     // Retry logic for transient errors
     int retries = 0;
-    Duration retryDelay = Duration(seconds: IARateLimits.defaultRetryDelaySecs);
+    Duration retryDelay = const Duration(seconds: IARateLimits.defaultRetryDelaySecs);
     
     while (retries < IARateLimits.maxRetries) {
       try {
@@ -64,7 +64,7 @@ class InternetArchiveApi {
               Uri.parse(metadataUrl),
               headers: IAHeaders.standard(_appVersion),
             )
-            .timeout(Duration(seconds: IAHttpConfig.timeoutSeconds));
+            .timeout(const Duration(seconds: IAHttpConfig.timeoutSeconds));
 
         _lastRequestTime = DateTime.now();
         _requestCount++;
@@ -86,7 +86,7 @@ class InternetArchiveApi {
             await Future.delayed(Duration(seconds: retryAfter));
             retries++;
             // Reset retry delay for next iteration if needed
-            retryDelay = Duration(seconds: IARateLimits.defaultRetryDelaySecs);
+            retryDelay = const Duration(seconds: IARateLimits.defaultRetryDelaySecs);
             continue;
           }
           // If we've exhausted retries, throw with the information
@@ -179,7 +179,7 @@ class InternetArchiveApi {
     CancellationToken? cancellationToken,
   }) async {
     int retries = 0;
-    Duration retryDelay = Duration(seconds: IARateLimits.defaultRetryDelaySecs);
+    Duration retryDelay = const Duration(seconds: IARateLimits.defaultRetryDelaySecs);
     
     while (retries < IARateLimits.maxRetries) {
       try {
@@ -236,7 +236,7 @@ class InternetArchiveApi {
               retryDelay = Duration(
                   seconds: (retryDelay.inSeconds * IARateLimits.backoffMultiplier).toInt());
               if (retryDelay.inSeconds > IARateLimits.maxBackoffDelaySecs) {
-                retryDelay = Duration(seconds: IARateLimits.maxBackoffDelaySecs);
+                retryDelay = const Duration(seconds: IARateLimits.maxBackoffDelaySecs);
               }
             }
             continue;
@@ -389,6 +389,7 @@ class InternetArchiveApi {
       await outDir.create(recursive: true);
     }
 
+    // Get just the filename without path
     final fileName = file.path.split(Platform.pathSeparator).last.toLowerCase();
     final bytes = await file.readAsBytes();
     
@@ -420,8 +421,17 @@ class InternetArchiveApi {
       } else if (fileName.endsWith('.gz')) {
         // Handle single GZIP files
         final decompressed = GZipDecoder().decodeBytes(bytes);
-        final outputFileName = fileName.substring(0, fileName.length - 3); // Remove .gz
-        final outputPath = '$outputDir${Platform.pathSeparator}$outputFileName';
+        // Extract just the filename without the .gz extension
+        // Handle both forward slashes and backslashes in path
+        String baseFileName = fileName.substring(0, fileName.length - 3);
+        // Remove any directory path components (handle / and \)
+        if (baseFileName.contains('/')) {
+          baseFileName = baseFileName.split('/').last;
+        }
+        if (baseFileName.contains('\\')) {
+          baseFileName = baseFileName.split('\\').last;
+        }
+        final outputPath = '$outputDir${Platform.pathSeparator}$baseFileName';
         
         final outputFile = File(outputPath);
         await outputFile.writeAsBytes(decompressed);
@@ -510,7 +520,7 @@ class InternetArchiveApi {
   Future<void> _enforceRateLimit() async {
     if (_lastRequestTime != null) {
       final elapsed = DateTime.now().difference(_lastRequestTime!);
-      final minDelay = Duration(milliseconds: IARateLimits.minRequestDelayMs);
+      final minDelay = const Duration(milliseconds: IARateLimits.minRequestDelayMs);
 
       if (elapsed < minDelay) {
         final waitTime = minDelay - elapsed;

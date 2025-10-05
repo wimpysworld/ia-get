@@ -1,16 +1,16 @@
 //! CLI command handlers for configuration and history management
 
 use crate::{
+    Result,
     error::IaGetError,
     infrastructure::{
         config::Config,
         persistence::{
             config_persistence::ConfigPersistence,
-            download_history::{get_default_history_db_path, DownloadHistory, TaskStatus},
+            download_history::{DownloadHistory, TaskStatus, get_default_history_db_path},
         },
     },
     utilities::filters::format_size,
-    Result,
 };
 use colored::Colorize;
 use std::io::{self, Write};
@@ -516,7 +516,12 @@ async fn show_history(
             "in_progress" | "inprogress" => TaskStatus::InProgress,
             "cancelled" => TaskStatus::Cancelled,
             "paused" => TaskStatus::Paused,
-            _ => return Err(IaGetError::Config(format!("Invalid status filter: {}. Valid options: success, failed, in_progress, cancelled, paused", status_str))),
+            _ => {
+                return Err(IaGetError::Config(format!(
+                    "Invalid status filter: {}. Valid options: success, failed, in_progress, cancelled, paused",
+                    status_str
+                )));
+            }
         };
         history.get_entries_by_status(&target_status)
     } else {

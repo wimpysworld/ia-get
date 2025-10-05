@@ -1,18 +1,18 @@
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Local;
 use colored::*;
-use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::error::IaGetError;
 use crate::Result;
+use crate::error::IaGetError;
 
 /// Buffer size for file operations (8KB)
 const BUFFER_SIZE: usize = 8192;

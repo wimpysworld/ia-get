@@ -3,7 +3,7 @@
 //! This example shows how the compression features work without requiring
 //! a full working main.rs binary.
 
-use ia_get::compression::{should_decompress, CompressionFormat};
+use ia_get::compression::{CompressionFormat, should_decompress};
 use ia_get::metadata_storage::ArchiveFile;
 
 fn main() {

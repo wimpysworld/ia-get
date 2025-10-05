@@ -16,11 +16,11 @@
 //! - **Enhanced Error Handling**: Robust error recovery and reporting
 
 use crate::{
+    IaGetError, Result,
     core::session::{ArchiveFile, ArchiveMetadata},
     infrastructure::api::EnhancedArchiveApiClient,
     utilities::common::format_size,
     utilities::filters::FormatCategory,
-    IaGetError, Result,
 };
 use colored::*;
 use serde::{Deserialize, Serialize};

@@ -4,9 +4,9 @@
 //! with navigation, editing, and preview capabilities.
 
 use crate::{
+    Result,
     infrastructure::config::{Config, ConfigManager, FilterPreset},
     utilities::filters::parse_size_string,
-    Result,
 };
 use colored::*;
 use std::io::{self, Write};

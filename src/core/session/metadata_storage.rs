@@ -4,7 +4,7 @@
 //! for download resumption and comprehensive file management.
 
 use crate::IaGetError;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -871,8 +871,8 @@ pub fn sanitize_filename_for_filesystem(filename: &str) -> String {
 /// Check if Windows long path support is enabled
 #[cfg(target_os = "windows")]
 pub fn is_windows_long_path_enabled() -> bool {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Once;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     static INIT: Once = Once::new();
     static LONG_PATH_ENABLED: AtomicBool = AtomicBool::new(false);

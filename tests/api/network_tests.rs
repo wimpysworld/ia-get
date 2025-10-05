@@ -34,10 +34,12 @@ fn test_client_creation() {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap();
-    assert!(client_with_timeout
-        .get("https://example.com")
-        .build()
-        .is_ok());
+    assert!(
+        client_with_timeout
+            .get("https://example.com")
+            .build()
+            .is_ok()
+    );
 
     // Test client with custom user agent
     let custom_ua = get_user_agent();

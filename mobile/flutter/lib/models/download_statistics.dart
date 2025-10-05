@@ -1,7 +1,7 @@
 /// Download statistics model for tracking overall download performance
 /// 
 /// Provides a type-safe interface for download statistics data that was
-/// previously returned as Map<String, dynamic>.
+/// previously returned as `Map<String, dynamic>`.
 class DownloadStatistics {
   final int activeDownloads;
   final int completedDownloads;

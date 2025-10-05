@@ -9,8 +9,8 @@ pub mod persistence;
 
 // Re-export commonly used infrastructure types with specific imports to avoid conflicts
 pub use api::{
-    get_archive_servers, validate_identifier, ApiStats, ArchiveOrgApiClient,
-    EnhancedArchiveApiClient, ItemDetails, ServiceStatus,
+    ApiStats, ArchiveOrgApiClient, EnhancedArchiveApiClient, ItemDetails, ServiceStatus,
+    get_archive_servers, validate_identifier,
 };
 pub use config::*;
 pub use http::*;

@@ -4,7 +4,7 @@
 //! and compliance information for responsible usage.
 
 use crate::{
-    infrastructure::api::archive_api::{get_archive_servers, ApiStats, ArchiveOrgApiClient},
+    infrastructure::api::archive_api::{ApiStats, ArchiveOrgApiClient, get_archive_servers},
     utilities::common::constants::get_user_agent,
 };
 use egui::{Color32, Context, RichText, Ui};

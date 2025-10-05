@@ -40,8 +40,8 @@
 //! - **Error Context**: Detailed error messages with context
 
 use crate::{
-    core::session::ArchiveMetadata, error::IaGetError, infrastructure::http::is_transient_error,
-    Result,
+    Result, core::session::ArchiveMetadata, error::IaGetError,
+    infrastructure::http::is_transient_error,
 };
 use colored::*;
 use indicatif::ProgressBar;

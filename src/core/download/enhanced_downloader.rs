@@ -31,11 +31,11 @@
 //! ```
 
 use crate::{
+    IaGetError, Result,
     core::session::{
         ArchiveFile, ArchiveMetadata, DownloadConfig, DownloadSession, DownloadState,
         FileDownloadStatus,
     },
-    IaGetError, Result,
 };
 use colored::*;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};

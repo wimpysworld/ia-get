@@ -6,5 +6,5 @@ pub mod batch;
 pub mod search;
 
 // Re-export commonly used types
-pub use batch::{batch_download, BatchConfig, BatchItemResult};
-pub use search::{display_search_results, search_archive, SearchResults};
+pub use batch::{BatchConfig, BatchItemResult, batch_download};
+pub use search::{SearchResults, display_search_results, search_archive};

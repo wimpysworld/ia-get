@@ -1,5 +1,5 @@
 /// Formatting utilities for displaying data in human-readable formats
-library formatting_utils;
+library;
 
 import 'dart:math';
 

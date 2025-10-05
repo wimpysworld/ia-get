@@ -6,7 +6,7 @@
 
 use ia_get::{
     archive_metadata::JsonFile,
-    filters::{filter_files, format_size, parse_size_string, FilterOptions},
+    filters::{FilterOptions, filter_files, format_size, parse_size_string},
 };
 
 /// Test size string parsing with various units

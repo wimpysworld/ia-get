@@ -1,5 +1,8 @@
 //! Main entry point for ia-get CLI application
 
+// Allow collapsible_if for now - can be refactored in separate PR
+#![allow(clippy::collapsible_if)]
+
 use anyhow::{Context, Result};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use colored::Colorize;
@@ -9,14 +12,14 @@ use std::sync::{Arc, Mutex};
 use tokio::signal;
 
 use ia_get::{
+    DownloadRequest, DownloadResult, DownloadService,
     core::archive::AdvancedMetadataProcessor,
-    core::session::sanitize_filename_for_filesystem,
     core::session::DownloadState,
-    infrastructure::api::{get_archive_servers, EnhancedArchiveApiClient},
+    core::session::sanitize_filename_for_filesystem,
+    infrastructure::api::{EnhancedArchiveApiClient, get_archive_servers},
     interface::cli::SourceType,
     utilities::common::get_user_agent,
     utilities::filters::format_size,
-    DownloadRequest, DownloadResult, DownloadService,
 };
 
 #[cfg(feature = "gui")]
@@ -417,7 +420,9 @@ async fn main() -> Result<()> {
                         .await?;
                 }
                 _ => {
-                    eprintln!("No config subcommand specified. Use 'ia-get config --help' for available options.");
+                    eprintln!(
+                        "No config subcommand specified. Use 'ia-get config --help' for available options."
+                    );
                     std::process::exit(1);
                 }
             }
@@ -460,7 +465,9 @@ async fn main() -> Result<()> {
                         .await?;
                 }
                 _ => {
-                    eprintln!("No history subcommand specified. Use 'ia-get history --help' for available options.");
+                    eprintln!(
+                        "No history subcommand specified. Use 'ia-get history --help' for available options."
+                    );
                     std::process::exit(1);
                 }
             }

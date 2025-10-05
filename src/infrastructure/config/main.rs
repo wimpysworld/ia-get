@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::{error::IaGetError, Result};
+use crate::{Result, error::IaGetError};
 
 /// Application configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]

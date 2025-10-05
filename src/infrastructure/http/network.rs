@@ -2,7 +2,7 @@
 //!
 //! Handles HTTP requests, retries, and response processing for Internet Archive interactions.
 
-use crate::{error::IaGetError, utilities::common::HTTP_TIMEOUT, Result};
+use crate::{Result, error::IaGetError, utilities::common::HTTP_TIMEOUT};
 use colored::*;
 use reqwest::Client;
 

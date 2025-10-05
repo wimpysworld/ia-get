@@ -4,8 +4,8 @@
 //! persistence, file status tracking, and progress monitoring.
 
 use ia_get::metadata_storage::{
-    generate_session_filename, ArchiveFile, ArchiveMetadata, DownloadConfig, DownloadSession,
-    DownloadState,
+    ArchiveFile, ArchiveMetadata, DownloadConfig, DownloadSession, DownloadState,
+    generate_session_filename,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -2,10 +2,10 @@
 //!
 //! Handles file download orchestration with retry logic.
 
-use crate::{core::download::downloader, error::IaGetError, Result};
+use crate::{Result, core::download::downloader, error::IaGetError};
 use colored::*;
 use reqwest::Client;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 
 /// Downloads files with retry logic for transient network errors
 pub async fn download_files_with_retries(

@@ -9,7 +9,7 @@
 /// - Download API: https://archive.org/developers/
 /// - Rate Limiting: https://archive.org/services/docs/api/ratelimiting.html
 
-library internet_archive_constants;
+library;
 
 /// Internet Archive API Endpoints
 class IAEndpoints {

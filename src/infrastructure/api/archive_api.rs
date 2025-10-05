@@ -4,7 +4,7 @@
 //! including proper rate limiting, server selection, and request formatting
 //! following the Internet Archive's guidelines and best practices.
 
-use crate::{utilities::common::*, IaGetError, Result};
+use crate::{IaGetError, Result, utilities::common::*};
 use reqwest::{Client, Response};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;

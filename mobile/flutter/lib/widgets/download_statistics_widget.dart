@@ -122,7 +122,7 @@ class DownloadStatisticsWidget extends StatelessWidget {
                             style: Theme.of(context).textTheme.bodyMedium,
                           ),
                           Text(
-                            '${FormattingUtils.formatSpeed(provider.averageDownloadSpeed)}',
+                            FormattingUtils.formatSpeed(provider.averageDownloadSpeed),
                             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                               fontWeight: FontWeight.bold,
                               color: Theme.of(context).primaryColor,

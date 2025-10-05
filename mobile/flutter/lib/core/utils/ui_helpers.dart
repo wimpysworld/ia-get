@@ -1,5 +1,5 @@
 /// UI helper utilities for common dialog, snackbar, and UI patterns
-library ui_helpers;
+library;
 
 import 'package:flutter/material.dart';
 
@@ -185,8 +185,8 @@ class UIHelpers {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => WillPopScope(
-        onWillPop: () async => false,
+      builder: (context) => PopScope(
+        canPop: false,
         child: AlertDialog(
           content: Row(
             children: [
@@ -315,8 +315,8 @@ class UIHelpers {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => WillPopScope(
-        onWillPop: () async => false,
+      builder: (context) => PopScope(
+        canPop: false,
         child: AlertDialog(
           title: Text(title),
           content: Column(

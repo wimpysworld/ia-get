@@ -4,6 +4,7 @@ import 'package:internet_archive_helper/services/internet_archive_api.dart';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:crypto/crypto.dart';
+import 'package:archive/archive.dart';
 
 /// Comprehensive integration tests for Internet Archive Helper
 /// 
@@ -25,7 +26,7 @@ void main() {
       tempDir = await getTemporaryDirectory();
     });
 
-    tearDown() async {
+    tearDown(() async {
       // Cleanup test files
       try {
         final testFiles = tempDir
@@ -111,8 +112,8 @@ void main() {
       // Validate using API method
       final isValid = await api.validateChecksum(
         outputPath,
-        fileWithMd5.md5,
-        fileWithMd5.sha1,
+        fileWithMd5.md5!,
+        'md5',
       );
 
       expect(isValid, isTrue);
@@ -175,7 +176,7 @@ void main() {
 
       // Compress it
       final bytes = await testFile.readAsBytes();
-      final compressed = GZipEncoder().encode(bytes)!;
+      final compressed = const GZipEncoder().encode(bytes);
       final gzipFile = File('${tempDir.path}/ia_test_file.txt.gz');
       await gzipFile.writeAsBytes(compressed);
 

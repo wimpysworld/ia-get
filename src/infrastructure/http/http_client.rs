@@ -5,10 +5,10 @@
 //! and performance monitoring.
 
 use crate::{
+    Result,
     error::IaGetError,
     utilities::common::get_user_agent,
     utilities::common::{AdaptiveBufferManager, PerformanceMonitor},
-    Result,
 };
 use reqwest::{Client, ClientBuilder};
 use std::sync::Arc;

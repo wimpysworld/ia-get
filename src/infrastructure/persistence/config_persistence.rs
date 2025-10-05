@@ -4,7 +4,7 @@
 //! CLI args > saved preferences/config file > defaults (for CLI)
 //! One-time options > saved preferences/config file > defaults (for GUI)
 
-use crate::{error::IaGetError, infrastructure::config::Config, Result};
+use crate::{Result, error::IaGetError, infrastructure::config::Config};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};

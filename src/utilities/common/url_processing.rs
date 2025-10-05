@@ -2,7 +2,7 @@
 //!
 //! Handles Internet Archive URL parsing, validation, and format conversions.
 
-use crate::{error::IaGetError, Result};
+use crate::{Result, error::IaGetError};
 use url::Url;
 
 /// Validates and processes Internet Archive URLs

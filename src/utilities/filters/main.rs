@@ -35,10 +35,10 @@
 //! - **TB**: Terabytes (1000 GB)
 
 use crate::{
+    Result,
     core::archive::FileEntry,
     error::IaGetError,
     interface::cli::{Cli, Commands, SourceType},
-    Result,
 };
 
 /// Trait for extracting filter options from different CLI structures

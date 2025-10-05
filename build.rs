@@ -7,14 +7,16 @@ fn main() {
     embed_windows_manifest();
 
     // Check if we're building for Android and provide guidance
-    if let Ok(target) = std::env::var("TARGET") {
-        if target.contains("android") {
-            println!("cargo:warning=Building for Android target: {}", target);
-            println!(
-                "cargo:warning=For complete Android APK/AAB builds: ./scripts/build-mobile.sh [--development|--production] [--appbundle]"
-            );
-            println!("cargo:warning=For native libraries only, use: ./scripts/build-android-libs-only.sh");
-        }
+    if let Ok(target) = std::env::var("TARGET")
+        && target.contains("android")
+    {
+        println!("cargo:warning=Building for Android target: {}", target);
+        println!(
+            "cargo:warning=For complete Android APK/AAB builds: ./scripts/build-mobile.sh [--development|--production] [--appbundle]"
+        );
+        println!(
+            "cargo:warning=For native libraries only, use: ./scripts/build-android-libs-only.sh"
+        );
     }
 
     // Note: Full artifact packaging is handled by CI/CD workflow after build completion
@@ -30,7 +32,9 @@ fn main() {
 fn generate_simplified_ffi_header() {
     // Check if we should generate FFI headers
     if std::env::var("CARGO_FEATURE_FFI").is_ok() {
-        println!("cargo:warning=FFI feature enabled - C header can be generated with: cbindgen -c cbindgen_simple.toml -o include/ia_get_simple.h");
+        println!(
+            "cargo:warning=FFI feature enabled - C header can be generated with: cbindgen -c cbindgen_simple.toml -o include/ia_get_simple.h"
+        );
         println!("cargo:rerun-if-changed=src/interface/ffi_simple.rs");
         println!("cargo:rerun-if-changed=cbindgen_simple.toml");
     }

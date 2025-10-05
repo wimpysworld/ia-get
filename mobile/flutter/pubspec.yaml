@@ -15,7 +15,7 @@ dependencies:
   
   # Storage and file management
   path_provider: ^2.1.5
-  permission_handler: ^12.0.0
+  permission_handler: ^12.0.1  # Latest available for Flutter 3.32
   open_file: ^3.5.9
   
   # Network and download
@@ -36,7 +36,7 @@ dependencies:
   app_links: ^6.3.2
   
   # Archive decompression
-  archive: ^3.6.1
+  archive: 4.0.7
   
   # Code generation support
   freezed_annotation: ^3.1.0
@@ -47,7 +47,7 @@ dev_dependencies:
     sdk: flutter
   integration_test:
     sdk: flutter
-  flutter_lints: ^6.0.0
+  flutter_lints: ^6.0.0  # Latest lints for Dart 3.8+
   mockito: ^5.4.4
   
   # Code generation tools

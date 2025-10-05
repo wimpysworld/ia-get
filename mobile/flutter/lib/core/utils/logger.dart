@@ -1,5 +1,5 @@
 /// Logging utility for consistent debug logging across the app
-library logger;
+library;
 
 import 'package:flutter/foundation.dart';
 

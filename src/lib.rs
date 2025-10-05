@@ -18,6 +18,9 @@
 //! ```rust,no_run
 //! use ia_get::{metadata::fetch_json_metadata, enhanced_downloader::ArchiveDownloader};
 //! use reqwest::Client;
+
+// Allow collapsible_if for now - can be refactored in separate PR
+#![allow(clippy::collapsible_if)]
 //! use indicatif::ProgressBar;
 //! use std::path::PathBuf;
 //!
@@ -60,36 +63,36 @@ pub use error::{IaGetError, Result};
 
 // Re-export commonly used functions from organized modules
 pub use core::archive::{
-    fetch_json_metadata, get_json_url, parse_archive_metadata, AdvancedMetadataProcessor,
-    MetadataAnalysis,
+    AdvancedMetadataProcessor, MetadataAnalysis, fetch_json_metadata, get_json_url,
+    parse_archive_metadata,
 };
 pub use core::download::{
-    download_files_with_retries, DownloadRequest, DownloadResult, DownloadService, DownloadStats,
-    FileDownloadResult, ProgressUpdate, SimpleConcurrentDownloader,
+    DownloadRequest, DownloadResult, DownloadService, DownloadStats, FileDownloadResult,
+    ProgressUpdate, SimpleConcurrentDownloader, download_files_with_retries,
 };
 pub use core::session::{
-    sanitize_filename_for_filesystem, ArchiveFile, ArchiveMetadata, DownloadConfig,
-    DownloadSession, DownloadState,
+    ArchiveFile, ArchiveMetadata, DownloadConfig, DownloadSession, DownloadState,
+    sanitize_filename_for_filesystem,
 };
 pub use infrastructure::api::{
-    validate_identifier, ApiStats, ArchiveOrgApiClient, EnhancedArchiveApiClient, ItemDetails,
-    ServiceStatus,
+    ApiStats, ArchiveOrgApiClient, EnhancedArchiveApiClient, ItemDetails, ServiceStatus,
+    validate_identifier,
 };
 pub use infrastructure::http::{
-    is_transient_error, is_transient_reqwest_error, is_url_accessible, ClientConfig,
-    EnhancedHttpClient, HttpClientFactory,
+    ClientConfig, EnhancedHttpClient, HttpClientFactory, is_transient_error,
+    is_transient_reqwest_error, is_url_accessible,
 };
 pub use interface::cli::{Cli, SourceType};
 #[cfg(feature = "gui")]
 pub use interface::gui::IaGetApp;
 pub use utilities::common::{
+    AdaptiveBufferManager, PerformanceMetrics, PerformanceMonitor, StringTruncate,
     construct_download_url, construct_metadata_url, extract_identifier_from_url, get_user_agent,
-    is_archive_url, normalize_archive_identifier, validate_and_process_url, AdaptiveBufferManager,
-    PerformanceMetrics, PerformanceMonitor, StringTruncate,
+    is_archive_url, normalize_archive_identifier, validate_and_process_url,
 };
 pub use utilities::compression::*;
 pub use utilities::filters::{
-    filter_files, format_size, parse_size_string, FileFormats, FormatCategory,
+    FileFormats, FormatCategory, filter_files, format_size, parse_size_string,
 };
 
 // Legacy compatibility re-exports for external tests and examples

@@ -34,9 +34,9 @@
 //! integrates with the metadata storage system for session tracking and resume functionality.
 
 use crate::{
+    IaGetError, Result,
     core::session::{ArchiveFile, ArchiveMetadata, DownloadSession, DownloadState},
     utilities::common::get_user_agent,
-    IaGetError, Result,
 };
 use reqwest::Client;
 use std::sync::Arc;

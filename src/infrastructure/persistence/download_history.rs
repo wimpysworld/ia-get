@@ -3,7 +3,7 @@
 //! Manages the ia-get-db.json file that stores download history,
 //! task status, and download settings used.
 
-use crate::{core::session::DownloadConfig, error::IaGetError, Result};
+use crate::{Result, core::session::DownloadConfig, error::IaGetError};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;

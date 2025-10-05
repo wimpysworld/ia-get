@@ -4,16 +4,16 @@
 //! ensuring both CLI and GUI use exactly the same API and business logic.
 
 use crate::{
+    IaGetError, Result,
     core::archive::fetch_json_metadata,
     core::download::ArchiveDownloader,
     core::session::{ArchiveFile, DownloadConfig, DownloadSession},
-    infrastructure::api::{validate_identifier, ApiStats, ArchiveOrgApiClient},
+    infrastructure::api::{ApiStats, ArchiveOrgApiClient, validate_identifier},
     infrastructure::config::Config,
     interface::cli::SourceType,
     utilities::common::extract_identifier_from_url,
     utilities::common::get_user_agent,
     utilities::filters::{format_size, parse_size_string},
-    IaGetError, Result,
 };
 use colored::Colorize;
 use reqwest::Client;
@@ -164,7 +164,7 @@ impl DownloadService {
         progress_callback: Option<ProgressCallback>,
     ) -> Result<DownloadResult> {
         use crate::infrastructure::persistence::download_history::{
-            get_default_history_db_path, DownloadHistory, DownloadHistoryEntry,
+            DownloadHistory, DownloadHistoryEntry, get_default_history_db_path,
         };
 
         // Validate identifier for Archive.org compliance
