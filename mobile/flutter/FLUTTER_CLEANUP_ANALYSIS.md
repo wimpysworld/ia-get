@@ -229,15 +229,28 @@ lib/
    - [ ] Test checksum validation
    - [ ] Check notification updates
 
-### Recommended Integration Tests
+### Integration Testing
 
-```dart
-// TODO: Add integration tests for:
-// - Archive metadata fetching
-// - File downloading with progress
-// - Checksum validation
-// - Filter combinations
-// - Background download service
+Comprehensive integration tests have been implemented. See `TESTING_AND_DECOMPRESSION_IMPLEMENTATION.md` for details.
+
+**Test Files**:
+- `integration_test/app_test.dart` - 10 comprehensive integration tests
+- `test/internet_archive_api_test.dart` - Unit tests for decompression and API methods
+
+**Coverage Areas**:
+- Archive metadata fetching (multiple URL formats)
+- File downloading with progress tracking
+- Checksum validation (MD5/SHA1)
+- Archive decompression (ZIP, TAR, TAR.GZ, GZIP)
+- Error handling and rate limiting compliance
+
+**Running Tests**:
+```bash
+# Unit tests
+flutter test
+
+# Integration tests
+flutter test integration_test/
 ```
 
 ---
