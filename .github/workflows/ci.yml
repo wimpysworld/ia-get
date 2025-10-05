@@ -1,10 +1,10 @@
 name: CI
 
-# This workflow tests the new simplified architecture:
-# - CLI: Command-line interface (default feature)
-# - GUI: Graphical user interface using egui
-# - FFI: Foreign Function Interface (ffi_simple) for mobile/Flutter integration
-# Note: Old deprecated FFI (ffi.rs) and main_old.rs have been removed as part of Phase 1 architecture cleanup
+# This workflow tests the independent implementations:
+# - Rust CLI: Terminal-first command-line interface (default) with search and batch operations
+# - Rust GUI: Optional graphical user interface using egui (--features gui)
+# - Flutter Mobile: Pure Dart implementation with zero native dependencies
+# Note: FFI has been completely removed - Flutter and Rust are now independent
 
 on:
   push:
@@ -68,17 +68,16 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        features: [cli, gui, ffi]
+        features: [cli, gui]
         include:
           - features: cli
-            feature_flags: "--no-default-features --features cli"
+            feature_flags: ""
             cache_suffix: "cli"
+            description: "Terminal-first CLI with search and batch operations"
           - features: gui  
             feature_flags: "--features gui"
             cache_suffix: "gui"
-          - features: ffi
-            feature_flags: "--no-default-features --features ffi"
-            cache_suffix: "ffi"
+            description: "Optional GUI interface"
 
     steps:
     - name: Checkout repository
@@ -226,7 +225,7 @@ jobs:
       shell: pwsh
 
     - name: Create artifact (Unix)
-      if: (matrix.features == 'gui' || matrix.features == 'ffi') && runner.os != 'Windows'
+      if: matrix.features == 'cli' && runner.os != 'Windows'
       shell: bash
       run: |
         # Ensure artifacts directory exists and is properly populated
@@ -304,7 +303,7 @@ jobs:
         fi
 
     - name: Create artifact (Windows)
-      if: (matrix.features == 'gui' || matrix.features == 'ffi') && runner.os == 'Windows'
+      if: matrix.features == 'cli' && runner.os == 'Windows'
       shell: pwsh
       run: |
         # Ensure artifacts directory exists and is properly populated
@@ -381,7 +380,7 @@ jobs:
         }
 
     - name: Upload artifact
-      if: matrix.features == 'gui' || matrix.features == 'ffi'
+      if: matrix.features == 'cli'
       uses: actions/upload-artifact@v4.6.2
       with:
         name: ia-get-${{ runner.os }}-${{ matrix.features }}
@@ -390,6 +389,7 @@ jobs:
           hashes_${{ runner.os }}_${{ matrix.features }}.txt
           ia-get-${{ runner.os }}.zip
         retention-days: 30
+        compression-level: 9
 
     - name: Cache cleanup and optimization
       if: always()
@@ -410,12 +410,12 @@ jobs:
         
         Write-Host "Cache cleanup completed"
 
-  android-build:
-    name: Android APK & App Bundle Build (Development)
+  flutter-mobile:
+    name: Flutter Mobile App Build (Pure Dart)
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    # This job builds Android artifacts using the new simplified FFI architecture (ffi_simple)
-    # for Flutter integration via the mobile/flutter app
+    # This job builds Flutter mobile app using PURE DART implementation
+    # No FFI, no native dependencies, no Rust compilation required
     
     steps:
     - name: Checkout repository
@@ -430,13 +430,6 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Install Android NDK
-      run: |
-        echo "Installing Android NDK..."
-        sdkmanager --install "ndk;27.3.13750724"
-        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.3.13750724" >> $GITHUB_ENV
-        echo "NDK installed at: $ANDROID_HOME/ndk/27.3.13750724"
-
     - name: Setup Flutter
       uses: subosito/flutter-action@v2
       with:
@@ -444,29 +437,17 @@ jobs:
         channel: 'stable'
         cache: true
 
-    - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
-        targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
-
-    - name: Install cargo-ndk
-      run: cargo install cargo-ndk
-
-    - name: Cache Android dependencies
+    - name: Cache Flutter dependencies
       uses: actions/cache@v4.2.4
       with:
         path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target/
-          ~/.android
           ~/.pub-cache
-        key: ${{ runner.os }}-android-apk-dart3.8-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}-${{ hashFiles('mobile/**/pubspec.yaml') }}
+          mobile/flutter/.dart_tool
+          mobile/flutter/build
+        key: ${{ runner.os }}-flutter-pure-dart-${{ hashFiles('mobile/flutter/pubspec.yaml') }}-${{ hashFiles('mobile/flutter/pubspec.lock') }}
         restore-keys: |
-          ${{ runner.os }}-android-apk-dart3.8-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}-
-          ${{ runner.os }}-android-apk-dart3.8-${{ hashFiles('**/Cargo.lock') }}-
-          ${{ runner.os }}-android-apk-dart3.8-
+          ${{ runner.os }}-flutter-pure-dart-${{ hashFiles('mobile/flutter/pubspec.yaml') }}-
+          ${{ runner.os }}-flutter-pure-dart-
 
     - name: Verify Flutter and Dart versions
       run: |
@@ -483,206 +464,131 @@ jobs:
         flutter analyze --no-fatal-infos
         echo "✓ Flutter analysis passed"
 
-    - name: Build Android APK and App Bundle
+    - name: Build Android APK and App Bundle (Pure Dart)
       run: |
         chmod +x scripts/build-mobile.sh
         
         # Build development App Bundle for testing Play Store format
+        # Note: Pure Dart - no native compilation needed!
         ./scripts/build-mobile.sh --development --appbundle
         
         # Also build development APK for direct installation
         ./scripts/build-mobile.sh --development
 
-    - name: Package Android artifacts
+    - name: Package Flutter artifacts
       run: |
-        set -x  # Enable debug mode to see exactly where script fails
+        set -x  # Enable debug mode
         
-        # Create artifacts directory with error checking
-        echo "🔍 Creating android-artifacts directory..."
-        if ! mkdir -p android-artifacts; then
-          echo "❌ ERROR: Failed to create android-artifacts directory"
-          exit 1
-        fi
+        # Create artifacts directory
+        echo "🔍 Creating flutter-artifacts directory..."
+        mkdir -p flutter-artifacts
         
-        # Track what we actually find
+        # Track what we find
         FOUND_ITEMS=0
         
         # Copy APK files with validation
-        echo "🔍 Checking for target/mobile directory..."
-        if [ -d "target/mobile" ]; then
-          echo "✓ Found target/mobile directory"
-          ls -la target/mobile/
+        echo "🔍 Checking for mobile/flutter/build/app/outputs..."
+        if [ -d "mobile/flutter/build/app/outputs/flutter-apk" ]; then
+          echo "✓ Found Flutter APK output directory"
+          ls -la mobile/flutter/build/app/outputs/flutter-apk/
           
-          # Copy APK files with error checking
+          # Copy APK files
           echo "🔍 Checking for APK files..."
-          if ls target/mobile/*.apk 1> /dev/null 2>&1; then
+          if ls mobile/flutter/build/app/outputs/flutter-apk/*.apk 1> /dev/null 2>&1; then
             echo "🔍 Copying APK files..."
-            if ! cp target/mobile/*.apk android-artifacts/; then
-              echo "❌ ERROR: Failed to copy APK files"
-              exit 1
-            fi
-            APK_COUNT=$(ls target/mobile/*.apk | wc -l)
+            cp mobile/flutter/build/app/outputs/flutter-apk/*.apk flutter-artifacts/
+            APK_COUNT=$(ls mobile/flutter/build/app/outputs/flutter-apk/*.apk | wc -l)
             echo "✓ Copied $APK_COUNT APK file(s)"
             FOUND_ITEMS=$((FOUND_ITEMS + APK_COUNT))
           else
-            echo "❌ ERROR: No APK files found in target/mobile/"
+            echo "❌ ERROR: No APK files found"
             echo "Flutter APK build must have failed. Check build logs above."
             exit 1
           fi
-          
-          # Copy App Bundle files (AAB) with error checking
-          echo "🔍 Checking for AAB files..."
-          if ls target/mobile/*.aab 1> /dev/null 2>&1; then
+        fi
+        
+        # Copy App Bundle files (AAB)
+        echo "🔍 Checking for AAB files..."
+        if [ -d "mobile/flutter/build/app/outputs/bundle" ]; then
+          if ls mobile/flutter/build/app/outputs/bundle/*/*.aab 1> /dev/null 2>&1; then
             echo "🔍 Copying AAB files..."
-            if ! cp target/mobile/*.aab android-artifacts/; then
-              echo "❌ ERROR: Failed to copy AAB files"
-              exit 1
-            fi
-            AAB_COUNT=$(ls target/mobile/*.aab | wc -l)
+            cp mobile/flutter/build/app/outputs/bundle/*/*.aab flutter-artifacts/
+            AAB_COUNT=$(ls mobile/flutter/build/app/outputs/bundle/*/*.aab | wc -l)
             echo "✓ Copied $AAB_COUNT App Bundle file(s)"
             FOUND_ITEMS=$((FOUND_ITEMS + AAB_COUNT))
           else
-            echo "⚠ No App Bundle (.aab) files found in target/mobile/"
-            echo "Note: App Bundle build may have been skipped (only required when --appbundle flag is used)"
+            echo "⚠ No App Bundle (.aab) files found"
+            echo "Note: App Bundle build may have been skipped"
           fi
-        else
-          echo "✗ target/mobile directory not found"
         fi
         
-        # Copy native libraries for developers (check both possible locations)
-        echo "🔍 Checking for native libraries..."
-        if [ -d "target/mobile/android" ]; then
-          echo "🔍 Copying native libraries from target/mobile/android..."
-          if ! cp -r target/mobile/android android-artifacts/native-libs; then
-            echo "❌ ERROR: Failed to copy native libraries from target/mobile/android"
-            exit 1
-          fi
-          echo "✓ Copied native libraries from target/mobile/android"
-          FOUND_ITEMS=$((FOUND_ITEMS + 1))
-        elif [ -d "target/android" ]; then
-          echo "🔍 Copying native libraries from target/android..."
-          if ! cp -r target/android android-artifacts/native-libs; then
-            echo "❌ ERROR: Failed to copy native libraries from target/android"
-            exit 1
-          fi
-          echo "✓ Copied native libraries from target/android"
-          FOUND_ITEMS=$((FOUND_ITEMS + 1))
-        else
-          echo "⚠ No native libraries found (checked target/mobile/android and target/android)"
-        fi
+        # Note: NO native libraries - Pure Dart implementation!
+        echo "ℹ️  Note: No native libraries (Pure Dart implementation)"
         
-        # Copy documentation with better error handling
+        # Copy documentation
         echo "🔍 Copying documentation files..."
         for doc_file in README.md LICENSE; do
           if [ -f "$doc_file" ]; then
-            if cp "$doc_file" android-artifacts/; then
-              echo "✓ Copied $doc_file"
-            else
-              echo "❌ WARNING: Failed to copy $doc_file (non-critical)"
-            fi
-          else
-            echo "⚠ WARNING: $doc_file not found in current directory"
+            cp "$doc_file" flutter-artifacts/ && echo "✓ Copied $doc_file"
           fi
         done
         
-        # Validate we have meaningful content and provide detailed summary
-        echo "📦 Android artifacts summary:"
-        if ! ls -la android-artifacts/; then
-          echo "❌ ERROR: Failed to list android-artifacts directory"
-          exit 1
-        fi
+        # Validate we have meaningful content
+        echo "📦 Flutter artifacts summary:"
+        ls -la flutter-artifacts/
         
         # Count different types of files found
-        APK_FILES=$(find android-artifacts/ -name "*.apk" 2>/dev/null | wc -l || echo "0")
-        AAB_FILES=$(find android-artifacts/ -name "*.aab" 2>/dev/null | wc -l || echo "0")
-        NATIVE_LIB_DIRS=$(find android-artifacts/ -name "native-libs" -type d 2>/dev/null | wc -l || echo "0")
+        APK_FILES=$(find flutter-artifacts/ -name "*.apk" 2>/dev/null | wc -l || echo "0")
+        AAB_FILES=$(find flutter-artifacts/ -name "*.aab" 2>/dev/null | wc -l || echo "0")
         
         echo "📊 Artifact breakdown:"
         echo "   - APK files: $APK_FILES"
         echo "   - AAB files: $AAB_FILES"
-        echo "   - Native library sets: $NATIVE_LIB_DIRS"
         echo "   - Total items found: $FOUND_ITEMS"
+        echo "   - Implementation: Pure Dart (no native dependencies)"
         
         if [ $FOUND_ITEMS -eq 0 ]; then
-          echo "❌ ERROR: No Android build artifacts were found!"
-          echo "Expected to find APK/AAB files in target/mobile/ or native libraries"
-          echo "Build may have failed. Check build logs above."
-          echo "🔍 Current directory contents:"
-          ls -la
-          echo "🔍 Current working directory: $(pwd)"
+          echo "❌ ERROR: No Flutter build artifacts were found!"
           exit 1
         fi
         
         # Require at least APK files for development builds
         if [ $APK_FILES -eq 0 ]; then
           echo "❌ ERROR: No APK files were successfully built!"
-          echo "Development builds require working APK files for testing."
-          echo "Check the build logs above for Flutter build errors."
           exit 1
         fi
         
-        # Create archive with error checking
+        # Create archive
         echo "🔍 Creating archive..."
-        if ! cd android-artifacts; then
-          echo "❌ ERROR: Failed to change to android-artifacts directory"
-          exit 1
-        fi
+        cd flutter-artifacts
+        zip -9 -r ../flutter-mobile-dev.zip *
+        cd ..
         
-        if ! zip -r ../ia-get-android-dev.zip *; then
-          echo "❌ ERROR: Failed to create zip archive"
-          cd ..
-          exit 1
-        fi
-        
-        if ! cd ..; then
-          echo "❌ ERROR: Failed to return to parent directory"
-          exit 1
-        fi
-        
-        # Validate archive was created
-        echo "🔍 Validating archive..."
-        if [ ! -f "ia-get-android-dev.zip" ]; then
-          echo "❌ ERROR: Archive file was not created"
-          exit 1
-        fi
-        
-        # Validate archive size
-        ARCHIVE_SIZE=$(stat -c%s "ia-get-android-dev.zip" 2>/dev/null || stat -f%z "ia-get-android-dev.zip" 2>/dev/null || echo "0")
-        if [ "$ARCHIVE_SIZE" = "0" ]; then
-          echo "❌ ERROR: Failed to determine archive size or archive is empty"
-          exit 1
-        fi
-        
+        # Validate archive
+        ARCHIVE_SIZE=$(stat -c%s "flutter-mobile-dev.zip" 2>/dev/null || stat -f%z "flutter-mobile-dev.zip" 2>/dev/null || echo "0")
         ARCHIVE_SIZE_KB=$((ARCHIVE_SIZE / 1024))
         echo "📏 Archive size: ${ARCHIVE_SIZE_KB}KB"
         
-        if [ $ARCHIVE_SIZE -lt 50000 ]; then  # Less than 50KB indicates likely empty/minimal content
-          echo "⚠ WARNING: Archive seems small (${ARCHIVE_SIZE_KB}KB). Expected larger size for Android build."
-        fi
+        # Calculate hash
+        sha256sum flutter-mobile-dev.zip > flutter-dev-hash.txt
         
-        # Calculate hash with error checking
-        echo "🔍 Calculating SHA256 hash..."
-        if ! sha256sum ia-get-android-dev.zip > android-dev-hash.txt; then
-          echo "❌ ERROR: Failed to calculate SHA256 hash"
-          exit 1
-        fi
-        
-        echo "✓ Created development Android artifact: ia-get-android-dev.zip (${ARCHIVE_SIZE_KB}KB)"
-        echo "✓ Package Android artifacts step completed successfully"
+        echo "✓ Created Pure Dart Flutter app: flutter-mobile-dev.zip (${ARCHIVE_SIZE_KB}KB)"
+        echo "✓ Package Flutter artifacts step completed successfully"
 
-    - name: Upload Android artifacts
+    - name: Upload Flutter artifacts
       uses: actions/upload-artifact@v4.6.2
       with:
-        name: ia-get-android-dev
+        name: flutter-mobile-dev
         path: |
-          ia-get-android-dev.zip
-          android-dev-hash.txt
+          flutter-mobile-dev.zip
+          flutter-dev-hash.txt
         retention-days: 30
+        compression-level: 9
 
   release:
     name: Create Development Release
     runs-on: ubuntu-latest
-    needs: [security, test, android-build]
+    needs: [security, test, flutter-mobile]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     
     steps:
@@ -745,20 +651,22 @@ jobs:
         ## 📥 Downloads
         
         Choose your platform:
+        
+        ### 🖥️ Desktop (Rust CLI)
+        Terminal-first implementation with search and batch operations:
         - **Linux**: \`ia-get-Linux.zip\`
         - **Windows**: \`ia-get-Windows.zip\` 
         - **macOS**: \`ia-get-macOS.zip\`
-        - **🤖 Android**: \`ia-get-android-dev.zip\` (complete APK & App Bundle for testing)
         
-        ### 📱 Android Development
-        The Android package contains development artifacts:
-        - **Development APK**: Ready to install on devices for testing (\`ia-get-mobile-development.apk\`)
-        - **Development App Bundle**: Play Store format for testing upload flow (\`ia-get-mobile-development.aab\`)  
-        - **Native Libraries**: FFI libraries for all major Android architectures
-          - **ARM64** (arm64-v8a) - Modern devices
-          - **ARMv7** (armeabi-v7a) - Older devices
-          - **x86_64** - Intel emulators
-          - **x86** - Legacy emulators
+        ### 📱 Mobile (Flutter - Pure Dart)
+        - **Android**: \`flutter-mobile-dev.zip\`
+        
+        #### Flutter Mobile Features
+        - **Pure Dart Implementation**: No native dependencies required
+        - **Easy Platform Extension**: Ready for iOS, Web, Desktop
+        - **Development APK**: Install directly on Android devices
+        - **Development App Bundle**: Test Play Store upload flow
+        - **Zero FFI Complexity**: Standard Flutter build process
         
         $(cat HASHES.md)
         

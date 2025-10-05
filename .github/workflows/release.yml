@@ -1,8 +1,9 @@
 name: Build 🏗️ and Publish 📦️
 
-# This workflow builds release artifacts for all platforms using the new simplified architecture.
-# Builds include CLI, GUI, and FFI (ffi_simple) features as appropriate for each platform.
-# Android builds use the simplified FFI interface (ffi_simple) for Flutter integration.
+# This workflow builds release artifacts for all platforms using independent implementations:
+# - Rust CLI: Terminal-first with search and batch operations (default)
+# - Rust GUI: Optional graphical interface (--features gui)
+# - Flutter Mobile: Pure Dart implementation (no native dependencies)
 
 # Cancel previous runs when new tags are pushed
 concurrency:
@@ -28,12 +29,12 @@ on:
       - '[0-9]+.[0-9]+.[0-9]+'
 
 jobs:
-  android-release:
-    name: Android APK Release Build
+  flutter-mobile-release:
+    name: Flutter Mobile App Release Build (Pure Dart)
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
-    # This job builds production Android artifacts using the new simplified FFI architecture
-    # (ffi_simple) for Flutter integration via the mobile/flutter app
+    # This job builds production Flutter mobile app using PURE DART implementation
+    # No FFI, no native dependencies, no Rust compilation required
 
     steps:
       - name: Checkout repository
@@ -55,172 +56,129 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
-
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk
-
-      - name: Cache Android dependencies
+      - name: Cache Flutter dependencies
         uses: actions/cache@v4.2.4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-            ~/.android
             ~/.pub-cache
-          key: ${{ runner.os }}-android-release-dart3.8-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}-${{ hashFiles('mobile/**/pubspec.yaml') }}
+          key: ${{ runner.os }}-flutter-release-dart3.8-${{ hashFiles('mobile/flutter/pubspec.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-android-release-dart3.8-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('mobile/**/Cargo.toml') }}-
-            ${{ runner.os }}-android-release-dart3.8-${{ hashFiles('**/Cargo.lock') }}-
-            ${{ runner.os }}-android-release-dart3.8-
+            ${{ runner.os }}-flutter-release-dart3.8-
 
       - name: Verify Flutter and Dart versions
         run: |
           flutter --version
           flutter doctor -v
-          echo "Verifying Dart SDK version is 3.8.0 or higher..."
-          DART_VERSION=$(flutter --version | grep "Dart" | awk '{print $4}')
-          echo "Detected Dart version: $DART_VERSION"
 
-      - name: Build Android APK and App Bundle
+      - name: Build Android APK and App Bundle (Pure Dart)
         run: |
           chmod +x scripts/build-mobile.sh
           
-          # Build production App Bundle for Play Store
+          # Build production App Bundle for Play Store - Pure Dart!
           ./scripts/build-mobile.sh --production --appbundle --store-ready
           
-          # Also build production APK for direct distribution (as requested in issue)
+          # Also build production APK for direct distribution
           ./scripts/build-mobile.sh --production --store-ready
 
-      - name: Package Android artifacts
+      - name: Package Flutter release artifacts
         shell: bash
         env:
-          PROJECT_NAME: ia-get
-          PACKAGE_NAME: ia-get-android
+          PROJECT_NAME: flutter-mobile
+          PACKAGE_NAME: flutter-mobile
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
-          mkdir -p android-release-artifacts
+          mkdir -p flutter-release-artifacts
           
-          # Track what we actually package
+          # Track what we package
           FOUND_ITEMS=0
           
-          # Copy App Bundle and APK files with validation
-          if [ -d "target/mobile" ]; then
-            echo "✓ Found target/mobile directory"
-            ls -la target/mobile/
+          # Copy App Bundle and APK files from Flutter build output
+          if [ -d "mobile/flutter/build/app/outputs" ]; then
+            echo "✓ Found Flutter build outputs"
             
             # Copy App Bundle files
-            if ls target/mobile/*.aab 1> /dev/null 2>&1; then
-              cp target/mobile/*.aab android-release-artifacts/
-              AAB_COUNT=$(ls target/mobile/*.aab | wc -l)
-              echo "✓ Copied $AAB_COUNT App Bundle file(s)"
-              FOUND_ITEMS=$((FOUND_ITEMS + AAB_COUNT))
-            else
-              echo "⚠ No App Bundle (.aab) files found"
+            if [ -d "mobile/flutter/build/app/outputs/bundle" ]; then
+              if ls mobile/flutter/build/app/outputs/bundle/*/*.aab 1> /dev/null 2>&1; then
+                cp mobile/flutter/build/app/outputs/bundle/*/*.aab flutter-release-artifacts/
+                AAB_COUNT=$(ls mobile/flutter/build/app/outputs/bundle/*/*.aab | wc -l)
+                echo "✓ Copied $AAB_COUNT App Bundle file(s)"
+                FOUND_ITEMS=$((FOUND_ITEMS + AAB_COUNT))
+              fi
             fi
             
             # Copy APK files  
-            if ls target/mobile/*.apk 1> /dev/null 2>&1; then
-              cp target/mobile/*.apk android-release-artifacts/
-              APK_COUNT=$(ls target/mobile/*.apk | wc -l)
-              echo "✓ Copied $APK_COUNT APK file(s)"
-              FOUND_ITEMS=$((FOUND_ITEMS + APK_COUNT))
-            else
-              echo "⚠ No APK files found"
-            fi
-            
-            # Copy split APKs if they exist
-            if [ -d "target/mobile/apk-variants-production" ]; then
-              mkdir -p android-release-artifacts/split-apks
-              if ls target/mobile/apk-variants-production/* 1> /dev/null 2>&1; then
-                cp target/mobile/apk-variants-production/* android-release-artifacts/split-apks/
-                SPLIT_COUNT=$(ls target/mobile/apk-variants-production/* | wc -l)
-                echo "✓ Copied $SPLIT_COUNT split APK file(s)"
-                FOUND_ITEMS=$((FOUND_ITEMS + SPLIT_COUNT))
+            if [ -d "mobile/flutter/build/app/outputs/flutter-apk" ]; then
+              if ls mobile/flutter/build/app/outputs/flutter-apk/*.apk 1> /dev/null 2>&1; then
+                cp mobile/flutter/build/app/outputs/flutter-apk/*.apk flutter-release-artifacts/
+                APK_COUNT=$(ls mobile/flutter/build/app/outputs/flutter-apk/*.apk | wc -l)
+                echo "✓ Copied $APK_COUNT APK file(s)"
+                FOUND_ITEMS=$((FOUND_ITEMS + APK_COUNT))
               fi
             fi
           else
-            echo "❌ ERROR: target/mobile directory not found!"
-            echo "Build may have failed. Check build logs above."
+            echo "❌ ERROR: Flutter build outputs not found!"
             exit 1
           fi
           
-          # Copy native libraries for developers
-          if [ -d "target/mobile/android" ]; then
-            cp -r target/mobile/android android-release-artifacts/native-libs
-            echo "✓ Copied native libraries"
-            FOUND_ITEMS=$((FOUND_ITEMS + 1))
-          else
-            echo "⚠ No native libraries found at target/mobile/android"
-          fi
+          # Note: NO native libraries - Pure Dart!
+          echo "ℹ️  Pure Dart implementation - no native libraries needed"
           
-          # Copy documentation and metadata
-          cp README.md LICENSE android-release-artifacts/ || true
+          # Copy documentation
+          cp README.md LICENSE flutter-release-artifacts/ || true
           
-          # Validate we have meaningful content
+          # Validate content
           if [ $FOUND_ITEMS -eq 0 ]; then
-            echo "❌ ERROR: No Android release artifacts were found!"
-            echo "Expected to find APK/AAB files in target/mobile/"
+            echo "❌ ERROR: No Flutter release artifacts found!"
             exit 1
           fi
           
-          echo "📦 Android release artifacts summary:"
-          ls -la android-release-artifacts/
+          echo "📦 Flutter release artifacts summary:"
+          ls -la flutter-release-artifacts/
           echo "Total artifacts found: $FOUND_ITEMS"
+          echo "Implementation: Pure Dart (no native dependencies)"
           
-          # Create store submission package for App Bundle
-          if [ -f "android-release-artifacts/ia-get-mobile-production.aab" ]; then
-            mkdir -p android-release-artifacts/play-store
-            cp android-release-artifacts/ia-get-mobile-production.aab android-release-artifacts/play-store/
-            echo "# Google Play Store Submission Package" > android-release-artifacts/play-store/README.md
-            echo "" >> android-release-artifacts/play-store/README.md
-            echo "This App Bundle (.aab) is ready for submission to Google Play Store." >> android-release-artifacts/play-store/README.md
-            echo "Upload this file to Google Play Console for distribution." >> android-release-artifacts/play-store/README.md
+          # Create Play Store submission package
+          if ls flutter-release-artifacts/*.aab 1> /dev/null 2>&1; then
+            mkdir -p flutter-release-artifacts/play-store
+            cp flutter-release-artifacts/*.aab flutter-release-artifacts/play-store/
+            echo "# Google Play Store Submission Package" > flutter-release-artifacts/play-store/README.md
+            echo "" >> flutter-release-artifacts/play-store/README.md
+            echo "This App Bundle (.aab) is ready for submission to Google Play Store." >> flutter-release-artifacts/play-store/README.md
+            echo "Pure Dart implementation - no native dependencies." >> flutter-release-artifacts/play-store/README.md
             echo "✓ Created Play Store submission package"
           fi
           
           # Create versioned archive
-          cd android-release-artifacts
-          zip -r "../${PACKAGE_NAME}-${TAG_NAME}.zip" *
+          cd flutter-release-artifacts
+          zip -9 -r "../${PACKAGE_NAME}-${TAG_NAME}.zip" *
           cd ..
           
-          # Validate archive size
+          # Validate and calculate hashes
           ARCHIVE_SIZE=$(stat -c%s "${PACKAGE_NAME}-${TAG_NAME}.zip" 2>/dev/null || stat -f%z "${PACKAGE_NAME}-${TAG_NAME}.zip" 2>/dev/null || echo "0")
           ARCHIVE_SIZE_KB=$((ARCHIVE_SIZE / 1024))
           echo "📏 Archive size: ${ARCHIVE_SIZE_KB}KB"
           
-          if [ $ARCHIVE_SIZE -lt 100000 ]; then  # Less than 100KB for production seems too small
-            echo "⚠ WARNING: Production archive seems small (${ARCHIVE_SIZE_KB}KB)"
+          sha256sum "${PACKAGE_NAME}-${TAG_NAME}.zip" > "FLUTTER_HASHES_${TAG_NAME}.txt"
+          
+          # Add individual file hashes
+          if ls flutter-release-artifacts/*.aab 1> /dev/null 2>&1; then
+            echo "" >> "FLUTTER_HASHES_${TAG_NAME}.txt"
+            echo "# Individual File Hashes" >> "FLUTTER_HASHES_${TAG_NAME}.txt"
+            sha256sum flutter-release-artifacts/*.aab >> "FLUTTER_HASHES_${TAG_NAME}.txt"
+          fi
+          if ls flutter-release-artifacts/*.apk 1> /dev/null 2>&1; then
+            sha256sum flutter-release-artifacts/*.apk >> "FLUTTER_HASHES_${TAG_NAME}.txt"
           fi
           
-          # Calculate hashes
-          sha256sum "${PACKAGE_NAME}-${TAG_NAME}.zip" > "ANDROID_HASHES_${TAG_NAME}.txt"
-          
-          # Add individual file hashes for important files
-          if [ -f "android-release-artifacts/ia-get-mobile-production.aab" ]; then
-            echo "" >> "ANDROID_HASHES_${TAG_NAME}.txt"
-            echo "# Individual File Hashes" >> "ANDROID_HASHES_${TAG_NAME}.txt"
-            sha256sum android-release-artifacts/ia-get-mobile-production.aab >> "ANDROID_HASHES_${TAG_NAME}.txt"
-          fi
-          if [ -f "android-release-artifacts/ia-get-mobile-production.apk" ]; then
-            sha256sum android-release-artifacts/ia-get-mobile-production.apk >> "ANDROID_HASHES_${TAG_NAME}.txt"
-          fi
-          
-          echo "✓ Android release artifact created: ${PACKAGE_NAME}-${TAG_NAME}.zip (${ARCHIVE_SIZE_KB}KB)"
-          echo "Contents:"
-          unzip -l "${PACKAGE_NAME}-${TAG_NAME}.zip" | head -20
+          echo "✓ Flutter release artifact created: ${PACKAGE_NAME}-${TAG_NAME}.zip (${ARCHIVE_SIZE_KB}KB)"
 
-      - name: Upload Android release artifacts
+      - name: Upload Flutter release artifacts
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
         with:
           files: |
-            ia-get-android-*.zip
-            ANDROID_HASHES_*.txt
+            flutter-mobile-*.zip
+            FLUTTER_HASHES_*.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -339,8 +297,8 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: 10.7
         shell: bash
         run: |
-          # Build with default features (CLI + GUI) for release
-          # The new simplified architecture (ffi_simple) is available via --features ffi
+          # Build with CLI as default - terminal-first approach with search and batch operations
+          # GUI is available via --features gui
           if [[ "${{ matrix.job.use-cross }}" == "true" ]]; then
             cross build --release --target ${{ matrix.job.target }}
           else
@@ -486,7 +444,7 @@ jobs:
   update_release_notes:
     name: Update Release Notes
     runs-on: ubuntu-latest
-    needs: [publish, android-release]
+    needs: [publish, flutter-mobile-release]
     if: github.ref_type == 'tag'
     
     steps:
@@ -511,24 +469,25 @@ jobs:
           
           ## 📥 Downloads
           
-          ### Quick Downloads
+          ### 🖥️ Desktop (Rust CLI - Terminal First)
+          Terminal-optimized implementation with search and batch operations:
           - **Linux (x86_64)**: [ia-get-${TAG_NAME}-x86_64-unknown-linux-gnu.zip](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-x86_64-unknown-linux-gnu.zip)
           - **Windows (x86_64)**: [ia-get-${TAG_NAME}-x86_64-pc-windows-msvc.zip](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-x86_64-pc-windows-msvc.zip)
           - **macOS (x86_64)**: [ia-get-${TAG_NAME}-x86_64-apple-darwin.zip](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-x86_64-apple-darwin.zip)
           - **macOS (ARM64)**: [ia-get-${TAG_NAME}-aarch64-apple-darwin.zip](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-${TAG_NAME}-aarch64-apple-darwin.zip)
-          - **🤖 Android**: [ia-get-android-${TAG_NAME}.zip](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/ia-get-android-${TAG_NAME}.zip)
+          
+          ### 📱 Mobile (Flutter - Pure Dart)
+          - **Android**: [flutter-mobile-${TAG_NAME}.zip](https://github.com/Gameaday/ia-get-cli/releases/download/${TAG_NAME}/flutter-mobile-${TAG_NAME}.zip)
           
           ### All Platforms
-          See the **Assets** section below for all supported platforms including Linux ARM, musl variants, .deb packages, and Android native libraries.
+          See the **Assets** section below for all supported platforms including Linux ARM, musl variants, and .deb packages.
           
-          ### 📱 Android Integration
-          The Android package contains native libraries for:
-          - ARM64 (arm64-v8a) - Modern 64-bit ARM devices
-          - ARMv7 (armeabi-v7a) - Older 32-bit ARM devices  
-          - x86_64 - Intel/AMD 64-bit emulators
-          - x86 - Intel/AMD 32-bit emulators
-          
-          Perfect for embedding into Android apps or for use with FFI frameworks like Flutter.
+          ### 📱 Flutter Mobile Features
+          - **Pure Dart Implementation**: No native dependencies or FFI complexity
+          - **Easy Platform Extension**: Ready for iOS, Web, and Desktop
+          - **Production APK**: Install directly on Android devices
+          - **App Bundle (AAB)**: Submit to Google Play Store
+          - **Standard Flutter Build**: Simple `flutter build apk` workflow
           
           ## 🔐 Integrity Verification
           
