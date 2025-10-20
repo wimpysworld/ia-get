@@ -22,7 +22,7 @@ serde = { version = "1.0.224", features = ["derive"] }
 serde-xml-rs = "0.8.1"
 thiserror = "2.0.15"
 url = "2.5.4"
-clap = { version = "4.5.47", features = ["derive"] }
+clap = { version = "4.5.50", features = ["derive"] }
 ctrlc = "3.5.0"
 colored = "3.0.0"
 
