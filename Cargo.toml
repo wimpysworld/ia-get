@@ -16,7 +16,7 @@ futures = "0.3.31"
 indicatif = "0.18.0"
 md5 = "0.8.0"
 regex = "1.12.2"
-reqwest = { version = "0.12.23", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1.47.1", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde-xml-rs = "0.8.1"
