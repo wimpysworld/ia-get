@@ -19,7 +19,7 @@ regex = "1.12.2"
 reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1.47.1", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde-xml-rs = "0.8.1"
+serde-xml-rs = "0.8.2"
 thiserror = "2.0.17"
 url = "2.5.4"
 clap = { version = "4.5.52", features = ["derive"] }
