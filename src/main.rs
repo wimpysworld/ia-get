@@ -8,17 +8,20 @@
 use ia_get::{Result};
 use ia_get::utils::{create_spinner, validate_archive_url};
 use ia_get::downloader; 
-use ia_get::constants::{USER_AGENT, HTTP_TIMEOUT};
+use ia_get::constants::USER_AGENT;
 use ia_get::archive_metadata::{XmlFiles, parse_xml_files};
 use indicatif::ProgressStyle;
 use reqwest::Client;
 use clap::Parser;
 use colored::*; // Add this line
 
+/// Extended timeout for large file downloads (10 minutes for connection, no read timeout)
+const CONNECTION_TIMEOUT_SECS: u64 = 600;
+
 /// Checks if a URL is accessible by sending a HEAD request
 async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
     let response = client.head(url)
-        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT))
+        .timeout(std::time::Duration::from_secs(60))
         .send().await?;
     
     response.error_for_status()?;
@@ -119,10 +122,15 @@ struct Cli {
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    // Create a single client instance for all requests
+    // Create a client with extended timeouts for large file downloads
+    // Connection timeout is set high, but no read timeout since large files
+    // may take a long time to transfer
     let client = Client::builder()
         .user_agent(USER_AGENT)
-        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT))
+        .connect_timeout(std::time::Duration::from_secs(CONNECTION_TIMEOUT_SECS))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .pool_max_idle_per_host(1)
+        .tcp_keepalive(std::time::Duration::from_secs(60))
         .build()?;
 
     // Start a single spinner for the entire initialization process

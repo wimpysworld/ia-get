@@ -20,6 +20,12 @@ const BUFFER_SIZE: usize = 8192;
 /// File size threshold for showing hash progress bar (2MB)
 const LARGE_FILE_THRESHOLD: u64 = 2 * 1024 * 1024; 
 
+/// Maximum number of retry attempts for failed downloads
+const MAX_RETRIES: u32 = 3;
+
+/// Initial delay between retries in milliseconds (doubles with each retry)
+const INITIAL_RETRY_DELAY_MS: u64 = 1000;
+
 /// Sets up signal handling for graceful shutdown on Ctrl+C
 /// 
 /// Returns an Arc<AtomicBool> that can be checked to see if the process
@@ -130,89 +136,154 @@ fn prepare_file_for_download(file_path: &str) -> Result<File> {
     Ok(file)
 }
 
-/// Download file content with progress reporting
+/// Download file content with progress reporting and automatic retry on failure
 async fn download_file_content(
     client: &Client, 
     url: &str, 
-    file_size: u64, 
     file: &mut File,
     running: &Arc<AtomicBool>,
-    is_resuming: bool
 ) -> Result<u64> {
-    let download_action = if is_resuming {
-        format!("{} {}     ", "╰╼".cyan().dimmed(), "Resuming".white())
-    } else {
-        format!("{} {}  ", "╰╼".cyan().dimmed(), "Downloading".white())
-    };
+    let mut retry_count = 0;
     
-    let mut headers = HeaderMap::new();
-    if file_size > 0 {
-        // Use IaGetError::Network for header parsing errors
-        headers.insert(reqwest::header::RANGE, HeaderValue::from_str(&format!("bytes={}-", file_size)).map_err(|e| IaGetError::Network(format!("Invalid range header value: {}", e)))?);
-    }
-
-    let mut response = if file_size > 0 && is_resuming { // Ensure headers are only used for resume
-        client.get(url).headers(headers).send().await?
-    } else {
-        client.get(url).send().await?
-    };
-
-    let content_length = response.content_length().unwrap_or(0);
-    let total_expected_size = if is_resuming { content_length + file_size } else { content_length };
-    
-    let pb = create_progress_bar(
-        total_expected_size, 
-        &download_action, 
-        Some("green/green"), // Color for download bar
-        true
-    );
-
-    // Set initial progress to current file size for resumed downloads
-    pb.set_position(file_size);
-
-    let start_time = std::time::Instant::now();
-    let mut total_bytes: u64 = file_size;
-    let mut downloaded_bytes: u64 = 0;
-    
-    while let Some(chunk) = response.chunk().await? {
-        if !running.load(Ordering::SeqCst) {
-            pb.finish_and_clear();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "Download interrupted during file transfer",
-            ).into());
-        }
+    loop {
+        // Re-check file size at start of each attempt (in case of retry)
+        let current_file_size = file.metadata()?.len();
+        let download_action = if current_file_size > 0 {
+            format!("{} {}     ", "╰╼".cyan().dimmed(), "Resuming".white())
+        } else {
+            format!("{} {}  ", "╰╼".cyan().dimmed(), "Downloading".white())
+        };
         
-        file.write_all(&chunk)?;
-        downloaded_bytes += chunk.len() as u64;
-        total_bytes += chunk.len() as u64;
-        pb.set_position(total_bytes);
+        let mut headers = HeaderMap::new();
+        if current_file_size > 0 {
+            // Use IaGetError::Network for header parsing errors
+            headers.insert(
+                reqwest::header::RANGE, 
+                HeaderValue::from_str(&format!("bytes={}-", current_file_size))
+                    .map_err(|e| IaGetError::Network(format!("Invalid range header value: {}", e)))?
+            );
+        }
+
+        let mut response = if current_file_size > 0 {
+            client.get(url).headers(headers).send().await?
+        } else {
+            client.get(url).send().await?
+        };
+
+        let content_length = response.content_length().unwrap_or(0);
+        let total_expected_size = if current_file_size > 0 { 
+            content_length + current_file_size 
+        } else { 
+            content_length 
+        };
+        
+        let pb = create_progress_bar(
+            total_expected_size, 
+            &download_action, 
+            Some("green/green"),
+            true
+        );
+
+        // Set initial progress to current file size for resumed downloads
+        pb.set_position(current_file_size);
+
+        let start_time = std::time::Instant::now();
+        let mut total_bytes: u64 = current_file_size;
+        let mut downloaded_bytes: u64 = 0;
+        
+        // Attempt the download
+        let download_result: Result<()> = async {
+            while let Some(chunk_result) = response.chunk().await.transpose() {
+                if !running.load(Ordering::SeqCst) {
+                    pb.finish_and_clear();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "Download interrupted during file transfer",
+                    ).into());
+                }
+                
+                let chunk = chunk_result?;
+                file.write_all(&chunk)?;
+                downloaded_bytes += chunk.len() as u64;
+                total_bytes += chunk.len() as u64;
+                pb.set_position(total_bytes);
+            }
+            Ok(())
+        }.await;
+
+        match download_result {
+            Ok(_) => {
+                // Ensure data is written to disk
+                file.flush()?;
+
+                let elapsed = start_time.elapsed();
+                let elapsed_secs = elapsed.as_secs_f64();
+                let transfer_rate_val = if elapsed_secs > 0.0 {
+                    downloaded_bytes as f64 / elapsed_secs
+                } else { 0.0 };
+
+                let (rate, unit) = format_transfer_rate(transfer_rate_val);
+
+                pb.finish_and_clear();
+                println!(
+                    "{} {}   {} {} in {} ({:.2} {}/s)",
+                    "├╼".cyan().dimmed(),
+                    "Downloaded".white(),
+                    "↓".green().bold(),
+                    format_size(downloaded_bytes).bold(),
+                    format_duration(elapsed).bold(),
+                    rate,
+                    unit
+                );
+                
+                return Ok(total_bytes);
+            },
+            Err(e) => {
+                pb.finish_and_clear();
+                
+                // Check if this is a user interruption
+                if e.to_string().contains("interrupted") {
+                    return Err(e);
+                }
+                
+                retry_count += 1;
+                
+                if retry_count > MAX_RETRIES {
+                    println!(
+                        "{} {}      {} Maximum retries ({}) exceeded",
+                        "├╼".cyan().dimmed(),
+                        "Failed".red().bold(),
+                        "✘".red().bold(),
+                        MAX_RETRIES
+                    );
+                    return Err(e);
+                }
+                
+                let delay = INITIAL_RETRY_DELAY_MS * 2u64.pow(retry_count - 1);
+                println!(
+                    "{} {}      {} Network error (attempt {}/{}): {}",
+                    "├╼".cyan().dimmed(),
+                    "Retry".yellow().bold(),
+                    "⟳".yellow().bold(),
+                    retry_count,
+                    MAX_RETRIES,
+                    e
+                );
+                println!(
+                    "{} {}      Waiting {:.1}s before retry...",
+                    "├╼".cyan().dimmed(),
+                    "Wait".white(),
+                    delay as f64 / 1000.0
+                );
+                
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                
+                // Ensure file is flushed and ready for next attempt
+                file.flush()?;
+                file.seek(SeekFrom::End(0))?;
+            }
+        }
     }
-
-    // Ensure data is written to disk
-    file.flush()?;
-
-    let elapsed = start_time.elapsed();
-    let elapsed_secs = elapsed.as_secs_f64();
-    let transfer_rate_val = if elapsed_secs > 0.0 {
-        downloaded_bytes as f64 / elapsed_secs
-    } else { 0.0 };
-
-    let (rate, unit) = format_transfer_rate(transfer_rate_val);
-
-    pb.finish_and_clear();
-    println!(
-        "{} {}   {} {} in {} ({:.2} {}/s)",
-        "├╼".cyan().dimmed(),
-        "Downloaded".white(),
-        "↓".green().bold(),
-        format_size(downloaded_bytes).bold(),
-        format_duration(elapsed).bold(),
-        rate,
-        unit
-    );
-    
-    Ok(total_bytes)
 }
 
 /// Verify a downloaded file's hash against an expected value
@@ -296,9 +367,7 @@ where
         
         let mut file = prepare_file_for_download(&file_path)?;
         
-        let file_size = file.metadata()?.len();        
-        let is_resuming = file_size > 0;
-        download_file_content(client, &url, file_size, &mut file, &running, is_resuming).await?;
+        download_file_content(client, &url, &mut file, &running).await?;
         verify_downloaded_file(&file_path, expected_md5.as_deref(), &running)?;
     }
     
