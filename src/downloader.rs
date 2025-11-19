@@ -164,10 +164,53 @@ async fn download_file_content(
             );
         }
 
-        let mut response = if current_file_size > 0 {
-            client.get(url).headers(headers).send().await?
+        // Try to send the request with retry logic
+        let mut response = match if current_file_size > 0 {
+            client.get(url).headers(headers).send().await
         } else {
-            client.get(url).send().await?
+            client.get(url).send().await
+        } {
+            Ok(resp) => resp,
+            Err(e) => {
+                // Request failed before we even got a response
+                retry_count += 1;
+                
+                if retry_count > MAX_RETRIES {
+                    println!(
+                        "{} {}      {} Maximum retries ({}) exceeded",
+                        "├╼".cyan().dimmed(),
+                        "Failed".red().bold(),
+                        "✘".red().bold(),
+                        MAX_RETRIES
+                    );
+                    return Err(e.into());
+                }
+                
+                let delay = INITIAL_RETRY_DELAY_MS * 2u64.pow(retry_count - 1);
+                println!(
+                    "{} {}      {} Connection error (attempt {}/{}): {}",
+                    "├╼".cyan().dimmed(),
+                    "Retry".yellow().bold(),
+                    "⟳".yellow().bold(),
+                    retry_count,
+                    MAX_RETRIES,
+                    e
+                );
+                println!(
+                    "{} {}      Waiting {:.1}s before retry...",
+                    "├╼".cyan().dimmed(),
+                    "Wait".white(),
+                    delay as f64 / 1000.0
+                );
+                
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                
+                // Ensure file is ready for next attempt
+                file.flush()?;
+                file.seek(SeekFrom::End(0))?;
+                
+                continue; // Retry from the top of the loop
+            }
         };
 
         let content_length = response.content_length().unwrap_or(0);
@@ -261,7 +304,7 @@ async fn download_file_content(
                 
                 let delay = INITIAL_RETRY_DELAY_MS * 2u64.pow(retry_count - 1);
                 println!(
-                    "{} {}      {} Network error (attempt {}/{}): {}",
+                    "{} {}      {} Download error (attempt {}/{}): {}",
                     "├╼".cyan().dimmed(),
                     "Retry".yellow().bold(),
                     "⟳".yellow().bold(),
