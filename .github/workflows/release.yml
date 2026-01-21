@@ -38,21 +38,21 @@ jobs:
             use-cross: true
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
       - name: Installing Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.job.target }}
-      - name: Checkout repository
-        uses: actions/checkout@v6
       - name: Install cross
         if: matrix.job.use-cross
         uses: taiki-e/install-action@v2
         with:
           tool: cross
       - name: Cargo build
-        env:
-          MACOSX_DEPLOYMENT_TARGET: 10.7
         shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.job.target == 'aarch64-apple-darwin' && '11.0' || (matrix.job.target == 'x86_64-apple-darwin' && '10.15' || '') }}
         run: |
           if [[ "${{ matrix.job.use-cross }}" == "true" ]]; then
             cross build --release --target ${{ matrix.job.target }}
@@ -60,7 +60,7 @@ jobs:
             cargo build --release --target ${{ matrix.job.target }}
           fi
 
-      - name: Install required dependencies
+      - name: Install cross-compilation strip tools
         shell: bash
         run: |
           if [[ ${{ matrix.job.target }} == arm-unknown-linux-gnueabihf ]]; then
