@@ -1,38 +1,40 @@
 //! # ia-get
 //!
 //! A command-line tool for downloading files from the Internet Archive.
-//! 
+//!
 //! This tool takes an archive.org details URL and downloads all associated files,
 //! with support for resumable downloads and MD5 hash verification.
 
-use ia_get::{Result};
-use ia_get::utils::{create_spinner, validate_archive_url};
-use ia_get::downloader; 
-use ia_get::constants::{USER_AGENT, HTTP_TIMEOUT};
-use ia_get::archive_metadata::{XmlFiles, parse_xml_files};
-use indicatif::ProgressStyle;
-use reqwest::Client;
 use clap::Parser;
-use colored::*; // Add this line
+use colored::*;
+use ia_get::archive_metadata::{parse_xml_files, XmlFiles};
+use ia_get::constants::{HTTP_TIMEOUT, USER_AGENT};
+use ia_get::downloader;
+use ia_get::utils::{create_spinner, validate_archive_url};
+use ia_get::Result;
+use indicatif::ProgressStyle;
+use reqwest::Client; // Add this line
 
 /// Checks if a URL is accessible by sending a HEAD request
 async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
-    let response = client.head(url)
+    let response = client
+        .head(url)
         .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT))
-        .send().await?;
-    
+        .send()
+        .await?;
+
     response.error_for_status()?;
     Ok(())
 }
 
 /// Converts a details URL to the corresponding XML files list URL
-/// 
+///
 /// Takes an archive.org details URL and converts it to the XML metadata URL
 /// by replacing "details" with "download" and appending "_files.xml"
-/// 
+///
 /// # Arguments
 /// * `original_url` - The archive.org details URL
-/// 
+///
 /// # Returns
 /// The corresponding XML files list URL
 fn get_xml_url(original_url: &str) -> String {
@@ -42,7 +44,9 @@ fn get_xml_url(original_url: &str) -> String {
     // The identifier is the last segment of the trimmed URL
     // This expect is considered safe because get_xml_url is only called after
     // validate_archive_url has confirmed the URL structure.
-    let identifier = trimmed_url.rsplit('/').next() // Changed from split().last() to address clippy warning
+    let identifier = trimmed_url
+        .rsplit('/')
+        .next() // Changed from split().last() to address clippy warning
         .expect("Validated URL should have a valid identifier segment after validation");
 
     // The base URL for download is "https://archive.org/download/{identifier}"
@@ -53,15 +57,15 @@ fn get_xml_url(original_url: &str) -> String {
 }
 
 /// Fetches and parses XML metadata from archive.org
-/// 
+///
 /// Combines XML URL generation, accessibility check, download, and parsing
 /// into a single operation with integrated error handling.
-/// 
+///
 /// # Arguments
 /// * `details_url` - The original archive.org details URL
 /// * `client` - HTTP client for requests
 /// * `spinner` - Progress spinner to update during processing
-/// 
+///
 /// # Returns
 /// Tuple of (XmlFiles, base_url) for download processing
 async fn fetch_xml_metadata(
@@ -87,13 +91,17 @@ async fn fetch_xml_metadata(
         return Err(e); // Propagate the error
     }
 
-    spinner.set_message(format!("{} {}", "⚙".blue(), "Parsing archive metadata...".bold()));
+    spinner.set_message(format!(
+        "{} {}",
+        "⚙".blue(),
+        "Parsing archive metadata...".bold()
+    ));
 
     // Parse base URL and fetch XML content
     let base_url = reqwest::Url::parse(&xml_url)?;
     let response = client.get(&xml_url).send().await?;
     let xml_content = response.text().await?;
-    
+
     // Parse XML content with improved error handling
     let files = parse_xml_files(&xml_content)?;
 
@@ -112,7 +120,7 @@ struct Cli {
 }
 
 /// Main application entry point
-/// 
+///
 /// Parses command line arguments, validates the archive.org URL, checks URL accessibility,
 /// downloads XML metadata, and initiates file downloads with built-in signal handling.
 #[tokio::main]
@@ -162,13 +170,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     spinner.finish();
 
     // Prepare download data for batch processing
-    let download_data = files.files.into_iter().map(|file| {
-        let mut absolute_url = base_url.clone();
-        if let Ok(joined_url) = absolute_url.join(&file.name) {
-            absolute_url = joined_url;
-        }
-        (absolute_url.to_string(), file.name, file.md5)
-    }).collect::<Vec<_>>();
+    let download_data = files
+        .files
+        .into_iter()
+        .map(|file| {
+            let mut absolute_url = base_url.clone();
+            if let Ok(joined_url) = absolute_url.join(&file.name) {
+                absolute_url = joined_url;
+            }
+            (absolute_url.to_string(), file.name, file.md5)
+        })
+        .collect::<Vec<_>>();
 
     // Download all files with integrated signal handling
     downloader::download_files(&client, download_data.clone(), download_data.len()).await?;
@@ -200,7 +212,8 @@ mod tests {
         assert!(validate_archive_url("https://example.com/details/test").is_err());
         assert!(validate_archive_url("http://archive.org/details/test").is_err());
         assert!(validate_archive_url("https://archive.org/details/test/extra").is_err());
-        assert!(validate_archive_url("https://archive.org/details/test//").is_err()); // Multiple trailing slashes
+        assert!(validate_archive_url("https://archive.org/details/test//").is_err());
+        // Multiple trailing slashes
     }
 
     #[test]
