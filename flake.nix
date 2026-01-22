@@ -14,7 +14,13 @@
   };
 
   # Flake outputs that other flakes can use
-  outputs = { self, flake-schemas, nixpkgs, rust-overlay }:
+  outputs =
+    {
+      self,
+      flake-schemas,
+      nixpkgs,
+      rust-overlay,
+    }:
     let
       meta = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package;
       lastModifiedDate = self.lastModifiedDate or self.lastModified or "19700101";
@@ -29,51 +35,64 @@
       ];
 
       # Helpers for producing system-specific outputs
-      supportedSystems = [ "x86_64-linux" "aarch64-darwin" "x86_64-darwin" "aarch64-linux" ];
-      forEachSupportedSystem = f: nixpkgs.lib.genAttrs supportedSystems (system: f {
-        pkgs = import nixpkgs { inherit overlays system; };
-      });
+      supportedSystems = [
+        "x86_64-linux"
+        "aarch64-darwin"
+        "x86_64-darwin"
+        "aarch64-linux"
+      ];
+      forEachSupportedSystem =
+        f:
+        nixpkgs.lib.genAttrs supportedSystems (
+          system:
+          f {
+            pkgs = import nixpkgs { inherit overlays system; };
+          }
+        );
     in
     {
       # Schemas tell Nix about the structure of your flake's outputs
       schemas = flake-schemas.schemas;
 
       # Development environments
-      devShells = forEachSupportedSystem ({ pkgs }: {
-        default = pkgs.mkShell {
-          # Pinned packages available in the environment
-          packages = with pkgs; [
-            rustToolchain
-            rust-analyzer
-            nixpkgs-fmt
-            git
-            gh
-            nodejs
-            cargo-watch
-            cargo-edit
-            clippy 
-            rustfmt
-          ];
+      devShells = forEachSupportedSystem (
+        { pkgs }:
+        {
+          default = pkgs.mkShell {
+            # Pinned packages available in the environment
+            packages = with pkgs; [
+              rustToolchain
+              rust-analyzer
+              nixpkgs-fmt
+              git
+              gh
+              nodejs
+              cargo-watch
+              cargo-edit
+              clippy
+              rustfmt
+            ];
 
-          # Environment variables that help with development
-          shellHook = ''
-            echo "🦀 Rust development environment loaded"
-            echo "📝 rust-analyzer tools available"
-            export RUST_BACKTRACE=1
-          '';
-        };
-      });
+            # Environment variables that help with development
+            shellHook = ''
+              echo "🦀 Rust development environment loaded"
+              echo "📝 rust-analyzer tools available"
+              export RUST_BACKTRACE=1
+            '';
+          };
+        }
+      );
 
       # Package outputs from the flake
-      packages = forEachSupportedSystem ({ pkgs }: {
-        default = pkgs.rustPlatform.buildRustPackage {
-          name = "${meta.name}-${version}";
-          src = self;
-          cargoLock.lockFile = ./Cargo.lock;
-          buildInputs =
-            pkgs.lib.optional pkgs.stdenv.isDarwin
-              (with pkgs.darwin.apple_sdk.frameworks; [ SystemConfiguration ]);
-        };
-      });
+      packages = forEachSupportedSystem (
+        { pkgs }:
+        {
+          default = pkgs.rustPlatform.buildRustPackage {
+            name = "${meta.name}-${version}";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+          };
+        }
+      );
     };
 }
