@@ -10,7 +10,7 @@ use colored::*;
 use ia_get::archive_metadata::{parse_xml_files, XmlFiles};
 use ia_get::constants::USER_AGENT;
 use ia_get::downloader;
-use ia_get::utils::{create_spinner, validate_archive_url};
+use ia_get::utils::{create_spinner, sanitize_filename, validate_archive_url};
 use ia_get::Result;
 use indicatif::ProgressStyle;
 use reqwest::Client; // Add this line
@@ -178,6 +178,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     spinner.finish();
 
     // Prepare download data for batch processing
+    let mut sanitized_count = 0;
     let download_data = files
         .files
         .into_iter()
@@ -186,9 +187,36 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             if let Ok(joined_url) = absolute_url.join(&file.name) {
                 absolute_url = joined_url;
             }
-            (absolute_url.to_string(), file.name, file.md5)
+
+            // Sanitize filename for filesystem compatibility
+            let (sanitized_name, was_modified) = sanitize_filename(&file.name);
+
+            // Warn user if filename was modified
+            if was_modified {
+                println!(
+                    "{} {} {} → {}",
+                    "⚠".yellow().bold(),
+                    "Sanitized:".yellow(),
+                    file.name.dimmed(),
+                    sanitized_name.bold()
+                );
+                sanitized_count += 1;
+            }
+
+            (absolute_url.to_string(), sanitized_name, file.md5)
         })
         .collect::<Vec<_>>();
+
+    // Show summary if any files were sanitized
+    if sanitized_count > 0 {
+        println!(
+            "\n{} {} {} file{} for filesystem compatibility",
+            "✓".green().bold(),
+            "Sanitized".bold(),
+            sanitized_count.to_string().bold(),
+            if sanitized_count == 1 { "" } else { "s" }
+        );
+    }
 
     // Download all files with integrated signal handling
     downloader::download_files(&client, download_data.clone(), download_data.len()).await?;
