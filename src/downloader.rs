@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use colored::*;
 use reqwest::header::{HeaderMap, HeaderValue};
-use reqwest::Client; // Add this line
+use reqwest::Client;
 
 use crate::error::IaGetError; // Import IaGetError for explicit error conversion
 use crate::utils::{create_progress_bar, format_duration, format_size, format_transfer_rate};

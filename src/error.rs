@@ -20,10 +20,6 @@ pub enum IaGetError {
     #[error("Invalid archive.org URL: {0}. Expected format: https://archive.org/details/<identifier>[/]")]
     UrlFormat(String),
 
-    /// MD5 hash verification failures
-    #[error("Hash verification failed: {0}")]
-    HashMismatch(String),
-
     /// XML parsing errors
     #[error("Failed to parse XML: {0}")]
     XmlParsing(String),
