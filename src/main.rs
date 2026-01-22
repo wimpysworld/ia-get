@@ -8,7 +8,7 @@
 use clap::Parser;
 use colored::*;
 use ia_get::archive_metadata::{parse_xml_files, XmlFiles};
-use ia_get::constants::USER_AGENT;
+use ia_get::constants::{HTTP_TIMEOUT, USER_AGENT};
 use ia_get::downloader;
 use ia_get::utils::{create_spinner, validate_archive_url};
 use ia_get::Result;
@@ -22,7 +22,7 @@ const CONNECTION_TIMEOUT_SECS: u64 = 600;
 async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
     let response = client
         .head(url)
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT))
         .send()
         .await?;
 
