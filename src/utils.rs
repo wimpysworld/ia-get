@@ -5,10 +5,15 @@ use crate::{IaGetError, Result};
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
-use std::sync::LazyLock; // Add this line
+use std::sync::LazyLock;
 
 /// Spinner tick interval in milliseconds
 pub const SPINNER_TICK_INTERVAL: u64 = 100;
+
+/// Size constants for formatting
+const KB: u64 = 1024;
+const MB: u64 = KB * 1024;
+const GB: u64 = MB * 1024;
 
 /// Compiled regex for URL validation (initialized once)
 static URL_REGEX: LazyLock<Regex> =
@@ -132,10 +137,6 @@ pub fn format_duration(duration: std::time::Duration) -> String {
 
 /// Format a size in bytes to a human-readable string
 pub fn format_size(size: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
     if size < KB {
         format!("{}B", size)
     } else if size < MB {
@@ -149,18 +150,18 @@ pub fn format_size(size: u64) -> String {
 
 /// Format transfer rate to appropriate units
 pub fn format_transfer_rate(bytes_per_sec: f64) -> (f64, &'static str) {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
+    let kb = KB as f64;
+    let mb = MB as f64;
+    let gb = GB as f64;
 
-    if bytes_per_sec < KB {
+    if bytes_per_sec < kb {
         (bytes_per_sec, "B")
-    } else if bytes_per_sec < MB {
-        (bytes_per_sec / KB, "KB")
-    } else if bytes_per_sec < GB {
-        (bytes_per_sec / MB, "MB")
+    } else if bytes_per_sec < mb {
+        (bytes_per_sec / kb, "KB")
+    } else if bytes_per_sec < gb {
+        (bytes_per_sec / mb, "MB")
     } else {
-        (bytes_per_sec / GB, "GB")
+        (bytes_per_sec / gb, "GB")
     }
 }
 
@@ -302,11 +303,6 @@ pub fn sanitize_filename(filename: &str) -> (String, bool) {
     if result.len() > 1 && result.ends_with('/') {
         result.pop();
         was_modified = true;
-    }
-
-    // Check if result differs from original
-    if !was_modified {
-        was_modified = result != filename;
     }
 
     (result, was_modified)

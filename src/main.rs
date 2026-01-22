@@ -13,7 +13,7 @@ use ia_get::downloader;
 use ia_get::utils::{create_spinner, sanitize_filename, validate_archive_url};
 use ia_get::Result;
 use indicatif::ProgressStyle;
-use reqwest::Client; // Add this line
+use reqwest::Client;
 
 /// Extended timeout for large file downloads (10 minutes for connection, no read timeout)
 const CONNECTION_TIMEOUT_SECS: u64 = 600;
