@@ -22,7 +22,7 @@ serde-xml-rs = "0.8.2"
 thiserror = "2.0.17"
 url = "2.5.4"
 clap = { version = "4.5.59", features = ["derive"] }
-ctrlc = "3.5.1"
+ctrlc = "3.5.2"
 colored = "3.0.0"
 
 [profile.release]
