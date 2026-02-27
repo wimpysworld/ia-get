@@ -10,7 +10,7 @@ use colored::*;
 use ia_get::archive_metadata::{parse_xml_files, XmlFiles};
 use ia_get::constants::USER_AGENT;
 use ia_get::downloader;
-use ia_get::utils::{create_spinner, sanitize_filename, validate_archive_url};
+use ia_get::utils::{create_spinner, sanitize_filename, validate_archive_url, format_size};
 use ia_get::Result;
 use indicatif::ProgressStyle;
 use reqwest::Client;
@@ -111,6 +111,23 @@ async fn fetch_xml_metadata(
     Ok((files, base_url))
 }
 
+/// Lists parsed filenames from XML metadata when --list/-l is used
+fn list_files(files: &XmlFiles, spinner: &indicatif::ProgressBar) {
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template(&format!(
+                "{} Archive has {} files",
+                "✔".green().bold(),
+                files.files.len().to_string().bold()
+            ))
+        .expect("Failed to set completion style"),
+    );
+    spinner.finish();
+    for file in &files.files {
+        println!("{:>9} {}", file.size.map(|n| format_size(n)).unwrap_or("???".to_string()), file.name.bold());
+    }
+}
+
 /// Command-line interface for ia-get
 #[derive(Parser)]
 #[command(name = "ia-get")]
@@ -120,6 +137,9 @@ async fn fetch_xml_metadata(
 struct Cli {
     /// URL to an archive.org details page
     url: String,
+    /// List files parsed from archive metadata XML and exit
+    #[arg(short = 'l', long = "list")]
+    list: bool,
 }
 
 /// Main application entry point
@@ -162,6 +182,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Fetch and parse XML metadata in one operation
     let (files, base_url) = fetch_xml_metadata(&cli.url, &client, &spinner).await?;
+
+    // If requested, list parsed filenames and exit
+    if cli.list {
+        list_files(&files, &spinner);
+        return Ok(());
+    }
 
     // Successfully finished initialization
     spinner.set_style(
