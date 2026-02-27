@@ -120,6 +120,9 @@ async fn fetch_xml_metadata(
 struct Cli {
     /// URL to an archive.org details page
     url: String,
+    /// List files parsed from archive metadata XML and exit
+    #[arg(long)]
+    list: bool,
 }
 
 /// Main application entry point
@@ -162,6 +165,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Fetch and parse XML metadata in one operation
     let (files, base_url) = fetch_xml_metadata(&cli.url, &client, &spinner).await?;
+
+    // If requested, list parsed filenames and exit
+    if cli.list {
+        spinner.finish();
+        for file in &files.files {
+            println!("{}", file.name);
+        }
+        return Ok(());
+    }
 
     // Successfully finished initialization
     spinner.set_style(
