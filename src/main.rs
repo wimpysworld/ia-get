@@ -124,7 +124,7 @@ fn list_files(files: &XmlFiles, spinner: &indicatif::ProgressBar) {
     );
     spinner.finish();
     for file in &files.files {
-        println!("{} {}", file.size.map(|n| format_size(n)).unwrap_or("???".to_string()), file.name.bold());
+        println!("{:>9} {}", file.size.map(|n| format_size(n)).unwrap_or("???".to_string()), file.name.bold());
     }
 }
 
