@@ -121,7 +121,7 @@ struct Cli {
     /// URL to an archive.org details page
     url: String,
     /// List files parsed from archive metadata XML and exit
-    #[arg(long)]
+    #[arg(short = 'l', long = "list")]
     list: bool,
 }
 
