@@ -10,7 +10,7 @@ use colored::*;
 use ia_get::archive_metadata::{parse_xml_files, XmlFiles};
 use ia_get::constants::USER_AGENT;
 use ia_get::downloader;
-use ia_get::utils::{create_spinner, sanitize_filename, validate_archive_url};
+use ia_get::utils::{create_spinner, sanitize_filename, validate_archive_url, format_size};
 use ia_get::Result;
 use indicatif::ProgressStyle;
 use reqwest::Client;
@@ -124,7 +124,7 @@ fn list_files(files: &XmlFiles, spinner: &indicatif::ProgressBar) {
     );
     spinner.finish();
     for file in &files.files {
-        println!("{} {}", file.size.map(|n| n.to_string()).unwrap_or("???".to_string()), file.name.bold());
+        println!("{} {}", file.size.map(|n| format_size(n)).unwrap_or("???".to_string()), file.name.bold());
     }
 }
 
