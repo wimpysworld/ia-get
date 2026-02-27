@@ -111,6 +111,23 @@ async fn fetch_xml_metadata(
     Ok((files, base_url))
 }
 
+/// Lists parsed filenames from XML metadata when --list/-l is used
+fn list_files(files: &XmlFiles, spinner: &indicatif::ProgressBar) {
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template(&format!(
+                "{} Archive has {} files",
+                "✔".green().bold(),
+                files.files.len().to_string().bold()
+            ))
+        .expect("Failed to set completion style"),
+    );
+    spinner.finish();
+    for file in &files.files {
+        println!("{}", file.name);
+    }
+}
+
 /// Command-line interface for ia-get
 #[derive(Parser)]
 #[command(name = "ia-get")]
@@ -168,19 +185,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // If requested, list parsed filenames and exit
     if cli.list {
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .template(&format!(
-                    "{} Archive has {} files",
-                    "✔".green().bold(),
-                    files.files.len().to_string().bold()
-                ))
-            .expect("Failed to set completion style"),
-        );
-        spinner.finish();
-        for file in &files.files {
-            println!("{}", file.name);
-        }
+        list_files(&files, &spinner);
         return Ok(());
     }
 
