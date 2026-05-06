@@ -19,6 +19,14 @@ Simply pass the URL of an [archive.org](https://archive.org) details page you wa
 ia-get https://archive.org/details/<identifier>
 ```
 
+Pass cookies for archive.org items that require a logged-in session.
+`--cookies`/`-b` accepts either a raw Cookie header string or a Netscape `cookies.txt` file exported from your browser.
+
+```shell
+ia-get --cookies cookies.txt https://archive.org/details/<identifier>
+ia-get -b 'logged-in-user=...; logged-in-sig=...' https://archive.org/details/<identifier>
+```
+
 Preview the files first with `--list` or `-l`.
 This lists the names and sizes reported by archive.org metadata without downloading anything.
 If archive.org does not provide a size for an entry, `ia-get` reports it as `unknown` and excludes it from the total known size.
