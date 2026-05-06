@@ -14,7 +14,7 @@ use ia_get::utils::{create_spinner, format_size, sanitize_filename, validate_arc
 use ia_get::Result;
 use indicatif::ProgressStyle;
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
-use reqwest::Client;
+use reqwest::{Client, Url};
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,9 +23,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const CONNECTION_TIMEOUT_SECS: u64 = 600;
 
 /// Checks if a URL is accessible by sending a HEAD request
-async fn is_url_accessible(url: &str, client: &Client) -> Result<()> {
-    let response = client
-        .head(url)
+async fn is_url_accessible(url: &Url, client: &Client, cookie_input: Option<&str>) -> Result<()> {
+    let mut request = client.head(url.clone());
+    if let Some(cookie_header) = cookie_header_value(cookie_input, url)? {
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, cookie_header);
+        request = request.headers(headers);
+    }
+
+    let response = request
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await?;
@@ -63,18 +69,96 @@ fn get_xml_url(original_url: &str) -> String {
     format!("{}/{}_files.xml", download_url_base, identifier)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NetscapeCookie {
+    domain: String,
+    include_subdomains: bool,
+    path: String,
+    secure: bool,
+    expires: Option<u64>,
+    name: String,
+    value: String,
+}
+
 /// Builds an HTTP Cookie header value from a raw cookie string or cookies.txt path.
-fn cookie_header_from_input(input: &str) -> Result<String> {
+fn cookie_header_from_input(input: &str, url: &Url) -> Result<String> {
     if Path::new(input).is_file() {
         let cookie_file = fs::read_to_string(input)?;
-        cookie_header_from_netscape_file(&cookie_file)
+        cookie_header_from_netscape_file(&cookie_file, url)
     } else {
         Ok(input.trim().to_string())
     }
 }
 
+fn parse_netscape_cookie(line: &str) -> Option<NetscapeCookie> {
+    let line = line.trim();
+    let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+
+    let fields = line.split('\t').collect::<Vec<_>>();
+    if fields.len() < 7 {
+        return None;
+    }
+
+    let expires = match fields[4].parse::<u64>().unwrap_or(0) {
+        0 => None,
+        value => Some(value),
+    };
+
+    Some(NetscapeCookie {
+        domain: fields[0].trim_start_matches('.').to_ascii_lowercase(),
+        include_subdomains: fields[1].eq_ignore_ascii_case("TRUE"),
+        path: fields[2].to_string(),
+        secure: fields[3].eq_ignore_ascii_case("TRUE"),
+        expires,
+        name: fields[5].to_string(),
+        value: fields[6].to_string(),
+    })
+}
+
+fn cookie_domain_matches(cookie: &NetscapeCookie, url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+
+    let host = host.to_ascii_lowercase();
+    host == cookie.domain
+        || (cookie.include_subdomains && host.ends_with(&format!(".{}", cookie.domain)))
+}
+
+fn cookie_path_matches(cookie: &NetscapeCookie, url: &Url) -> bool {
+    let cookie_path = if cookie.path.is_empty() {
+        "/"
+    } else {
+        &cookie.path
+    };
+    let request_path = url.path();
+
+    request_path == cookie_path
+        || request_path
+            .strip_prefix(cookie_path)
+            .is_some_and(|remainder| cookie_path.ends_with('/') || remainder.starts_with('/'))
+}
+
+fn cookie_applies_to_url(cookie: &NetscapeCookie, url: &Url, now: u64) -> bool {
+    if let Some(expires) = cookie.expires {
+        if expires <= now {
+            return false;
+        }
+    }
+
+    if cookie.secure && url.scheme() != "https" {
+        return false;
+    }
+
+    cookie_domain_matches(cookie, url) && cookie_path_matches(cookie, url)
+}
+
 /// Parses Netscape cookies.txt content into an HTTP Cookie header value.
-fn cookie_header_from_netscape_file(content: &str) -> Result<String> {
+fn cookie_header_from_netscape_file(content: &str, url: &Url) -> Result<String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| ia_get::IaGetError::FileSystem(e.to_string()))?
@@ -82,46 +166,27 @@ fn cookie_header_from_netscape_file(content: &str) -> Result<String> {
 
     let cookies = content
         .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
-
-            if line.is_empty() || line.starts_with('#') {
-                return None;
-            }
-
-            let fields = line.split('\t').collect::<Vec<_>>();
-            if fields.len() < 7 {
-                return None;
-            }
-
-            let expires = fields[4].parse::<u64>().unwrap_or(0);
-            if expires != 0 && expires <= now {
-                return None;
-            }
-
-            Some(format!("{}={}", fields[5], fields[6]))
-        })
+        .filter_map(parse_netscape_cookie)
+        .filter(|cookie| cookie_applies_to_url(cookie, url, now))
+        .map(|cookie| format!("{}={}", cookie.name, cookie.value))
         .collect::<Vec<_>>();
 
     Ok(cookies.join("; "))
 }
 
-/// Creates default request headers for authenticated archive.org access.
-fn default_headers(cookie_input: Option<&str>) -> Result<HeaderMap> {
-    let mut headers = HeaderMap::new();
+fn cookie_header_value(cookie_input: Option<&str>, url: &Url) -> Result<Option<HeaderValue>> {
+    let Some(cookie_input) = cookie_input else {
+        return Ok(None);
+    };
 
-    if let Some(cookie_input) = cookie_input {
-        let cookie_header = cookie_header_from_input(cookie_input)?;
-        if !cookie_header.is_empty() {
-            let value = HeaderValue::from_str(&cookie_header).map_err(|e| {
-                ia_get::IaGetError::Network(format!("Invalid cookie header: {}", e))
-            })?;
-            headers.insert(COOKIE, value);
-        }
+    let cookie_header = cookie_header_from_input(cookie_input, url)?;
+    if cookie_header.is_empty() {
+        return Ok(None);
     }
 
-    Ok(headers)
+    let value = HeaderValue::from_str(&cookie_header)
+        .map_err(|e| ia_get::IaGetError::Network(format!("Invalid cookie header: {}", e)))?;
+    Ok(Some(value))
 }
 
 /// Fetches and parses XML metadata from archive.org
@@ -140,7 +205,8 @@ async fn fetch_xml_metadata(
     details_url: &str,
     client: &Client,
     spinner: &indicatif::ProgressBar,
-) -> Result<(XmlFiles, reqwest::Url)> {
+    cookie_input: Option<&str>,
+) -> Result<(XmlFiles, reqwest::Url, Option<String>)> {
     // Generate XML URL
     let xml_url = get_xml_url(details_url);
     spinner.set_message(format!(
@@ -149,8 +215,15 @@ async fn fetch_xml_metadata(
         xml_url.bold()
     ));
 
+    // Parse base URL and fetch XML content
+    let base_url = reqwest::Url::parse(&xml_url)?;
+    let download_cookie_header = cookie_input
+        .map(|input| cookie_header_from_input(input, &base_url))
+        .transpose()?
+        .filter(|header| !header.is_empty());
+
     // Check XML URL accessibility
-    if let Err(e) = is_url_accessible(&xml_url, client).await {
+    if let Err(e) = is_url_accessible(&base_url, client, cookie_input).await {
         spinner.finish_with_message(format!(
             "{} XML metadata not accessible: {}",
             "✘".red().bold(),
@@ -165,15 +238,25 @@ async fn fetch_xml_metadata(
         "Parsing archive metadata...".bold()
     ));
 
-    // Parse base URL and fetch XML content
-    let base_url = reqwest::Url::parse(&xml_url)?;
-    let response = client.get(&xml_url).send().await?;
+    let mut request = client.get(base_url.clone());
+    if let Some(cookie_header) = download_cookie_header.as_deref() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_str(cookie_header).map_err(|e| {
+                ia_get::IaGetError::Network(format!("Invalid cookie header: {}", e))
+            })?,
+        );
+        request = request.headers(headers);
+    }
+
+    let response = request.send().await?;
     let xml_content = response.text().await?;
 
     // Parse XML content with improved error handling
     let files = parse_xml_files(&xml_content)?;
 
-    Ok((files, base_url))
+    Ok((files, base_url, download_cookie_header))
 }
 
 /// Return formatted file rows for `--list` output.
@@ -273,7 +356,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // may take a long time to transfer
     let client = Client::builder()
         .user_agent(USER_AGENT)
-        .default_headers(default_headers(cli.cookies.as_deref())?)
         .connect_timeout(std::time::Duration::from_secs(CONNECTION_TIMEOUT_SECS))
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .pool_max_idle_per_host(1)
@@ -289,8 +371,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Err(e.into());
     }
 
+    let details_url = Url::parse(&cli.url)?;
+
     // Check URL accessibility
-    if let Err(e) = is_url_accessible(&cli.url, &client).await {
+    if let Err(e) = is_url_accessible(&details_url, &client, cli.cookies.as_deref()).await {
         spinner.finish_with_message(format!(
             "{} Archive.org URL not accessible: {}",
             "✘".red().bold(),
@@ -300,7 +384,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
 
     // Fetch and parse XML metadata in one operation
-    let (files, base_url) = fetch_xml_metadata(&cli.url, &client, &spinner).await?;
+    let (files, base_url, download_cookie_header) =
+        fetch_xml_metadata(&cli.url, &client, &spinner, cli.cookies.as_deref()).await?;
 
     // If requested, list parsed filenames and exit
     if cli.list {
@@ -364,7 +449,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
 
     // Download all files with integrated signal handling
-    downloader::download_files(&client, download_data.clone(), download_data.len()).await?;
+    downloader::download_files(
+        &client,
+        download_data.clone(),
+        download_data.len(),
+        download_cookie_header.as_deref(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -417,10 +508,18 @@ mod tests {
         );
     }
 
+    fn cookie_test_url(path: &str) -> Url {
+        Url::parse(&format!("https://archive.org{path}")).unwrap()
+    }
+
     #[test]
     fn cookie_header_accepts_raw_cookie_string() {
         assert_eq!(
-            cookie_header_from_input("logged-in-user=yes; logged-in-sig=abc123").unwrap(),
+            cookie_header_from_input(
+                "logged-in-user=yes; logged-in-sig=abc123",
+                &cookie_test_url("/download/item/item_files.xml"),
+            )
+            .unwrap(),
             "logged-in-user=yes; logged-in-sig=abc123"
         );
     }
@@ -432,8 +531,36 @@ mod tests {
 archive.org\tFALSE\t/\tTRUE\t2145916800\tlogged-in-sig\tabc123\n";
 
         assert_eq!(
-            cookie_header_from_netscape_file(cookies).unwrap(),
+            cookie_header_from_netscape_file(
+                cookies,
+                &cookie_test_url("/download/item/item_files.xml")
+            )
+            .unwrap(),
             "logged-in-user=yes; logged-in-sig=abc123"
+        );
+    }
+
+    #[test]
+    fn cookie_header_respects_domain_and_path_scoping() {
+        let cookies = "# Netscape HTTP Cookie File\n\
+.archive.org\tTRUE\t/download\tFALSE\t2145916800\tdownload-root\tyes\n\
+archive.org\tFALSE\t/account\tFALSE\t2145916800\taccount-only\tnope\n\
+example.com\tFALSE\t/download\tFALSE\t2145916800\twrong-domain\tnope\n\
+archive.org\tFALSE\t/download/private\tFALSE\t2145916800\tprivate-only\tsecret\n";
+
+        assert_eq!(
+            cookie_header_from_netscape_file(cookies, &cookie_test_url("/download/item/file.zip"))
+                .unwrap(),
+            "download-root=yes"
+        );
+
+        assert_eq!(
+            cookie_header_from_netscape_file(
+                cookies,
+                &cookie_test_url("/download/private/file.zip")
+            )
+            .unwrap(),
+            "download-root=yes; private-only=secret"
         );
     }
 
@@ -443,7 +570,11 @@ archive.org\tFALSE\t/\tTRUE\t2145916800\tlogged-in-sig\tabc123\n";
 archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
 
         assert_eq!(
-            cookie_header_from_netscape_file(cookies).unwrap(),
+            cookie_header_from_netscape_file(
+                cookies,
+                &cookie_test_url("/download/item/item_files.xml")
+            )
+            .unwrap(),
             "current=value"
         );
     }
