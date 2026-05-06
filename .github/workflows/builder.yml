@@ -1,0 +1,276 @@
+name: Builder 👷
+
+on:
+  push:
+    branches: [main]
+    tags: ["*.*.*"]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 9 * * 0" # Weekly
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-code:
+    name: Lint Code 🧹
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Installing Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  lint-actions:
+    name: Lint Action ⚙️
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: freerangebytes/setup-actionlint@v0.1.1
+      - name: Run actionlint
+        run: |
+          echo "::add-matcher::.github/actionlint-matcher.json"
+          actionlint -color
+
+  test:
+    name: Test 🧪
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-24.04
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - os: darwin
+            arch: amd64
+            runner: macos-15-intel
+          - os: darwin
+            arch: arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Installing Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: cargo test
+      - name: Build release
+        run: cargo build --release
+
+  security:
+    name: Security 🔒
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/dependency-review-action@v4
+        if: github.event_name == 'pull_request'
+        with:
+          fail-on-severity: moderate
+          fail-on-scopes: runtime
+          comment-summary-in-pr: on-failure
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit Rust dependencies
+        run: cargo audit
+
+  nix:
+    name: Nix ❄️
+    uses: DeterminateSystems/ci/.github/workflows/workflow.yml@main
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      visibility: public
+
+  sentinel:
+    name: Sentinel 👁️
+    needs: [lint-code, lint-actions, test, security, nix]
+    if: always()
+    runs-on: ubuntu-slim
+    permissions: {}
+    steps:
+      - name: Check results
+        run: |
+          results='${{ toJSON(needs.*.result) }}'
+          echo "Job results: ${results}"
+          if echo "${results}" | jq -e 'any(. == "failure" or . == "cancelled")' > /dev/null 2>&1; then
+            echo "One or more jobs failed or were cancelled"
+            exit 1
+          fi
+          echo "All jobs passed"
+
+  build:
+    name: Build ${{ matrix.job.target }}
+    needs: [sentinel]
+    if: always() && needs.sentinel.result == 'success' && github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            use-cross: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            use-cross: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            use-cross: false
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use-cross: false
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use-cross: true
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            use-cross: true
+          - os: ubuntu-latest
+            target: arm-unknown-linux-gnueabihf
+            use-cross: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            use-cross: true
+    runs-on: ${{ matrix.job.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Installing Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.job.target }}
+      - name: Install cross
+        if: matrix.job.use-cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Install packaging tools
+        if: runner.os == 'Linux'
+        run: |
+          DEBIAN_FRONTEND=noninteractive sudo apt-get -y update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get -y install dpkg-dev fakeroot
+          if [[ "${{ matrix.job.target }}" == "arm-unknown-linux-gnueabihf" ]]; then
+            DEBIAN_FRONTEND=noninteractive sudo apt-get -y install binutils-arm-linux-gnueabihf
+          fi
+          if [[ "${{ matrix.job.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            DEBIAN_FRONTEND=noninteractive sudo apt-get -y install binutils-aarch64-linux-gnu
+          fi
+      - name: Cargo build
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.job.target == 'aarch64-apple-darwin' && '11.0' || (matrix.job.target == 'x86_64-apple-darwin' && '10.15' || '') }}
+        run: |
+          if [[ "${{ matrix.job.use-cross }}" == "true" ]]; then
+            cross build --release --target ${{ matrix.job.target }}
+          else
+            cargo build --release --target ${{ matrix.job.target }}
+          fi
+      - name: Get package version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Package final binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.job.target }}
+          PROJECT_NAME: ia-get
+          PACKAGE_NAME: ia-get
+          OS_NAME: ${{ matrix.job.os }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: ./.github/workflows/before_deploy.sh
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ia-get-${{ matrix.job.target }}
+          path: |
+            ia-get-*-${{ matrix.job.target }}.*
+            ia-get*.deb
+
+  release:
+    name: Release 📦
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+      - name: Generate changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            echo "## Changes since $PREV_TAG" > CHANGELOG.md
+            git log "$PREV_TAG"..HEAD --pretty=format:"* %s (%h)" >> CHANGELOG.md
+          else
+            echo "## Initial Release" > CHANGELOG.md
+            git log --pretty=format:"* %s (%h)" >> CHANGELOG.md
+          fi
+
+          cat >> CHANGELOG.md << 'NOTES'
+
+          ## Installation
+
+          Download the appropriate binary for your platform below, extract it, make it executable, and move it to your PATH.
+
+          ## Checksums
+
+          SHA256 checksums are provided by GitHub release assets.
+          NOTES
+
+          cat CHANGELOG.md
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: ia-get-*
+          merge-multiple: true
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ia-get ${{ steps.version.outputs.version }}
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: false
+          files: artifacts/*
