@@ -3,15 +3,35 @@
 
 set -ex
 
+release_version() {
+    if [[ -n "${VERSION:-}" ]]; then
+        printf '%s\n' "$VERSION"
+    elif [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+        printf '%s\n' "${GITHUB_REF#refs/tags/}"
+    else
+        printf '%s\n' "dev"
+    fi
+}
+
+binary_name() {
+    if [[ "$OS_NAME" == windows-latest ]]; then
+        printf '%s.exe\n' "$PROJECT_NAME"
+    else
+        printf '%s\n' "$PROJECT_NAME"
+    fi
+}
+
 pack() {
     local tempdir
     local out_dir
     local package_name
     local gcc_prefix
+    local bin_name
 
     tempdir=$(mktemp -d 2>/dev/null || mktemp -d -t tmp)
     out_dir=$(pwd)
-    package_name="$PROJECT_NAME-${GITHUB_REF/refs\/tags\//}-$TARGET"
+    package_name="$PROJECT_NAME-$(release_version)-$TARGET"
+    bin_name=$(binary_name)
 
     if [[ $TARGET == "arm-unknown-linux-gnueabihf" ]]; then
         gcc_prefix="arm-linux-gnueabihf-"
@@ -25,7 +45,7 @@ pack() {
     mkdir "$tempdir/$package_name"
 
     # copying the main binary
-    cp "target/$TARGET/release/$PROJECT_NAME" "$tempdir/$package_name/"
+    cp "target/$TARGET/release/$bin_name" "$tempdir/$package_name/"
     if [ "$OS_NAME" != windows-latest ]; then
         "${gcc_prefix}"strip "$tempdir/$package_name/$PROJECT_NAME"
     fi
@@ -85,7 +105,7 @@ make_deb() {
             return 0
             ;;
     esac
-    version=${GITHUB_REF/refs\/tags\//}
+    version=$(release_version)
 
     if [[ $TARGET = *musl* ]]; then
       dpkgname=$PACKAGE_NAME-musl
