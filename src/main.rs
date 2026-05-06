@@ -10,7 +10,7 @@ use colored::*;
 use ia_get::archive_metadata::{parse_xml_files, XmlFiles};
 use ia_get::constants::USER_AGENT;
 use ia_get::downloader;
-use ia_get::utils::{create_spinner, sanitize_filename, validate_archive_url, format_size};
+use ia_get::utils::{create_spinner, format_size, sanitize_filename, validate_archive_url};
 use ia_get::Result;
 use indicatif::ProgressStyle;
 use reqwest::Client;
@@ -111,20 +111,70 @@ async fn fetch_xml_metadata(
     Ok((files, base_url))
 }
 
+/// Return formatted file rows for `--list` output.
+fn list_file_rows(files: &XmlFiles) -> Vec<String> {
+    files
+        .files
+        .iter()
+        .map(|file| {
+            let size = file
+                .size
+                .map(format_size)
+                .unwrap_or_else(|| "unknown".to_string());
+            format!("{size:>9} {}", file.name)
+        })
+        .collect()
+}
+
+/// Return a summary for `--list` output.
+fn list_summary(files: &XmlFiles) -> String {
+    let total_known_size: u64 = files.files.iter().filter_map(|file| file.size).sum();
+    let unknown_size_count = files
+        .files
+        .iter()
+        .filter(|file| file.size.is_none())
+        .count();
+    let file_label = if files.files.len() == 1 {
+        "file"
+    } else {
+        "files"
+    };
+
+    if unknown_size_count == 0 {
+        format!(
+            "{} {file_label}, {} total",
+            files.files.len(),
+            format_size(total_known_size)
+        )
+    } else {
+        let unknown_label = if unknown_size_count == 1 {
+            "unknown size"
+        } else {
+            "unknown sizes"
+        };
+        format!(
+            "{} {file_label}, {} total known size, {} {unknown_label}",
+            files.files.len(),
+            format_size(total_known_size),
+            unknown_size_count
+        )
+    }
+}
+
 /// Lists parsed filenames from XML metadata when --list/-l is used
 fn list_files(files: &XmlFiles, spinner: &indicatif::ProgressBar) {
     spinner.set_style(
         ProgressStyle::default_spinner()
             .template(&format!(
-                "{} Archive has {} files",
+                "{} Archive has {}",
                 "✔".green().bold(),
-                files.files.len().to_string().bold()
+                list_summary(files).bold()
             ))
-        .expect("Failed to set completion style"),
+            .expect("Failed to set completion style"),
     );
     spinner.finish();
-    for file in &files.files {
-        println!("{:>9} {}", file.size.map(|n| format_size(n)).unwrap_or("???".to_string()), file.name.bold());
+    for row in list_file_rows(files) {
+        println!("{row}");
     }
 }
 
@@ -295,6 +345,57 @@ mod tests {
         assert_eq!(
             get_xml_url("https://archive.org/details/another-item_v2.0/"), // With trailing slash
             "https://archive.org/download/another-item_v2.0/another-item_v2.0_files.xml"
+        );
+    }
+
+    fn xml_file(name: &str, size: Option<u64>) -> ia_get::archive_metadata::XmlFile {
+        ia_get::archive_metadata::XmlFile {
+            name: name.to_string(),
+            source: "original".to_string(),
+            mtime: None,
+            size,
+            format: None,
+            rotation: None,
+            md5: None,
+            crc32: None,
+            sha1: None,
+            btih: None,
+            summation: None,
+            original: None,
+        }
+    }
+
+    #[test]
+    fn list_file_rows_format_sizes_and_unknown_entries() {
+        let files = XmlFiles {
+            files: vec![
+                xml_file("cover.jpg", Some(12_345)),
+                xml_file("metadata.xml", None),
+            ],
+        };
+
+        assert_eq!(
+            list_file_rows(&files),
+            vec![
+                "  12.06KB cover.jpg".to_string(),
+                "  unknown metadata.xml".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_summary_reports_total_known_size_and_unknown_count() {
+        let files = XmlFiles {
+            files: vec![
+                xml_file("disk1.zip", Some(1_048_576)),
+                xml_file("disk2.zip", Some(2_097_152)),
+                xml_file("notes.txt", None),
+            ],
+        };
+
+        assert_eq!(
+            list_summary(&files),
+            "3 files, 3.00MB total known size, 1 unknown size"
         );
     }
 }

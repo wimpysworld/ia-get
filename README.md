@@ -19,6 +19,15 @@ Simply pass the URL of an [archive.org](https://archive.org) details page you wa
 ia-get https://archive.org/details/<identifier>
 ```
 
+Preview the files first with `--list` or `-l`.
+This lists the names and sizes reported by archive.org metadata without downloading anything.
+If archive.org does not provide a size for an entry, `ia-get` reports it as `unknown` and excludes it from the total known size.
+
+```shell
+ia-get --list https://archive.org/details/<identifier>
+ia-get -l https://archive.org/details/<identifier>
+```
+
 ## Why? 🤔💭
 
 I wanted to download high-quality scans of [ZZap!64 magazine](https://en.wikipedia.org/wiki/Zzap!64) and some read-only memory from archive.org.
