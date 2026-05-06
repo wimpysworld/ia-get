@@ -165,6 +165,7 @@ async fn download_file_content(
     url: &str,
     file: &mut File,
     running: &Arc<AtomicBool>,
+    cookie_header: Option<&str>,
 ) -> Result<u64> {
     let mut retry_count = 0;
 
@@ -178,6 +179,14 @@ async fn download_file_content(
         };
 
         let mut headers = HeaderMap::new();
+        if let Some(cookie_header) = cookie_header {
+            headers.insert(
+                reqwest::header::COOKIE,
+                HeaderValue::from_str(cookie_header).map_err(|e| {
+                    IaGetError::Network(format!("Invalid cookie header value: {}", e))
+                })?,
+            );
+        }
         if current_file_size > 0 {
             // Use IaGetError::Network for header parsing errors
             headers.insert(
@@ -188,12 +197,12 @@ async fn download_file_content(
             );
         }
 
-        // Try to send the request with retry logic
-        let mut response = match if current_file_size > 0 {
-            client.get(url).headers(headers).send().await
-        } else {
-            client.get(url).send().await
-        } {
+        let mut request = client.get(url);
+        if !headers.is_empty() {
+            request = request.headers(headers);
+        }
+
+        let mut response = match request.send().await {
             Ok(resp) => resp,
             Err(e) => {
                 // Request failed before we even got a response
@@ -399,7 +408,12 @@ fn verify_downloaded_file(
 ///
 /// This function sets up signal handling once for the entire download session
 /// and allows for graceful interruption between files.
-pub async fn download_files<I>(client: &Client, files: I, total_files: usize) -> Result<()>
+pub async fn download_files<I>(
+    client: &Client,
+    files: I,
+    total_files: usize,
+    cookie_header: Option<&str>,
+) -> Result<()>
 where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
 {
@@ -456,7 +470,7 @@ where
 
         let mut file = prepare_file_for_download(&file_path)?;
 
-        download_file_content(client, &url, &mut file, &running).await?;
+        download_file_content(client, &url, &mut file, &running, cookie_header).await?;
         verify_downloaded_file(&file_path, expected_md5.as_deref(), &running)?;
     }
 
