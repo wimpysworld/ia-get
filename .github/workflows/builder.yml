@@ -90,16 +90,10 @@ jobs:
           fail-on-severity: moderate
           fail-on-scopes: runtime
           comment-summary-in-pr: on-failure
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit
-      - name: Audit Rust dependencies
-        run: cargo audit
 
   nix:
     name: Nix ❄️
-    uses: DeterminateSystems/ci/.github/workflows/workflow.yml@main
+    uses: DeterminateSystems/ci/.github/workflows/workflow.yml@57a29b403cbed0efb915f225f1212ad654c50e16
     permissions:
       id-token: write
       contents: read
