@@ -85,7 +85,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Install cargo-audit
-        uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2
+        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154 # v2
         with:
           tool: cargo-audit
       - name: Audit Rust dependencies
@@ -168,7 +168,7 @@ jobs:
           targets: ${{ matrix.job.target }}
       - name: Install cross
         if: matrix.job.use-cross
-        uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2
+        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154 # v2
         with:
           tool: cross
       - name: Install packaging tools
