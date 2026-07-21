@@ -40,7 +40,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
-      - uses: freerangebytes/setup-actionlint@fbad42719bf03f8edd31dc02d5ec387cb26b6ed0 # v0.1.1
+      - uses: freerangebytes/setup-actionlint@32c8a5082cfc12c6aa71aeb22496372ea6ea15df # v0.1.2
       - name: Run actionlint
         run: |
           echo "::add-matcher::.github/actionlint-matcher.json"
