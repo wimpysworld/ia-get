@@ -64,6 +64,9 @@ jobs:
           - os: darwin
             arch: arm64
             runner: macos-15
+          - os: windows
+            arch: amd64
+            runner: windows-latest
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read

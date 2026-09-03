@@ -7,16 +7,23 @@ authors = ["Martin Wimpress <code@wimpress.io>"]
 repository = "https://github.com/wimpysworld/ia-get"
 readme = "README.md"
 version = "0.1.4"
-edition = "2021"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+httpdate = "1.0.2"
 indicatif = "0.18.4"
-md5 = "0.8.0"
+# RustCrypto's md-5 (with the digest trait for incremental hashing): the old
+# unmaintained md5 crate is replaced; the hash is used for integrity checks
+# only, never for security.
+md-5 = "0.11.0"
+digest = "0.11.3"
 regex = "1.12.4"
 reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls"] }
-tokio = { version = "1.50.0", features = ["full"] }
+# Only the features ia-get itself uses: the multi-thread runtime for
+# #[tokio::main] (macros, rt-multi-thread) and timers for retry backoff.
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "time"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde-xml-rs = "0.8.2"
 thiserror = "2.0.17"
@@ -24,6 +31,10 @@ url = "2.5.4"
 clap = { version = "4.6.1", features = ["derive"] }
 ctrlc = "3.5.2"
 colored = "3.0.0"
+# Free/total space of the volume a path lives on: the only portable,
+# well-maintained way to get it (std has no such API).
+fs2 = "0.4"
+filetime = "0.2"
 
 [profile.release]
 strip = true  # Automatically strip symbols from the binary.

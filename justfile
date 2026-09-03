@@ -1,4 +1,7 @@
 # ia-get - Just Commands
+#
+# The `version`, `changelog`, and `release` recipes require a POSIX shell
+# (bash). Other recipes work with the default system shell.
 
 # List commands
 default:
