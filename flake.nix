@@ -60,25 +60,29 @@
         {
           default = pkgs.mkShell {
             # Pinned packages available in the environment
-            packages = with pkgs; [
-              rustToolchain
-              rust-analyzer
-              nixpkgs-fmt
-              git
-              gh
-              nodejs
-              cargo-watch
-              cargo-edit
-              clippy
-              rustfmt
-            ];
+            packages =
+              (with pkgs; [
+                rustToolchain
+                rust-analyzer
+                nixpkgs-fmt
+                git
+                gh
+                nodejs
+                cargo-watch
+                cargo-edit
+                clippy
+                rustfmt
+              ])
+              ++ import ./nix/loader.nix { inherit pkgs; };
 
             # Environment variables that help with development
-            shellHook = ''
-              echo "🦀 Rust development environment loaded"
-              echo "📝 rust-analyzer tools available"
-              export RUST_BACKTRACE=1
-            '';
+            shellHook =
+              (import ./nix/hooks.nix { inherit pkgs; })
+              + ''
+                echo "🦀 Rust development environment loaded"
+                echo "📝 rust-analyzer tools available"
+                export RUST_BACKTRACE=1
+              '';
           };
         }
       );

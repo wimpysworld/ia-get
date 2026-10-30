@@ -1,5 +1,7 @@
 # ia-get - Just Commands
 
+import 'just/loader.just'
+
 # List commands
 default:
     @just --list
