@@ -175,6 +175,9 @@ labels:
 #   - name: RELEASE_SUFFIX
 #     value: ""
 
+languages:
+  rust: true
+
 swatches:
   - path: .github/dependabot.yml
     alteration: first-fit

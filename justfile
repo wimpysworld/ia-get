@@ -1,12 +1,11 @@
 # ia-get - Just Commands
 
+set allow-duplicate-recipes
+import 'just/loader.just'
+
 # List commands
 default:
     @just --list
-
-# Build ia-get
-build:
-    cargo build
 
 # Build release binary
 release-build:
@@ -73,19 +72,7 @@ release VERSION:
     echo "To publish the release:"
     echo "  git push origin {{VERSION}}"
     echo ""
-    echo "This will trigger the GitHub Actions release workflow which will:"
-    echo "  - Run the sentinel-gated Builder workflow"
-    echo "  - Build binaries for all platforms"
-    echo "  - Build Linux .deb packages"
-    echo "  - Create GitHub release with downloadable assets"
-
-# Run tests
-test:
-    cargo test
-
-# Run clippy lints
-lint:
-    cargo clippy --all-targets --all-features -- -D warnings
+    echo "This triggers the Builder workflow, which builds and publishes the release with GoReleaser."
 
 # Format code
 fmt:
