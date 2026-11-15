@@ -1,4 +1,5 @@
 .direnv/
 /target
+/dist/
 result*
 test/

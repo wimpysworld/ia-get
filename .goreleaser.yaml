@@ -1,0 +1,109 @@
+version: 2
+
+project_name: ia-get
+
+git:
+  ignore_tags:
+    - latest
+
+# Each platform builds on its own runner, because the darwin targets need the
+# macOS SDK and the Windows targets need MSVC. TARGET selects the build that
+# runs. The release job leaves TARGET unset, skips every build, and releases
+# the runner outputs from ./artifacts.
+builds:
+  # Static musl binaries, so that every Linux package runs without a glibc floor.
+  - id: linux
+    builder: rust
+    binary: ia-get
+    command: zigbuild
+    targets:
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
+    flags:
+      - --release
+      - --locked
+    skip: '{{ ne (index .Env "TARGET") "linux" }}'
+  - id: darwin
+    builder: rust
+    binary: ia-get
+    command: build
+    targets:
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+    flags:
+      - --release
+      - --locked
+    skip: '{{ ne (index .Env "TARGET") "darwin" }}'
+  - id: windows
+    builder: rust
+    binary: ia-get
+    command: build
+    targets:
+      - x86_64-pc-windows-msvc
+      - aarch64-pc-windows-msvc
+    flags:
+      - --release
+      - --locked
+    skip: '{{ ne (index .Env "TARGET") "windows" }}'
+
+archives:
+  - id: bare
+    formats:
+      - binary
+    name_template: "{{ .Binary }}-{{ .Os }}-{{ .Arch }}"
+
+nfpms:
+  - id: packages
+    ids:
+      - linux
+    vendor: Martin Wimpress
+    maintainer: "Martin Wimpress <code@wimpress.io>"
+    description: "File downloader for archive.org"
+    homepage: https://github.com/wimpysworld/ia-get
+    license: MIT
+    file_name_template: "{{ .ConventionalFileName }}"
+    bindir: /usr/bin
+    formats:
+      - deb
+      - rpm
+      - apk
+      - archlinux
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  extra_files:
+    - glob: ./artifacts/*
+
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--bundle=${signature}"
+      - "${artifact}"
+
+changelog:
+  sort: asc
+
+retry:
+  attempts: 5
+  delay: 10s
+  max_delay: 2m
+
+release:
+  prerelease: auto
+  extra_files:
+    - glob: ./artifacts/*
+  footer: |
+    ## Install
+
+    - Debian and Ubuntu: [apt.wimpys.world](https://apt.wimpys.world/#ia-get)
+    - Fedora and openSUSE: [rpm.wimpys.world](https://rpm.wimpys.world/#ia-get)
+    - Arch Linux: [pkg.wimpys.world](https://pkg.wimpys.world/#ia-get)
+    - Alpine Linux: [apk.wimpys.world](https://apk.wimpys.world/#ia-get)
+    - macOS (Homebrew): [brew.wimpys.world](https://brew.wimpys.world/#ia-get)
+    - Windows (Scoop): [scoop.wimpys.world](https://scoop.wimpys.world/#ia-get)
+    - Nix and NixOS: [nix.wimpys.world](https://nix.wimpys.world/#ia-get)
+    - Any platform, with [bin](https://github.com/marcosnils/bin): `bin install github.com/wimpysworld/ia-get`

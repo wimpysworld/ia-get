@@ -124,40 +124,31 @@ jobs:
           echo "All jobs passed"
 
   build:
-    name: Build ${{ matrix.job.target }}
+    name: Build ${{ matrix.os }}
     needs: [sentinel]
     if: always() && needs.sentinel.result == 'success' && github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
-        job:
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            use-cross: false
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            use-cross: false
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            use-cross: false
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            use-cross: false
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            use-cross: true
-          - os: ubuntu-latest
-            target: i686-unknown-linux-gnu
-            use-cross: true
-          - os: ubuntu-latest
-            target: arm-unknown-linux-gnueabihf
-            use-cross: true
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            use-cross: true
-    runs-on: ${{ matrix.job.os }}
+        include:
+          # zig cross-compiles static musl binaries for both Linux architectures.
+          - os: linux
+            runner: ubuntu-24.04
+            targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+          # The darwin targets need the macOS SDK.
+          - os: darwin
+            runner: macos-15
+            targets: x86_64-apple-darwin,aarch64-apple-darwin
+          # The Windows targets need MSVC.
+          - os: windows
+            runner: windows-2025
+            targets: x86_64-pc-windows-msvc,aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -165,59 +156,39 @@ jobs:
       - name: Installing Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          targets: ${{ matrix.job.target }}
-      - name: Install cross
-        if: matrix.job.use-cross
+          targets: ${{ matrix.targets }}
+      - name: Install zig
+        if: matrix.os == 'linux'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: Install cargo-zigbuild
+        if: matrix.os == 'linux'
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
-          tool: cross
-      - name: Install packaging tools
-        if: runner.os == 'Linux'
-        run: |
-          DEBIAN_FRONTEND=noninteractive sudo apt-get -y update
-          DEBIAN_FRONTEND=noninteractive sudo apt-get -y install dpkg-dev fakeroot
-          if [[ "${{ matrix.job.target }}" == "arm-unknown-linux-gnueabihf" ]]; then
-            DEBIAN_FRONTEND=noninteractive sudo apt-get -y install binutils-arm-linux-gnueabihf
-          fi
-          if [[ "${{ matrix.job.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            DEBIAN_FRONTEND=noninteractive sudo apt-get -y install binutils-aarch64-linux-gnu
-          fi
-      - name: Cargo build
-        shell: bash
+          tool: cargo-zigbuild
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: "v2.20.0"
+          args: release --clean --skip=sign ${{ startsWith(github.ref, 'refs/tags/') && '--skip=publish,announce' || '--snapshot' }} ${{ matrix.os != 'linux' && '--skip=nfpm' || '' }}
         env:
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.job.target == 'aarch64-apple-darwin' && '11.0' || (matrix.job.target == 'x86_64-apple-darwin' && '10.15' || '') }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ matrix.os }}
+      - name: Collect release files
         run: |
-          if [[ "${{ matrix.job.use-cross }}" == "true" ]]; then
-            cross build --release --target ${{ matrix.job.target }}
-          else
-            cargo build --release --target ${{ matrix.job.target }}
-          fi
-      - name: Get package version
-        id: version
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            version="$GITHUB_REF_NAME"
-          else
-            version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Package final binary
-        shell: bash
-        env:
-          TARGET: ${{ matrix.job.target }}
-          PROJECT_NAME: ia-get
-          PACKAGE_NAME: ia-get
-          OS_NAME: ${{ matrix.job.os }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: ./.github/workflows/before_deploy.sh
+          mkdir -p artifacts
+          jq -r '.[] | select(.type == "Linux Package" or (.type == "Binary" and (.name | test("-(linux|darwin|windows)-(amd64|arm64)(\\.exe)?$")))) | [.path, .name] | @tsv' dist/artifacts.json |
+            while IFS=$'\t' read -r path name; do
+              cp "${path//\\//}" "artifacts/${name}"
+            done
+          ls -l artifacts
       - name: Upload artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: ia-get-${{ matrix.job.target }}
-          path: |
-            ia-get-*-${{ matrix.job.target }}.*
-            ia-get*.deb
+          name: ia-get-${{ matrix.os }}
+          path: artifacts/*
+          if-no-files-found: error
 
   release:
     name: Release 📦
@@ -226,51 +197,39 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           fetch-depth: 0
-      - name: Get version from tag
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-      - name: Generate changelog
-        run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-
-          if [ -n "$PREV_TAG" ]; then
-            echo "## Changes since $PREV_TAG" > CHANGELOG.md
-            git log "$PREV_TAG"..HEAD --pretty=format:"* %s (%h)" >> CHANGELOG.md
-          else
-            echo "## Initial Release" > CHANGELOG.md
-            git log --pretty=format:"* %s (%h)" >> CHANGELOG.md
-          fi
-
-          cat >> CHANGELOG.md << 'NOTES'
-
-          ## Installation
-
-          Download the appropriate binary for your platform below, extract it, make it executable, and move it to your PATH.
-
-          ## Checksums
-
-          SHA256 checksums are provided by GitHub release assets.
-          NOTES
-
-          cat CHANGELOG.md
       - name: Download all artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: artifacts
           pattern: ia-get-*
           merge-multiple: true
-      - name: Create release
-        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: "v2.20.0"
+          args: release --clean --skip=nfpm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.version.outputs.version }}
-          name: ia-get ${{ steps.version.outputs.version }}
-          body_path: CHANGELOG.md
-          draft: false
-          prerelease: false
-          files: artifacts/*
+      - name: Move latest tag
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          # Nix cannot see the tag, so record the version in a commit on top of it.
+          git checkout --detach "${RELEASE_TAG}^{commit}"
+          if [[ -f nix/package.nix ]]; then
+            printf '%s\n' "${RELEASE_TAG#v}" > nix/version
+            git add nix/version
+            git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit --message "chore(nix): set the package version to ${RELEASE_TAG#v}"
+          fi
+          git tag --force latest HEAD
+          git push --force origin refs/tags/latest
