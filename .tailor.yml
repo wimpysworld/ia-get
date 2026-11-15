@@ -3,6 +3,7 @@ license: MIT
 
 repository:
   description: File downloader for archive.org ⬇️
+  homepage: https://ia-get.wimpys.world
   has_wiki: false
   has_discussions: false
   has_projects: false
@@ -177,6 +178,12 @@ labels:
 
 languages:
   rust: true
+
+pages:
+  enabled: true
+  generator: static
+  path: pages
+  cname: ia-get.wimpys.world
 
 swatches:
   - path: .github/dependabot.yml

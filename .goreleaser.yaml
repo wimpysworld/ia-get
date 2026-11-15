@@ -59,7 +59,7 @@ nfpms:
     vendor: Martin Wimpress
     maintainer: "Martin Wimpress <code@wimpress.io>"
     description: "File downloader for archive.org"
-    homepage: https://github.com/wimpysworld/ia-get
+    homepage: https://ia-get.wimpys.world
     license: MIT
     file_name_template: "{{ .ConventionalFileName }}"
     bindir: /usr/bin

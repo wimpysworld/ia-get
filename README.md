@@ -5,6 +5,7 @@
 </h1>
 
 <p align="center"><b>File downloader for archive.org</b></p>
+<p align="center"><a href="https://ia-get.wimpys.world">Project website</a></p>
 <p align="center">
 <img alt="GitHub all releases" src="https://img.shields.io/github/downloads/wimpysworld/ia-get/total?logo=github&label=Downloads">
 </p>
@@ -23,7 +24,7 @@
 | <img src="https://scoop.wimpys.world/logo.svg" width="32" height="32" alt=""> | Windows (Scoop) | [scoop.wimpys.world](https://scoop.wimpys.world/#ia-get) |
 | <img src="https://nix.wimpys.world/logo.svg" width="32" height="32" alt=""> | Nix and NixOS | [nix.wimpys.world](https://nix.wimpys.world/#ia-get) |
 
-Each repository is signed, and its page gives the setup steps and keeps ia-get up to date.
+Each repository page gives the setup steps for installing and updating ia-get.
 
 ## Any platform
 
