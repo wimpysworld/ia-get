@@ -1,5 +1,6 @@
 .direnv/
 /target
 /dist/
+.zig-cache/
 result*
 test/
