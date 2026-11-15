@@ -1,6 +1,7 @@
 .direnv/
 /target
 /dist/
+/artifacts/
 .zig-cache/
 result*
 test/
