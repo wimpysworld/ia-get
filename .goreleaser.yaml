@@ -6,6 +6,15 @@ git:
   ignore_tags:
     - latest
 
+before:
+  hooks:
+    - >-
+      sh -c 'if [ "{{ .IsSnapshot }}" != "true" ]; then
+      cargo_ver=$(awk -F\" "/^version = / { print \$2; exit }" Cargo.toml);
+      if [ "$cargo_ver" != "{{ .Version }}" ]; then
+      echo "Cargo.toml version ($cargo_ver) does not match release version ({{ .Version }})" >&2; exit 1;
+      fi; fi'
+
 # Each platform builds on its own runner, because the darwin targets need the
 # macOS SDK and the Windows targets need MSVC. TARGET selects the build that
 # runs. The release job leaves TARGET unset, skips every build, and releases
@@ -16,6 +25,8 @@ builds:
     builder: rust
     binary: ia-get
     command: zigbuild
+    env:
+      - BUILD_VERSION={{ .Version }}
     targets:
       - x86_64-unknown-linux-musl
       - aarch64-unknown-linux-musl
@@ -27,6 +38,8 @@ builds:
     builder: rust
     binary: ia-get
     command: build
+    env:
+      - BUILD_VERSION={{ .Version }}
     targets:
       - x86_64-apple-darwin
       - aarch64-apple-darwin
@@ -38,6 +51,8 @@ builds:
     builder: rust
     binary: ia-get
     command: build
+    env:
+      - BUILD_VERSION={{ .Version }}
     targets:
       - x86_64-pc-windows-msvc
       - aarch64-pc-windows-msvc

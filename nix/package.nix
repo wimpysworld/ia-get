@@ -12,6 +12,7 @@ pkgs.rustPlatform.buildRustPackage {
   inherit version;
   src = self;
   cargoLock.lockFile = ../Cargo.lock;
+  BUILD_VERSION = version;
   meta = {
     description = "File downloader for archive.org";
     homepage = "https://github.com/wimpysworld/ia-get";

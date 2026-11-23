@@ -330,7 +330,7 @@ fn list_files(files: &XmlFiles, spinner: &indicatif::ProgressBar) {
 #[derive(Parser)]
 #[command(name = "ia-get")]
 #[command(about = "A command-line tool for downloading files from the Internet Archive")]
-#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(version = option_env!("BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))]
 #[command(author = env!("CARGO_PKG_AUTHORS"))]
 struct Cli {
     /// URL to an archive.org details page
