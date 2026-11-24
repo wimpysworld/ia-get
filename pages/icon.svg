@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="iaget-title">
+  <title id="iaget-title">ia-get</title>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#241A14" stroke="#4A3728" stroke-width="1.5"/>
+  <g id="pediment">
+    <polygon points="32,10 52,18.5 12,18.5" fill="#F2C96B"/>
+    <polygon points="32,10 52,18.5 32,18.5" fill="#C48425"/>
+    <rect x="13" y="20" width="38" height="3.2" rx="1" fill="#C48425"/>
+    <rect x="13" y="20" width="19" height="3.2" rx="1" fill="#F2C96B"/>
+  </g>
+  <g id="columns">
+    <rect x="15.5" y="25" width="5" height="15" rx="1.4" fill="#F5EFE6"/>
+    <rect x="18.2" y="25" width="2.3" height="15" rx="1" fill="#D9CCB8"/>
+    <rect x="24.5" y="25" width="5" height="15" rx="1.4" fill="#F5EFE6"/>
+    <rect x="27.2" y="25" width="2.3" height="15" rx="1" fill="#D9CCB8"/>
+    <rect x="34.5" y="25" width="5" height="15" rx="1.4" fill="#F5EFE6"/>
+    <rect x="37.2" y="25" width="2.3" height="15" rx="1" fill="#D9CCB8"/>
+    <rect x="43.5" y="25" width="5" height="15" rx="1.4" fill="#F5EFE6"/>
+    <rect x="46.2" y="25" width="2.3" height="15" rx="1" fill="#D9CCB8"/>
+  </g>
+  <g id="stylobate-and-arrow">
+    <rect x="13" y="42" width="12.5" height="3.2" rx="1.2" fill="#C48425"/>
+    <rect x="38.5" y="42" width="12.5" height="3.2" rx="1.2" fill="#C48425"/>
+    <path d="M32 33v18m-7.5-7L32 52l7.5-8" fill="none" stroke="#241A14" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M32 33v18m-7.5-7L32 52l7.5-8" fill="none" stroke="#F2C96B" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
