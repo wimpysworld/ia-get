@@ -16,6 +16,7 @@ use ia_get::utils::{
     create_spinner, format_size, parse_archive_url, percent_decode_utf8, sanitize_filename,
     ArchiveUrl,
 };
+use ia_get::verify;
 use ia_get::{CookieSource, FileFilter, IaGetError, Result};
 use indicatif::ProgressStyle;
 use reqwest::header::{HeaderMap, COOKIE};
@@ -331,12 +332,27 @@ fn batch_exit_result(summary: &downloader::BatchSummary, total_files: usize) -> 
     }
 }
 
+/// Maps a completed verification summary to the CLI exit result.
+fn verify_exit_result(summary: &verify::VerificationSummary, total_files: usize) -> Result<()> {
+    if summary.interrupted {
+        Err(IaGetError::Interrupted)
+    } else if !summary.failed.is_empty() {
+        Err(IaGetError::VerificationFailed {
+            failed: summary.failed.len(),
+            total: total_files,
+        })
+    } else {
+        Ok(())
+    }
+}
+
 /// Resolves the output directory path, defaulting to the current working directory.
 fn resolve_output_dir(output_dir: Option<&Path>) -> &Path {
     output_dir.unwrap_or_else(|| Path::new("."))
 }
 
-/// Finalises the metadata phase by either listing files or preparing the output directory.
+/// Finalises the metadata phase by listing files, validating a check directory,
+/// or preparing the output directory.
 fn finalize_metadata_phase(
     cli: &Cli,
     files: &XmlFiles,
@@ -347,7 +363,14 @@ fn finalize_metadata_phase(
         return Ok(None);
     }
 
-    match downloader::prepare_output_dir(resolve_output_dir(cli.output_dir.as_deref())) {
+    let target_dir = resolve_output_dir(cli.output_dir.as_deref());
+    let dir_result = if cli.check {
+        verify::validate_check_dir(target_dir)
+    } else {
+        downloader::prepare_output_dir(target_dir)
+    };
+
+    match dir_result {
         Ok(canonical_dir) => Ok(Some(canonical_dir)),
         Err(e) => {
             spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
@@ -370,6 +393,8 @@ Examples:
   ia-get --output-dir /tmp/zzap64 https://archive.org/details/deftributetozzap64
   ia-get --list https://archive.org/details/deftributetozzap64
   ia-get --list https://archive.org/download/deftributetozzap64/deftributetozzap64.pdf
+  ia-get --check https://archive.org/details/deftributetozzap64
+  ia-get --check -o ./downloads https://archive.org/details/deftributetozzap64
   ia-get -f '*.pdf' https://archive.org/details/deftributetozzap64
   ia-get -f '!*.torrent' https://archive.org/details/deftributetozzap64
   ia-get -b cookies.txt https://archive.org/details/deftributetozzap64")]
@@ -379,6 +404,9 @@ struct Cli {
     /// List files parsed from archive metadata XML and exit
     #[arg(short = 'l', long = "list")]
     list: bool,
+    /// Verify local files against archive metadata without downloading or modifying files
+    #[arg(long = "check", conflicts_with = "list")]
+    check: bool,
     /// Cookie header or Netscape cookies.txt file for authenticated downloads
     #[arg(short = 'b', long = "cookies", value_name = "COOKIES")]
     cookies: Option<String>,
@@ -405,6 +433,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .transpose()?;
 
     let file_filter = FileFilter::compile(&cli.filters)?;
+
+    if cli.check {
+        verify::validate_check_dir(resolve_output_dir(cli.output_dir.as_deref()))?;
+    }
 
     // Create a client with extended timeouts for large file downloads
     // Connection timeout is set high, but no read timeout since large files
@@ -464,17 +496,36 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // If requested, list parsed filenames and exit; otherwise prepare output directory
+    // If requested, list parsed filenames and exit; otherwise prepare or validate directory
     let Some(output_dir) = finalize_metadata_phase(&cli, &files, &spinner)? else {
         return Ok(());
     };
 
-    // Successfully finished initialization
     let file_label = if files.files.len() == 1 {
         "file"
     } else {
         "files"
     };
+
+    if cli.check {
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template(&format!(
+                    "{} {} {} {file_label} against archive.org metadata",
+                    "✔".green().bold(),
+                    "Checking".bold(),
+                    files.files.len().to_string().bold(),
+                ))
+                .expect("Failed to set completion style"),
+        );
+        spinner.finish();
+
+        let summary = verify::verify_files(&output_dir, &files.files, &shutdown)?;
+        verify_exit_result(&summary, files.files.len())?;
+        return Ok(());
+    }
+
+    // Successfully finished initialization
     spinner.set_style(
         ProgressStyle::default_spinner()
             .template(&format!(
@@ -2355,6 +2406,7 @@ mod tests {
             option_flags,
             vec![
                 (Some('l'), Some("list")),
+                (None, Some("check")),
                 (Some('b'), Some("cookies")),
                 (Some('o'), Some("output-dir")),
                 (Some('f'), Some("filter")),
@@ -2387,6 +2439,16 @@ mod tests {
             "help should include --list /download/ example:\n{help}"
         );
         assert!(
+            help.contains("ia-get --check https://archive.org/details/deftributetozzap64"),
+            "help should include --check example:\n{help}"
+        );
+        assert!(
+            help.contains(
+                "ia-get --check -o ./downloads https://archive.org/details/deftributetozzap64"
+            ),
+            "help should include --check -o example:\n{help}"
+        );
+        assert!(
             help.contains("ia-get -f '*.pdf' https://archive.org/details/deftributetozzap64"),
             "help should include -f include example:\n{help}"
         );
@@ -2397,6 +2459,10 @@ mod tests {
         assert!(
             help.contains("-l, --list"),
             "help should expose -l/--list:\n{help}"
+        );
+        assert!(
+            help.contains("--check"),
+            "help should expose --check:\n{help}"
         );
         assert!(
             help.contains("-b, --cookies"),
@@ -2964,5 +3030,730 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[test]
+    fn cli_check_flag_parses_conflicts_with_list_and_maps_exit_results() {
+        use clap::error::ErrorKind;
+
+        let url = "https://archive.org/details/deftributetozzap64";
+
+        let parsed = Cli::try_parse_from(["ia-get", "--check", "-o", "./downloads", url]).unwrap();
+        assert!(parsed.check);
+        assert!(!parsed.list);
+        assert_eq!(parsed.output_dir, Some(PathBuf::from("./downloads")));
+
+        let conflict = Cli::try_parse_from(["ia-get", "--check", "--list", url])
+            .err()
+            .expect("--check and --list must conflict");
+        assert_eq!(conflict.kind(), ErrorKind::ArgumentConflict);
+
+        let ok_summary = verify::VerificationSummary {
+            ok: 2,
+            failed: Vec::new(),
+            interrupted: false,
+        };
+        assert!(verify_exit_result(&ok_summary, 2).is_ok());
+
+        let failed_summary = verify::VerificationSummary {
+            ok: 1,
+            failed: vec![verify::FailedVerification {
+                file_path: "missing.pdf".to_string(),
+                issues: vec![verify::VerificationIssue::Missing],
+            }],
+            interrupted: false,
+        };
+        let err = verify_exit_result(&failed_summary, 2).unwrap_err();
+        assert!(matches!(
+            err,
+            IaGetError::VerificationFailed {
+                failed: 1,
+                total: 2
+            }
+        ));
+        assert_eq!(err.to_string(), "1 of 2 file(s) failed verification");
+
+        let interrupted_summary = verify::VerificationSummary {
+            ok: 0,
+            failed: failed_summary.failed,
+            interrupted: true,
+        };
+        assert!(matches!(
+            verify_exit_result(&interrupted_summary, 2),
+            Err(IaGetError::Interrupted)
+        ));
+    }
+
+    #[test]
+    fn finalize_metadata_phase_check_mode_never_creates_missing_directory() {
+        let sandbox = TempTestDir::new("check-finalize");
+        let missing_dir = sandbox.join("missing/nested");
+        let files = XmlFiles {
+            files: vec![xml_file("issue01.pdf", Some(1024))],
+        };
+        let spinner = indicatif::ProgressBar::hidden();
+
+        let cli_missing = Cli::try_parse_from([
+            "ia-get",
+            "--check",
+            "-o",
+            missing_dir.to_str().unwrap(),
+            "https://archive.org/details/item",
+        ])
+        .unwrap();
+        let err = finalize_metadata_phase(&cli_missing, &files, &spinner).unwrap_err();
+        assert!(matches!(err, IaGetError::FileSystem(_)));
+        assert!(!missing_dir.exists());
+        assert!(!sandbox.join("missing").exists());
+
+        let cli_existing = Cli::try_parse_from([
+            "ia-get",
+            "--check",
+            "-o",
+            sandbox.0.to_str().unwrap(),
+            "https://archive.org/details/item",
+        ])
+        .unwrap();
+        let dir = finalize_metadata_phase(&cli_existing, &files, &spinner)
+            .unwrap()
+            .expect("--check should return canonical target directory");
+        assert_eq!(dir, std::fs::canonicalize(&sandbox.0).unwrap());
+    }
+
+    #[test]
+    fn cli_check_flag_combinations_conflicts_unknown_flags_and_help() {
+        use clap::error::ErrorKind;
+        use clap::CommandFactory;
+
+        let details_url = "https://archive.org/details/deftributetozzap64";
+        let download_url = "https://archive.org/download/deftributetozzap64/deftributetozzap64.pdf";
+
+        let combined_leading = Cli::try_parse_from([
+            "ia-get",
+            "--check",
+            "-o",
+            "./downloads",
+            "-f",
+            "*.pdf",
+            "-f",
+            "!*thumb*",
+            "-b",
+            "cookies.txt",
+            details_url,
+        ])
+        .unwrap();
+        assert!(combined_leading.check);
+        assert!(!combined_leading.list);
+        assert_eq!(
+            combined_leading.output_dir,
+            Some(PathBuf::from("./downloads"))
+        );
+        assert_eq!(combined_leading.filters, vec!["*.pdf", "!*thumb*"]);
+        assert_eq!(combined_leading.cookies.as_deref(), Some("cookies.txt"));
+        assert_eq!(combined_leading.url, details_url);
+
+        let combined_trailing = Cli::try_parse_from([
+            "ia-get",
+            download_url,
+            "--check",
+            "--output-dir",
+            "./out",
+            "--filter",
+            "*.pdf",
+            "--cookies",
+            "auth=1",
+        ])
+        .unwrap();
+        assert!(combined_trailing.check);
+        assert_eq!(combined_trailing.output_dir, Some(PathBuf::from("./out")));
+        assert_eq!(combined_trailing.filters, vec!["*.pdf"]);
+        assert_eq!(combined_trailing.cookies.as_deref(), Some("auth=1"));
+        assert_eq!(combined_trailing.url, download_url);
+
+        for conflict_args in [
+            ["ia-get", "-l", "--check", details_url],
+            ["ia-get", "--list", "--check", details_url],
+        ] {
+            let err = Cli::try_parse_from(conflict_args)
+                .err()
+                .expect("--list/-l and --check must conflict");
+            assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        }
+
+        for unknown_flag in ["--md5", "--strict"] {
+            let err = Cli::try_parse_from(["ia-get", unknown_flag, details_url])
+                .err()
+                .unwrap_or_else(|| panic!("{unknown_flag} must be rejected"));
+            assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+        }
+
+        Cli::command().debug_assert();
+        let help = Cli::command().render_help().to_string();
+        assert!(
+            help.contains("--check"),
+            "help should mention --check:\n{help}"
+        );
+        assert!(
+            help.contains("ia-get --check https://archive.org/details/deftributetozzap64"),
+            "help should include --check example:\n{help}"
+        );
+        assert!(
+            help.contains(
+                "ia-get --check -o ./downloads https://archive.org/details/deftributetozzap64"
+            ),
+            "help should include --check -o example:\n{help}"
+        );
+    }
+
+    #[test]
+    fn finalize_metadata_phase_check_mode_rejects_regular_file_and_handles_empty_summary() {
+        let sandbox = TempTestDir::new("check-finalize-file");
+        let file_path = sandbox.join("not_a_dir.txt");
+        std::fs::write(&file_path, b"keep-me").unwrap();
+
+        let files = XmlFiles {
+            files: vec![xml_file("issue01.pdf", Some(1024))],
+        };
+        let spinner = indicatif::ProgressBar::hidden();
+
+        let cli_file = Cli::try_parse_from([
+            "ia-get",
+            "--check",
+            "-o",
+            file_path.to_str().unwrap(),
+            "https://archive.org/details/item",
+        ])
+        .unwrap();
+        let err = finalize_metadata_phase(&cli_file, &files, &spinner).unwrap_err();
+        assert!(matches!(err, IaGetError::FileSystem(_)));
+        assert_eq!(std::fs::read(&file_path).unwrap(), b"keep-me");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let missing_target = sandbox.join("broken-target");
+            let broken_link = sandbox.join("broken-dir-link");
+            symlink(&missing_target, &broken_link).unwrap();
+
+            let cli_broken = Cli::try_parse_from([
+                "ia-get",
+                "--check",
+                "-o",
+                broken_link.to_str().unwrap(),
+                "https://archive.org/details/item",
+            ])
+            .unwrap();
+            let err = finalize_metadata_phase(&cli_broken, &files, &spinner).unwrap_err();
+            assert!(matches!(err, IaGetError::FileSystem(_)));
+            assert!(err.to_string().contains("broken symlink"));
+            assert!(!missing_target.exists());
+        }
+
+        let empty_summary = verify::VerificationSummary::default();
+        assert!(verify_exit_result(&empty_summary, 0).is_ok());
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CheckDirEntrySnapshot {
+        rel_path: PathBuf,
+        is_dir: bool,
+        is_symlink: bool,
+        contents: Option<Vec<u8>>,
+        modified: Option<SystemTime>,
+    }
+
+    fn snapshot_check_dir(root: &Path) -> (Option<SystemTime>, Vec<CheckDirEntrySnapshot>) {
+        fn walk(base: &Path, current: &Path, out: &mut Vec<CheckDirEntrySnapshot>) {
+            let mut entries: Vec<_> = std::fs::read_dir(current)
+                .expect("read dir for snapshot")
+                .map(|entry| entry.expect("dir entry").path())
+                .collect();
+            entries.sort();
+
+            for path in entries {
+                let meta = std::fs::symlink_metadata(&path).expect("symlink_metadata for snapshot");
+                let rel_path = path.strip_prefix(base).unwrap().to_path_buf();
+                let is_dir = meta.file_type().is_dir();
+                let is_symlink = meta.file_type().is_symlink();
+                let contents = if meta.file_type().is_file() {
+                    Some(std::fs::read(&path).expect("read file for snapshot"))
+                } else {
+                    None
+                };
+                let modified = meta.modified().ok();
+                out.push(CheckDirEntrySnapshot {
+                    rel_path,
+                    is_dir,
+                    is_symlink,
+                    contents,
+                    modified,
+                });
+                if is_dir && !is_symlink {
+                    walk(base, &path, out);
+                }
+            }
+        }
+
+        let root_mtime = std::fs::symlink_metadata(root)
+            .expect("root metadata for snapshot")
+            .modified()
+            .ok();
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        (root_mtime, out)
+    }
+
+    fn build_xml_metadata(entries: &[(&str, usize, String)]) -> String {
+        let mut xml = String::from("<files>\n");
+        for (name, size, digest) in entries {
+            xml.push_str(&format!(
+                "  <file name=\"{name}\" source=\"original\">\n    <size>{size}</size>\n    <md5>{digest}</md5>\n  </file>\n"
+            ));
+        }
+        xml.push_str("</files>");
+        xml
+    }
+
+    #[tokio::test]
+    async fn check_mode_end_to_end_clean_with_output_dir_and_filter_fetches_only_xml_and_makes_zero_writes(
+    ) {
+        let pdf_one = b"pdf-one-verified-payload";
+        let pdf_two = b"pdf-two-nested-verified-payload";
+        let pdf_sanitized = b"pdf-sanitized-filename-payload";
+        let excluded_torrent = b"torrent-excluded-payload";
+        let excluded_cbz = b"cbz-excluded-payload";
+
+        let xml_body = build_xml_metadata(&[
+            (
+                "issue01.pdf",
+                pdf_one.len(),
+                format!("{:x}", md5::compute(pdf_one)),
+            ),
+            (
+                "docs/nested/issue02.pdf",
+                pdf_two.len(),
+                format!("{:x}", md5::compute(pdf_two)),
+            ),
+            (
+                "Season 1/Episode?.pdf",
+                pdf_sanitized.len(),
+                format!("{:X}", md5::compute(pdf_sanitized)),
+            ),
+            (
+                "item_archive.torrent",
+                excluded_torrent.len(),
+                format!("{:x}", md5::compute(excluded_torrent)),
+            ),
+            (
+                "comics/corrupt.cbz",
+                excluded_cbz.len(),
+                format!("{:x}", md5::compute(excluded_cbz)),
+            ),
+        ]);
+
+        // Provide only HEAD + GET responses for `_files.xml`; any file download would fail.
+        let server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+        ])
+        .await;
+
+        let output_dir = TempTestDir::new("check-e2e-clean");
+        std::fs::write(output_dir.join("issue01.pdf"), pdf_one).unwrap();
+        std::fs::create_dir_all(output_dir.join("docs/nested")).unwrap();
+        std::fs::write(output_dir.join("docs/nested/issue02.pdf"), pdf_two).unwrap();
+        std::fs::create_dir_all(output_dir.join("Season 1")).unwrap();
+        std::fs::write(output_dir.join("Season 1/Episode_.pdf"), pdf_sanitized).unwrap();
+        // Deliberately leave `item_archive.torrent` absent and `comics/corrupt.cbz` corrupt
+        // to prove `-f '*.pdf'` skips excluded files during `--check`.
+        std::fs::create_dir_all(output_dir.join("comics")).unwrap();
+        std::fs::write(output_dir.join("comics/corrupt.cbz"), b"wrong").unwrap();
+
+        let before = snapshot_check_dir(&output_dir.0);
+
+        let cli = Cli::try_parse_from([
+            "ia-get",
+            "--check",
+            "-o",
+            output_dir.0.to_str().unwrap(),
+            "-f",
+            "*.pdf",
+            "https://archive.org/details/item",
+        ])
+        .unwrap();
+        let file_filter = FileFilter::compile(&cli.filters).unwrap();
+        let target = parse_archive_url(&cli.url).unwrap();
+        verify::validate_check_dir(resolve_output_dir(cli.output_dir.as_deref())).unwrap();
+
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let xml_url = server.url("/download/item/item_files.xml");
+        let (all_files, _base_url) =
+            fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                .await
+                .expect("XML metadata fetch should succeed");
+
+        let filtered = select_and_filter_files(all_files, &target, &file_filter)
+            .expect("filter should match PDF files");
+        assert_eq!(filtered.files.len(), 3);
+
+        let verified_dir = finalize_metadata_phase(&cli, &filtered, &spinner)
+            .expect("check directory validation should succeed")
+            .expect("check mode should return canonical directory");
+
+        let summary = verify::verify_files(&verified_dir, &filtered.files, &signal)
+            .expect("verification run should complete");
+        assert_eq!(summary.ok, 3);
+        assert!(summary.failed.is_empty());
+        assert!(!summary.interrupted);
+        assert!(verify_exit_result(&summary, filtered.files.len()).is_ok());
+
+        let requests = server.finish().await;
+        assert_eq!(
+            requests.len(),
+            2,
+            "--check must fetch only XML metadata (HEAD + GET): {requests:?}"
+        );
+        assert!(requests[0]
+            .request_line
+            .starts_with("HEAD /download/item/item_files.xml "));
+        assert!(requests[1]
+            .request_line
+            .starts_with("GET /download/item/item_files.xml "));
+
+        let after = snapshot_check_dir(&output_dir.0);
+        assert_eq!(before, after, "--check must make zero writes to disk");
+    }
+
+    #[tokio::test]
+    async fn check_mode_end_to_end_failing_with_output_dir_and_filter_reports_issues_with_zero_writes(
+    ) {
+        let good_bytes = b"good-pdf-payload";
+        let missing_bytes = b"missing-nested-pdf";
+        let bad_size_expected = b"expected-size-payload";
+        let bad_md5_expected = b"expected-md5-payload";
+        let leftover_bytes = b"complete-pdf-payload";
+        let ignored_torrent = b"ignored-torrent";
+
+        let xml_body = build_xml_metadata(&[
+            (
+                "good.pdf",
+                good_bytes.len(),
+                format!("{:x}", md5::compute(good_bytes)),
+            ),
+            (
+                "missing_sub/absent.pdf",
+                missing_bytes.len(),
+                format!("{:x}", md5::compute(missing_bytes)),
+            ),
+            (
+                "bad_size.pdf",
+                bad_size_expected.len(),
+                format!("{:x}", md5::compute(bad_size_expected)),
+            ),
+            (
+                "bad_md5.pdf",
+                bad_md5_expected.len(),
+                format!("{:x}", md5::compute(bad_md5_expected)),
+            ),
+            (
+                "leftover.pdf",
+                leftover_bytes.len(),
+                format!("{:x}", md5::compute(leftover_bytes)),
+            ),
+            (
+                "ignored.torrent",
+                ignored_torrent.len(),
+                format!("{:x}", md5::compute(ignored_torrent)),
+            ),
+        ]);
+
+        let server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+        ])
+        .await;
+
+        let output_dir = TempTestDir::new("check-e2e-failing");
+        std::fs::write(output_dir.join("good.pdf"), good_bytes).unwrap();
+        std::fs::write(output_dir.join("bad_size.pdf"), b"short").unwrap();
+        let corrupt_same_len = b"corrupted-md5-payloa";
+        assert_eq!(corrupt_same_len.len(), bad_md5_expected.len());
+        std::fs::write(output_dir.join("bad_md5.pdf"), corrupt_same_len).unwrap();
+        std::fs::write(output_dir.join("leftover.pdf"), leftover_bytes).unwrap();
+        std::fs::write(output_dir.join("leftover.pdf.part"), b"partial").unwrap();
+
+        let before = snapshot_check_dir(&output_dir.0);
+
+        let cli = Cli::try_parse_from([
+            "ia-get",
+            "--check",
+            "-o",
+            output_dir.0.to_str().unwrap(),
+            "-f",
+            "*.pdf",
+            "https://archive.org/details/item",
+        ])
+        .unwrap();
+        let file_filter = FileFilter::compile(&cli.filters).unwrap();
+        let target = parse_archive_url(&cli.url).unwrap();
+        verify::validate_check_dir(resolve_output_dir(cli.output_dir.as_deref())).unwrap();
+
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let xml_url = server.url("/download/item/item_files.xml");
+        let (all_files, _base_url) =
+            fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                .await
+                .expect("XML metadata fetch should succeed");
+
+        let filtered = select_and_filter_files(all_files, &target, &file_filter).unwrap();
+        assert_eq!(filtered.files.len(), 5);
+
+        let verified_dir = finalize_metadata_phase(&cli, &filtered, &spinner)
+            .unwrap()
+            .unwrap();
+
+        let summary = verify::verify_files(&verified_dir, &filtered.files, &signal).unwrap();
+        assert_eq!(summary.ok, 1);
+        assert!(!summary.interrupted);
+        assert_eq!(summary.failed.len(), 4);
+
+        assert_eq!(summary.failed[0].file_path, "missing_sub/absent.pdf");
+        assert_eq!(
+            summary.failed[0].issues,
+            vec![verify::VerificationIssue::Missing]
+        );
+
+        assert_eq!(summary.failed[1].file_path, "bad_size.pdf");
+        assert_eq!(
+            summary.failed[1].issues,
+            vec![verify::VerificationIssue::SizeMismatch {
+                expected: bad_size_expected.len() as u64,
+                actual: 5,
+            }]
+        );
+
+        assert_eq!(summary.failed[2].file_path, "bad_md5.pdf");
+        assert_eq!(
+            summary.failed[2].issues,
+            vec![verify::VerificationIssue::Md5Mismatch {
+                expected: format!("{:x}", md5::compute(bad_md5_expected)),
+                actual: format!("{:x}", md5::compute(corrupt_same_len)),
+            }]
+        );
+
+        assert_eq!(summary.failed[3].file_path, "leftover.pdf");
+        assert_eq!(
+            summary.failed[3].issues,
+            vec![verify::VerificationIssue::LeftoverPart {
+                part_path: "leftover.pdf.part".to_string(),
+                size: 7,
+            }]
+        );
+
+        assert!(
+            !summary
+                .failed
+                .iter()
+                .any(|entry| entry.file_path == "ignored.torrent"),
+            "excluded files must not be verified or reported"
+        );
+
+        let exit_err = verify_exit_result(&summary, filtered.files.len()).unwrap_err();
+        assert!(matches!(
+            exit_err,
+            IaGetError::VerificationFailed {
+                failed: 4,
+                total: 5
+            }
+        ));
+
+        let requests = server.finish().await;
+        assert_eq!(
+            requests.len(),
+            2,
+            "failing --check must fetch only XML metadata (HEAD + GET): {requests:?}"
+        );
+        assert!(requests[0]
+            .request_line
+            .starts_with("HEAD /download/item/item_files.xml "));
+        assert!(requests[1]
+            .request_line
+            .starts_with("GET /download/item/item_files.xml "));
+
+        let after = snapshot_check_dir(&output_dir.0);
+        assert_eq!(
+            before, after,
+            "failing --check must make zero writes to disk"
+        );
+        assert!(!output_dir.join("missing_sub").exists());
+    }
+
+    #[tokio::test]
+    async fn check_mode_end_to_end_direct_download_url_verifies_only_target_file() {
+        let target_bytes = b"direct-target-pdf-bytes";
+        let sibling_a = b"sibling-a-not-on-disk";
+        let sibling_b = b"sibling-b-not-on-disk";
+
+        let xml_body = build_xml_metadata(&[
+            (
+                "docs/target.pdf",
+                target_bytes.len(),
+                format!("{:x}", md5::compute(target_bytes)),
+            ),
+            (
+                "sibling.pdf",
+                sibling_a.len(),
+                format!("{:x}", md5::compute(sibling_a)),
+            ),
+            (
+                "nested/other.zip",
+                sibling_b.len(),
+                format!("{:x}", md5::compute(sibling_b)),
+            ),
+        ]);
+
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        // Pass case: target file matches, absent sibling files are ignored.
+        {
+            let server = MockHttpServer::start(vec![
+                MockResponse::ok(b""),
+                MockResponse::ok(xml_body.as_bytes()),
+            ])
+            .await;
+
+            let output_dir = TempTestDir::new("check-e2e-direct-pass");
+            std::fs::create_dir_all(output_dir.join("docs")).unwrap();
+            std::fs::write(output_dir.join("docs/target.pdf"), target_bytes).unwrap();
+            let before = snapshot_check_dir(&output_dir.0);
+
+            let cli = Cli::try_parse_from([
+                "ia-get",
+                "--check",
+                "-o",
+                output_dir.0.to_str().unwrap(),
+                "https://archive.org/download/item/docs/target.pdf",
+            ])
+            .unwrap();
+            let file_filter = FileFilter::compile(&cli.filters).unwrap();
+            let target = parse_archive_url(&cli.url).unwrap();
+            verify::validate_check_dir(resolve_output_dir(cli.output_dir.as_deref())).unwrap();
+
+            let xml_url = server.url("/download/item/item_files.xml");
+            let (all_files, _) =
+                fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                    .await
+                    .unwrap();
+            let selected = select_and_filter_files(all_files, &target, &file_filter).unwrap();
+            assert_eq!(selected.files.len(), 1);
+            assert_eq!(selected.files[0].name, "docs/target.pdf");
+
+            let verified_dir = finalize_metadata_phase(&cli, &selected, &spinner)
+                .unwrap()
+                .unwrap();
+            let summary = verify::verify_files(&verified_dir, &selected.files, &signal).unwrap();
+            assert_eq!(summary.ok, 1);
+            assert!(summary.failed.is_empty());
+            assert!(verify_exit_result(&summary, selected.files.len()).is_ok());
+
+            let requests = server.finish().await;
+            assert_eq!(requests.len(), 2);
+            assert!(requests[0]
+                .request_line
+                .starts_with("HEAD /download/item/item_files.xml "));
+            assert!(requests[1]
+                .request_line
+                .starts_with("GET /download/item/item_files.xml "));
+            assert_eq!(before, snapshot_check_dir(&output_dir.0));
+        }
+
+        // Failure case: target file is corrupt, absent sibling files are still ignored.
+        {
+            let server = MockHttpServer::start(vec![
+                MockResponse::ok(b""),
+                MockResponse::ok(xml_body.as_bytes()),
+            ])
+            .await;
+
+            let output_dir = TempTestDir::new("check-e2e-direct-fail");
+            std::fs::create_dir_all(output_dir.join("docs")).unwrap();
+            let corrupt_target = b"corrupt-target-pdf-byte";
+            assert_eq!(corrupt_target.len(), target_bytes.len());
+            std::fs::write(output_dir.join("docs/target.pdf"), corrupt_target).unwrap();
+            let before = snapshot_check_dir(&output_dir.0);
+
+            let cli = Cli::try_parse_from([
+                "ia-get",
+                "--check",
+                "-o",
+                output_dir.0.to_str().unwrap(),
+                "https://archive.org/download/item/docs/target.pdf",
+            ])
+            .unwrap();
+            let file_filter = FileFilter::compile(&cli.filters).unwrap();
+            let target = parse_archive_url(&cli.url).unwrap();
+            verify::validate_check_dir(resolve_output_dir(cli.output_dir.as_deref())).unwrap();
+
+            let xml_url = server.url("/download/item/item_files.xml");
+            let (all_files, _) =
+                fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                    .await
+                    .unwrap();
+            let selected = select_and_filter_files(all_files, &target, &file_filter).unwrap();
+            assert_eq!(selected.files.len(), 1);
+
+            let verified_dir = finalize_metadata_phase(&cli, &selected, &spinner)
+                .unwrap()
+                .unwrap();
+            let summary = verify::verify_files(&verified_dir, &selected.files, &signal).unwrap();
+            assert_eq!(summary.ok, 0);
+            assert_eq!(summary.failed.len(), 1);
+            assert_eq!(summary.failed[0].file_path, "docs/target.pdf");
+            assert_eq!(
+                summary.failed[0].issues,
+                vec![verify::VerificationIssue::Md5Mismatch {
+                    expected: format!("{:x}", md5::compute(target_bytes)),
+                    actual: format!("{:x}", md5::compute(corrupt_target)),
+                }]
+            );
+            assert!(matches!(
+                verify_exit_result(&summary, selected.files.len()),
+                Err(IaGetError::VerificationFailed {
+                    failed: 1,
+                    total: 1
+                })
+            ));
+
+            let requests = server.finish().await;
+            assert_eq!(requests.len(), 2);
+            assert_eq!(before, snapshot_check_dir(&output_dir.0));
+        }
     }
 }

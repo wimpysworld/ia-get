@@ -12,6 +12,7 @@ pub mod downloader;
 pub mod error;
 pub mod filter;
 pub mod utils;
+pub mod verify;
 
 // Re-export common types for convenience
 pub use cookie::CookieSource;

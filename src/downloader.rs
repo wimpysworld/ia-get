@@ -878,7 +878,7 @@ fn classify_download_response(
 }
 
 /// Canonicalises the destination root directory and verifies that it is a directory.
-fn resolve_destination_root(root: &Path) -> Result<PathBuf> {
+pub(crate) fn resolve_destination_root(root: &Path) -> Result<PathBuf> {
     let canonical = fs::canonicalize(root)?;
     if !fs::metadata(&canonical)?.is_dir() {
         return Err(IaGetError::FileSystem(format!(
@@ -965,7 +965,7 @@ pub(crate) fn validate_relative_path(path: &Path) -> Result<PathBuf> {
 }
 
 /// Validates that `rel_path` stays inside `canonical_root` with no symlinks or non-regular leaves.
-fn validate_contained_path(
+pub(crate) fn validate_contained_path(
     canonical_root: &Path,
     rel_path: &Path,
     allow_missing_leaf: bool,
@@ -1128,7 +1128,7 @@ fn configure_no_follow(options: &mut fs::OpenOptions) {
 }
 
 /// Opens a verified regular file inside `root` for reading without following symlinks.
-fn open_regular_file_for_read(root: &Path, rel_path: &Path) -> Result<File> {
+pub(crate) fn open_regular_file_for_read(root: &Path, rel_path: &Path) -> Result<File> {
     let canonical_root = resolve_destination_root(root)?;
     let target_path = validate_contained_path(&canonical_root, rel_path, false)?;
 
@@ -1159,7 +1159,7 @@ fn remove_part_file_safely(root: &Path, rel_part_path: &Path) -> Result<()> {
 }
 
 /// Builds the temporary `.part` path for a target file without replacing existing extensions.
-fn part_file_path(file_path: &str) -> PathBuf {
+pub(crate) fn part_file_path(file_path: &str) -> PathBuf {
     let mut part_path = OsString::from(file_path);
     part_path.push(".part");
     PathBuf::from(part_path)
@@ -1200,7 +1200,11 @@ fn promote_part_file(root: &Path, rel_part_path: &Path, rel_final_path: &Path) -
 }
 
 /// Calculates the MD5 hash of a verified regular file inside `root`.
-fn calculate_md5(root: &Path, rel_path: &Path, running: &Arc<AtomicBool>) -> Result<String> {
+pub(crate) fn calculate_md5(
+    root: &Path,
+    rel_path: &Path,
+    running: &Arc<AtomicBool>,
+) -> Result<String> {
     let file = open_regular_file_for_read(root, rel_path)?;
     let file_size = file.metadata()?.len();
     let is_large_file = file_size > LARGE_FILE_THRESHOLD;

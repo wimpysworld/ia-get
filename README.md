@@ -70,7 +70,7 @@ If any file fails or Ctrl+C interrupts the run, `ia-get` exits with a non-zero s
 Save files to a chosen directory with `-o` or `--output-dir <DIR>`.
 `ia-get` creates missing directories when a download starts, and defaults to the current working directory when you omit this option.
 `ia-get` rejects empty paths, broken symlinks, and existing non-directory paths, and keeps every downloaded file inside that directory.
-When you pass `--list`, `ia-get` does not create the output directory.
+When you pass `--list` or `--check`, `ia-get` does not create the output directory.
 
 ```shell
 ia-get -o ./downloads https://archive.org/details/<identifier>
@@ -105,7 +105,8 @@ Repeat this option to combine patterns.
 Prefix a pattern with `!` to exclude files, or use `\!` for a literal leading `!`.
 Positive patterns select files that match any positive pattern, and `!` patterns always exclude files that match them.
 Patterns match original names from archive metadata without leading `/`, and `*` crosses `/` so `-f '*.pdf'` matches nested files too.
-This option works with both downloads and `--list`, and `ia-get` exits with an error if a pattern is invalid or matches zero files.
+This option works with downloads, `--list`, and `--check`.
+`ia-get` exits with an error if a pattern is invalid or matches zero files.
 
 ```shell
 ia-get -f '*.pdf' https://archive.org/details/<identifier>
@@ -114,13 +115,27 @@ ia-get -f '*.cbz' -f '!*thumb*' https://archive.org/details/<identifier>
 ia-get --list -f '*.pdf' https://archive.org/details/<identifier>
 ```
 
+Verify an existing local directory against archive.org metadata with `--check`.
+This mode is read-only, makes zero writes, and fails if the target directory does not exist.
+`ia-get` checks file presence, leftover `.part` files, safe regular-file targets, byte sizes, and MD5 hashes when metadata provides them.
+`ia-get` prints a summary and exits with status 0 only when all checked files pass without interruption.
+`--check` works with `-o`/`--output-dir`, `-f`/`--filter`, `-b`/`--cookies`, and `/download/<identifier>/<path>` URLs, and conflicts with `--list`.
+
+```shell
+ia-get --check https://archive.org/details/<identifier>
+ia-get --check -o ./downloads https://archive.org/details/<identifier>
+ia-get --check -o ./downloads -f '*.pdf' https://archive.org/details/<identifier>
+ia-get --check https://archive.org/download/<identifier>/<path>
+```
+
 ## Options
 
 | Option | Description |
 | --- | --- |
-| `-o`, `--output-dir <DIR>` | Save downloaded files to `<DIR>` (defaults to the current working directory). |
+| `-o`, `--output-dir <DIR>` | Directory for downloaded files or `--check` (defaults to the current working directory). |
 | `-b`, `--cookies <COOKIES>` | Send a raw `Cookie` header or load cookies from a Netscape `cookies.txt` file. |
 | `-l`, `--list` | List files and sizes from archive metadata XML and exit. |
+| `--check` | Verify local files against archive metadata without downloading or modifying files (conflicts with `--list`). |
 | `-f`, `--filter <GLOB>` | Filter files by glob pattern (repeatable, prefix with `!` to exclude). |
 
 ## Why? 🤔💭
@@ -134,13 +149,14 @@ So I co-authored `ia-get` to automate the download process.
 ### Features ✨
 
 - 🎯 Downloads full items from `/details/<identifier>` URLs or single files from `/download/<identifier>/<path>` URLs
-- 🔍 Filters downloads and `--list` output with repeatable `-f`/`--filter <GLOB>` patterns, including `!` exclusions
+- 🔍 Filters downloads, `--list` output, and `--check` runs with repeatable `-f`/`--filter <GLOB>` patterns, including `!` exclusions
 - 🔽 Retries transient errors on metadata and file downloads with exponential backoff, jitter, `Retry-After` support, and prompt Ctrl+C interruption
 - 🌳 Preserves the original directory structure
 - 📁 Saves downloads to a chosen directory with `-o`/`--output-dir <DIR>` and creates missing directories automatically
 - 🛡️ Keeps downloads inside the target output directory, refuses symlinks and non-regular files, and sanitises unsafe paths and reserved device names on Windows
 - 🔄 Stages downloads in `.part` files, resumes partial transfers, and validates HTTP range responses
 - 🔏 Verifies MD5 hashes and renames `.part` files atomically only after verification succeeds
+- ✅ Verifies existing local directories in read-only `--check` mode for file presence, leftover `.part` files, sizes, and MD5 hashes
 - 📋 Continues past individual file failures, prints a batch summary, and exits with a non-zero status on failed or interrupted runs
 - 🍪 Scopes cookies per request and redirect hop, checks live expiry, and rejects redirect loops and HTTPS-to-HTTP downgrades
 - 🌱 Can be run multiple times to update existing downloads

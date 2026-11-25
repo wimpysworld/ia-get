@@ -46,6 +46,15 @@ pub enum IaGetError {
         total: usize,
     },
 
+    /// One or more files failed local verification
+    #[error("{failed} of {total} file(s) failed verification")]
+    VerificationFailed {
+        /// Number of files that failed verification
+        failed: usize,
+        /// Total number of files checked
+        total: usize,
+    },
+
     /// User-supplied filter glob pattern is invalid
     #[error("Invalid filter pattern '{pattern}': {reason}")]
     InvalidFilter {
