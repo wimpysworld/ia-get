@@ -494,10 +494,10 @@ fn plan_downloads_with_case_sensitivity(
 }
 
 /// Builds and validates a sanitised download plan from selected archive metadata entries
-/// according to the destination directory's filesystem case sensitivity.
+/// according to each parent directory's filesystem lookup rules.
 ///
 /// Rejects plans where two entries map to the same sanitised destination path or where one
-/// entry's `.part` staging path collides with another entry's destination path.
+/// entry's `.part` staging path or planned directory collides with another entry.
 fn plan_downloads_for_dir(
     files: XmlFiles,
     base_url: &Url,
@@ -866,7 +866,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Build and validate the download plan against the destination filesystem's case sensitivity
+    // Build and validate the download plan against each parent directory's filesystem lookup rules
     // before creating missing output directories, checking disk space, or starting transfers.
     let target_dir = resolve_output_dir(cli.output_dir.as_deref());
     let plan = match plan_downloads_for_dir(files, &base_url, target_dir) {
@@ -5631,6 +5631,49 @@ mod tests {
             !missing_dir.exists(),
             "plan_downloads_for_dir must not create missing output directories"
         );
+        assert_eq!(
+            std::fs::read_dir(&sandbox.0).unwrap().count(),
+            0,
+            "plan_downloads_for_dir must clean up temporary probe directories"
+        );
+    }
+
+    #[test]
+    fn plan_downloads_for_dir_rejects_file_vs_directory_collisions() {
+        let base_url = Url::parse("https://archive.org/download/item/item_files.xml").unwrap();
+        let sandbox = TempTestDir::new("plan-file-vs-dir");
+        let missing_dir = sandbox.join("not-created-yet");
+
+        let cases = [
+            ("foo", "foo/bar.txt", "foo"),
+            ("foo/bar.txt", "foo", "foo"),
+            ("foo", "foo.part/bar.txt", "foo.part"),
+        ];
+        for (first, second, expected_local) in cases {
+            let err = plan_downloads_for_dir(
+                XmlFiles {
+                    files: vec![xml_file(first, Some(10)), xml_file(second, Some(20))],
+                },
+                &base_url,
+                &missing_dir,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    IaGetError::PathCollision {
+                        ref local_path,
+                        ref first_entry,
+                        ref second_entry,
+                        ..
+                    } if local_path == expected_local
+                        && first_entry == first
+                        && second_entry == second
+                ),
+                "case ({first}, {second}): expected PathCollision for '{expected_local}', got {err:?}"
+            );
+        }
+        assert!(!missing_dir.exists());
     }
 
     #[test]

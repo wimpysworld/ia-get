@@ -2157,29 +2157,750 @@ where
     Ok(())
 }
 
-/// Validates that no two planned entries collide on either a final destination path
-/// or a `.part` staging path according to the destination directory's filesystem case sensitivity.
+/// Guard that removes a temporary filesystem probe directory and its contents when dropped.
+struct ProbeDirGuard(PathBuf);
+
+impl Drop for ProbeDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Resolved destination root state used for per-parent-directory filesystem lookup checks.
+#[derive(Debug, Clone)]
+struct ProbeRoot {
+    /// Existing directory whose filesystem lookup rules apply to the output root.
+    probe_dir: Option<PathBuf>,
+    /// Canonical path of the output root when it already exists as a directory on disk.
+    /// Remains `None` when the output root does not exist yet so missing children are never
+    /// probed against unrelated sibling directories in an existing ancestor.
+    exact_on_disk_dir: Option<PathBuf>,
+}
+
+/// Result of resolving filename equivalence for distinct component names inside one directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirEquivalenceResult {
+    /// For each component index `i`, the smallest index `groups[i] <= i` whose name resolves to
+    /// the same directory entry under that directory's filesystem lookup rules.
+    groups: Vec<usize>,
+    /// Reason suffix describing the lookup rule that detected a non-exact collision.
+    reason_suffix: &'static str,
+}
+
+/// Abstraction over per-directory filesystem lookup rules so [`validate_download_paths_for_dir`]
+/// probes real host directories while unit tests deterministically exercise mixed-mount and
+/// Unicode-normalisation directory trees.
+trait DirectoryLookup {
+    /// Resolves the output root for probing without creating missing directories.
+    fn resolve_root(&self, dir: &Path) -> ProbeRoot;
+
+    /// Resolves an existing, non-symlink child directory inside `parent_on_disk` for `segment`,
+    /// returning `None` if it does not exist, is a symlink, or escapes `canonical_root`.
+    fn resolve_child_dir(
+        &self,
+        canonical_root: Option<&Path>,
+        parent_on_disk: &Path,
+        segment: &str,
+    ) -> Option<PathBuf>;
+
+    /// Partitions `names` (distinct component names at a single directory level) into equivalence
+    /// classes under `probe_dir`'s filesystem lookup rules.
+    fn resolve_equivalences(
+        &self,
+        probe_dir: Option<&Path>,
+        names: &[String],
+        candidates: &[usize],
+    ) -> DirEquivalenceResult;
+}
+
+/// Production [`DirectoryLookup`] backed by the host OS filesystem.
+struct OsDirectoryLookup;
+
+/// Resolves `dir` into its existing probe directory and, when `dir` itself exists as a directory,
+/// its canonical on-disk path.
+fn resolve_probe_root(dir: &Path) -> ProbeRoot {
+    if dir.as_os_str().is_empty() {
+        return ProbeRoot {
+            probe_dir: None,
+            exact_on_disk_dir: None,
+        };
+    }
+
+    if fs::metadata(dir).map(|meta| meta.is_dir()).unwrap_or(false) {
+        let resolved = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        return ProbeRoot {
+            probe_dir: Some(resolved.clone()),
+            exact_on_disk_dir: Some(resolved),
+        };
+    }
+
+    let probe_dir = resolve_existing_probe_dir(dir)
+        .map(|ancestor| fs::canonicalize(&ancestor).unwrap_or(ancestor));
+    ProbeRoot {
+        probe_dir,
+        exact_on_disk_dir: None,
+    }
+}
+
+/// Resolves `parent_dir.join(segment)` only when it is an existing, non-symlink directory
+/// contained within `canonical_root`.
+fn resolve_contained_child_dir(
+    canonical_root: Option<&Path>,
+    parent_dir: &Path,
+    segment: &str,
+) -> Option<PathBuf> {
+    let child = parent_dir.join(segment);
+    let meta = fs::symlink_metadata(&child).ok()?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+        return None;
+    }
+    if let Some(root) = canonical_root {
+        let canonical_child = fs::canonicalize(&child).ok()?;
+        if !canonical_child.starts_with(root) {
+            return None;
+        }
+    }
+    Some(child)
+}
+
+/// Creates a private empty temporary probe directory inside `parent` with RAII cleanup.
+fn create_temp_probe_dir(parent: &Path) -> std::io::Result<ProbeDirGuard> {
+    let pid = std::process::id();
+    for _ in 0..MAX_TEMP_CASE_PROBE_ATTEMPTS {
+        let seq = CASE_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".ia-get-fs-probe-{pid}-{seq}"));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(ProbeDirGuard(candidate)),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "exhausted temporary probe directory attempts",
+    ))
+}
+
+/// Returns `true` if `name` is a Windows reserved DOS device name that must not be opened during
+/// filesystem probing.
+#[cfg(windows)]
+fn is_windows_reserved_probe_name(name: &str) -> bool {
+    let base = name.split('.').next().unwrap_or(name);
+    let trimmed = base.trim_end_matches([' ', '.']);
+    matches!(
+        trimmed.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+/// Selects indices in `names` that could collide under non-exact filesystem lookup rules.
 ///
-/// Only probes `dir` when a case-only collision is present, avoiding filesystem I/O for batches
-/// with exact duplicates or no case conflicts.
+/// Returns an empty vector when all component names are pure ASCII and have pairwise distinct
+/// ASCII-lowercased forms (preserving a zero-I/O fast path).
+fn select_probe_candidates(names: &[String]) -> Vec<usize> {
+    if names.len() < 2 {
+        return Vec::new();
+    }
+
+    if names.iter().any(|name| !name.is_ascii()) {
+        return (0..names.len()).collect();
+    }
+
+    let mut counts: HashMap<String, usize> = HashMap::with_capacity(names.len());
+    let keys: Vec<String> = names
+        .iter()
+        .map(|name| {
+            let key = name.trim_end_matches(['.', ' ']).to_ascii_lowercase();
+            *counts.entry(key.clone()).or_insert(0) += 1;
+            key
+        })
+        .collect();
+
+    keys.into_iter()
+        .enumerate()
+        .filter_map(|(idx, key)| (counts.get(&key).copied().unwrap_or(0) > 1).then_some(idx))
+        .collect()
+}
+
+/// Probes actual filename equivalence inside a private temporary directory created in `probe_dir`.
+///
+/// Returns `None` if `probe_dir` cannot be probed (for example on a read-only directory or for
+/// host-invalid filenames) so the caller can fall back cleanly.
+fn probe_names_in_dir(
+    probe_dir: &Path,
+    names: &[String],
+    candidates: &[usize],
+) -> Option<Vec<usize>> {
+    let temp_dir = create_temp_probe_dir(probe_dir).ok()?;
+    let mut groups: Vec<usize> = (0..names.len()).collect();
+
+    for &idx in candidates {
+        let name = &names[idx];
+        let mut comps = Path::new(name).components();
+        match (comps.next(), comps.next()) {
+            (Some(Component::Normal(_)), None) => {}
+            _ => return None,
+        }
+
+        #[cfg(windows)]
+        if is_windows_reserved_probe_name(name) {
+            return None;
+        }
+
+        let probe_path = temp_dir.0.join(name);
+        let mut create_opts = fs::OpenOptions::new();
+        create_opts.write(true).create_new(true);
+        configure_no_follow(&mut create_opts);
+
+        match create_opts.open(&probe_path) {
+            Ok(mut file) => {
+                let write_res = file.write_all(idx.to_string().as_bytes());
+                drop(file);
+                write_res.ok()?;
+                groups[idx] = idx;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let mut read_opts = fs::OpenOptions::new();
+                read_opts.read(true);
+                configure_no_follow(&mut read_opts);
+                let mut file = read_opts.open(&probe_path).ok()?;
+                if !file.metadata().ok().map(|m| m.is_file()).unwrap_or(false) {
+                    drop(file);
+                    return None;
+                }
+                let mut tag = String::new();
+                let read_res = file.read_to_string(&mut tag);
+                drop(file);
+                read_res.ok()?;
+                let earlier_idx = tag.trim().parse::<usize>().ok()?;
+                if earlier_idx >= idx || earlier_idx >= names.len() {
+                    return None;
+                }
+                groups[idx] = groups[earlier_idx];
+            }
+            Err(_) => return None,
+        }
+    }
+
+    drop(temp_dir);
+    Some(groups)
+}
+
+/// Fallback filename equivalence check when a directory cannot be probed directly (for example on
+/// a read-only directory or for filenames rejected by the host OS).
+fn fallback_dir_equivalence(probe_dir: Option<&Path>, names: &[String]) -> DirEquivalenceResult {
+    let sensitivity = probe_dir
+        .map(detect_path_case_sensitivity)
+        .unwrap_or_else(default_platform_case_sensitivity);
+
+    if sensitivity == PathCaseSensitivity::CaseSensitive {
+        return DirEquivalenceResult {
+            groups: (0..names.len()).collect(),
+            reason_suffix: "",
+        };
+    }
+
+    let mut seen: HashMap<String, usize> = HashMap::with_capacity(names.len());
+    let mut groups = Vec::with_capacity(names.len());
+    for (idx, name) in names.iter().enumerate() {
+        let folded = name.to_lowercase();
+        let group = *seen.entry(folded).or_insert(idx);
+        groups.push(group);
+    }
+
+    DirEquivalenceResult {
+        groups,
+        reason_suffix: " on a case-insensitive filesystem",
+    }
+}
+
+impl DirectoryLookup for OsDirectoryLookup {
+    fn resolve_root(&self, dir: &Path) -> ProbeRoot {
+        resolve_probe_root(dir)
+    }
+
+    fn resolve_child_dir(
+        &self,
+        canonical_root: Option<&Path>,
+        parent_on_disk: &Path,
+        segment: &str,
+    ) -> Option<PathBuf> {
+        resolve_contained_child_dir(canonical_root, parent_on_disk, segment)
+    }
+
+    fn resolve_equivalences(
+        &self,
+        probe_dir: Option<&Path>,
+        names: &[String],
+        candidates: &[usize],
+    ) -> DirEquivalenceResult {
+        if let Some(dir) = probe_dir {
+            if let Some(groups) = probe_names_in_dir(dir, names, candidates) {
+                return DirEquivalenceResult {
+                    groups,
+                    reason_suffix: " under the destination directory's filesystem lookup rules",
+                };
+            }
+        }
+
+        fallback_dir_equivalence(probe_dir, names)
+    }
+}
+
+/// Distinguishes whether a planned path placement represents a final file or a `.part` staging
+/// file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlannedPathKind {
+    Final,
+    Staging,
+}
+
+/// Role played by a planned path item at a specific directory depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CollisionRole {
+    Final,
+    Staging,
+    Subdir,
+}
+
+/// Normalised planned path placement (either final destination or `.part` staging file).
+#[derive(Debug)]
+struct PlannedPathItem<'a> {
+    entry_idx: usize,
+    entry_label: &'a str,
+    kind: PlannedPathKind,
+    segments: Vec<String>,
+    display_path: String,
+}
+
+/// Per-equivalence-group occupancy state while checking a single directory level.
+#[derive(Default)]
+struct GroupOccupancy {
+    final_item: Option<usize>,
+    staging_item: Option<usize>,
+    subdir_first_item: Option<usize>,
+    subdir_items: Vec<usize>,
+    subdir_name_ids: Vec<usize>,
+}
+
+/// Work item representing a single planned directory level to validate.
+struct DirLevelWork {
+    depth: usize,
+    item_indices: Vec<usize>,
+    probe_dir: Option<PathBuf>,
+    exact_on_disk_dir: Option<PathBuf>,
+    inherited_reason_suffix: Option<&'static str>,
+}
+
+/// Extracts strictly normal UTF-8 path segments from a normalised relative path.
+fn normal_path_segments(path: &Path) -> Option<Vec<String>> {
+    let mut segments = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => segments.push(segment.to_str()?.to_string()),
+            _ => return None,
+        }
+    }
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments)
+    }
+}
+
+/// Selects the appropriate collision reason suffix depending on whether the conflict occurred on
+/// exact identical segments or via non-exact lookup equivalence at this level or an ancestor.
+fn collision_reason_suffix(
+    first: &PlannedPathItem<'_>,
+    second: &PlannedPathItem<'_>,
+    depth: usize,
+    level_reason_suffix: &'static str,
+    inherited_reason_suffix: Option<&'static str>,
+) -> &'static str {
+    if first.segments[depth] != second.segments[depth] {
+        level_reason_suffix
+    } else if first.segments[..depth] != second.segments[..depth] {
+        inherited_reason_suffix.unwrap_or(level_reason_suffix)
+    } else {
+        ""
+    }
+}
+
+/// Builds a [`IaGetError::PathCollision`] for two conflicting items at `depth`.
+fn build_level_collision_error(
+    first: &PlannedPathItem<'_>,
+    second: &PlannedPathItem<'_>,
+    depth: usize,
+    first_role: CollisionRole,
+    second_role: CollisionRole,
+    level_reason_suffix: &'static str,
+    inherited_reason_suffix: Option<&'static str>,
+) -> IaGetError {
+    let suffix = collision_reason_suffix(
+        first,
+        second,
+        depth,
+        level_reason_suffix,
+        inherited_reason_suffix,
+    );
+    let local_path = match second_role {
+        CollisionRole::Final | CollisionRole::Staging => second.display_path.clone(),
+        CollisionRole::Subdir => second.segments[..=depth].join("/"),
+    };
+    let reason = match (first_role, second_role) {
+        (CollisionRole::Final, CollisionRole::Final) => {
+            format!("both entries map to the same destination path{suffix}")
+        }
+        (CollisionRole::Staging, CollisionRole::Final) => {
+            format!("destination path collides with staging '.part' path{suffix}")
+        }
+        (CollisionRole::Final, CollisionRole::Staging) => {
+            format!("staging '.part' path collides with destination path{suffix}")
+        }
+        (CollisionRole::Staging, CollisionRole::Staging) => {
+            format!("both entries map to the same staging '.part' path{suffix}")
+        }
+        (CollisionRole::Subdir, CollisionRole::Final) => {
+            format!("destination path collides with directory path{suffix}")
+        }
+        (CollisionRole::Final, CollisionRole::Subdir) => {
+            format!("directory path collides with destination path{suffix}")
+        }
+        (CollisionRole::Subdir, CollisionRole::Staging) => {
+            format!("staging '.part' path collides with directory path{suffix}")
+        }
+        (CollisionRole::Staging, CollisionRole::Subdir) => {
+            format!("directory path collides with staging '.part' path{suffix}")
+        }
+        (CollisionRole::Subdir, CollisionRole::Subdir) => {
+            unreachable!("matching subdirectories merge instead of colliding")
+        }
+    };
+
+    IaGetError::PathCollision {
+        local_path,
+        first_entry: first.entry_label.to_string(),
+        second_entry: second.entry_label.to_string(),
+        reason,
+    }
+}
+
+/// Checks all items at a single directory level against equivalence `groups` and returns the
+/// per-group occupancy (including merged subdirectory children) on success.
+fn check_level_groups(
+    all_items: &[PlannedPathItem<'_>],
+    item_indices: &[usize],
+    item_name_ids: &[usize],
+    depth: usize,
+    groups: &[usize],
+    level_reason_suffix: &'static str,
+    inherited_reason_suffix: Option<&'static str>,
+) -> Result<Vec<GroupOccupancy>> {
+    let mut occupancy: Vec<GroupOccupancy> = (0..groups.len())
+        .map(|_| GroupOccupancy::default())
+        .collect();
+
+    for (pos, &item_idx) in item_indices.iter().enumerate() {
+        let name_id = item_name_ids[pos];
+        let group_id = groups[name_id];
+        let item = &all_items[item_idx];
+        let occ = &mut occupancy[group_id];
+
+        if depth + 1 < item.segments.len() {
+            if let Some(first_idx) = occ.final_item {
+                if all_items[first_idx].entry_idx != item.entry_idx {
+                    return Err(build_level_collision_error(
+                        &all_items[first_idx],
+                        item,
+                        depth,
+                        CollisionRole::Final,
+                        CollisionRole::Subdir,
+                        level_reason_suffix,
+                        inherited_reason_suffix,
+                    ));
+                }
+            }
+            if let Some(first_idx) = occ.staging_item {
+                if all_items[first_idx].entry_idx != item.entry_idx {
+                    return Err(build_level_collision_error(
+                        &all_items[first_idx],
+                        item,
+                        depth,
+                        CollisionRole::Staging,
+                        CollisionRole::Subdir,
+                        level_reason_suffix,
+                        inherited_reason_suffix,
+                    ));
+                }
+            }
+            if occ.subdir_first_item.is_none() {
+                occ.subdir_first_item = Some(item_idx);
+            }
+            occ.subdir_items.push(item_idx);
+            if !occ.subdir_name_ids.contains(&name_id) {
+                occ.subdir_name_ids.push(name_id);
+            }
+        } else {
+            let role = match item.kind {
+                PlannedPathKind::Final => CollisionRole::Final,
+                PlannedPathKind::Staging => CollisionRole::Staging,
+            };
+
+            if let Some(first_idx) = occ.final_item {
+                if all_items[first_idx].entry_idx != item.entry_idx {
+                    return Err(build_level_collision_error(
+                        &all_items[first_idx],
+                        item,
+                        depth,
+                        CollisionRole::Final,
+                        role,
+                        level_reason_suffix,
+                        inherited_reason_suffix,
+                    ));
+                }
+            }
+            if let Some(first_idx) = occ.staging_item {
+                if all_items[first_idx].entry_idx != item.entry_idx {
+                    return Err(build_level_collision_error(
+                        &all_items[first_idx],
+                        item,
+                        depth,
+                        CollisionRole::Staging,
+                        role,
+                        level_reason_suffix,
+                        inherited_reason_suffix,
+                    ));
+                }
+            }
+            if let Some(first_idx) = occ.subdir_first_item {
+                if all_items[first_idx].entry_idx != item.entry_idx {
+                    return Err(build_level_collision_error(
+                        &all_items[first_idx],
+                        item,
+                        depth,
+                        CollisionRole::Subdir,
+                        role,
+                        level_reason_suffix,
+                        inherited_reason_suffix,
+                    ));
+                }
+            }
+
+            match item.kind {
+                PlannedPathKind::Final => {
+                    if occ.final_item.is_none() {
+                        occ.final_item = Some(item_idx);
+                    }
+                }
+                PlannedPathKind::Staging => {
+                    if occ.staging_item.is_none() {
+                        occ.staging_item = Some(item_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(occupancy)
+}
+
+/// Validates planned `(entry_label, local_path)` pairs using per-parent-directory filesystem
+/// lookup rules supplied by `lookup`.
+fn validate_download_paths_with_lookup(
+    dir: &Path,
+    entries: &[(&str, &str)],
+    lookup: &impl DirectoryLookup,
+) -> Result<()> {
+    // Fast exact pass catches byte-identical final and `.part` collisions with zero I/O.
+    validate_collision_keys(entries, Path::to_path_buf, "")?;
+
+    if entries.len() < 2 {
+        return Ok(());
+    }
+
+    let mut all_items: Vec<PlannedPathItem<'_>> = Vec::with_capacity(entries.len() * 2);
+    for (entry_idx, &(entry_label, local_path)) in entries.iter().enumerate() {
+        let clean_final = collision_path_key(Path::new(local_path));
+        if let Some(segments) = normal_path_segments(&clean_final) {
+            all_items.push(PlannedPathItem {
+                entry_idx,
+                entry_label,
+                kind: PlannedPathKind::Final,
+                segments,
+                display_path: format_collision_path(&clean_final),
+            });
+        }
+
+        let part_path = part_file_path(local_path);
+        let clean_staging = collision_path_key(&part_path);
+        if let Some(segments) = normal_path_segments(&clean_staging) {
+            all_items.push(PlannedPathItem {
+                entry_idx,
+                entry_label,
+                kind: PlannedPathKind::Staging,
+                segments,
+                display_path: format_collision_path(&clean_staging),
+            });
+        }
+    }
+
+    if all_items.len() < 2 {
+        return Ok(());
+    }
+
+    let root = lookup.resolve_root(dir);
+    let canonical_root = root.exact_on_disk_dir.clone();
+
+    let mut work_stack = vec![DirLevelWork {
+        depth: 0,
+        item_indices: (0..all_items.len()).collect(),
+        probe_dir: root.probe_dir,
+        exact_on_disk_dir: root.exact_on_disk_dir,
+        inherited_reason_suffix: None,
+    }];
+
+    while let Some(level) = work_stack.pop() {
+        let (Some(&first_item_idx), Some(&last_item_idx)) =
+            (level.item_indices.first(), level.item_indices.last())
+        else {
+            continue;
+        };
+        if all_items[first_item_idx].entry_idx == all_items[last_item_idx].entry_idx {
+            continue;
+        }
+
+        let mut name_to_id: HashMap<&str, usize> = HashMap::new();
+        let mut names: Vec<String> = Vec::new();
+        let mut item_name_ids: Vec<usize> = Vec::with_capacity(level.item_indices.len());
+
+        for &item_idx in &level.item_indices {
+            let seg = all_items[item_idx].segments[level.depth].as_str();
+            let name_id = match name_to_id.get(seg) {
+                Some(&id) => id,
+                None => {
+                    let id = names.len();
+                    name_to_id.insert(seg, id);
+                    names.push(seg.to_string());
+                    id
+                }
+            };
+            item_name_ids.push(name_id);
+        }
+
+        // First validate exact component groups (catches exact file-vs-directory and merged-parent
+        // exact leaf collisions without filesystem probing).
+        let exact_groups: Vec<usize> = (0..names.len()).collect();
+        let mut occupancy = check_level_groups(
+            &all_items,
+            &level.item_indices,
+            &item_name_ids,
+            level.depth,
+            &exact_groups,
+            "",
+            level.inherited_reason_suffix,
+        )?;
+        let mut level_reason_suffix = "";
+
+        let candidates = select_probe_candidates(&names);
+        if !candidates.is_empty() {
+            let eq = lookup.resolve_equivalences(level.probe_dir.as_deref(), &names, &candidates);
+            if eq
+                .groups
+                .iter()
+                .enumerate()
+                .any(|(idx, &group)| group != idx)
+            {
+                occupancy = check_level_groups(
+                    &all_items,
+                    &level.item_indices,
+                    &item_name_ids,
+                    level.depth,
+                    &eq.groups,
+                    eq.reason_suffix,
+                    level.inherited_reason_suffix,
+                )?;
+                level_reason_suffix = eq.reason_suffix;
+            }
+        }
+
+        let mut next_levels = Vec::new();
+        for occ in occupancy {
+            let (Some(&first_child), Some(&last_child)) =
+                (occ.subdir_items.first(), occ.subdir_items.last())
+            else {
+                continue;
+            };
+            if all_items[first_child].entry_idx == all_items[last_child].entry_idx {
+                continue;
+            }
+
+            let child_exact_on_disk = level.exact_on_disk_dir.as_deref().and_then(|parent_dir| {
+                occ.subdir_name_ids.iter().find_map(|&name_id| {
+                    lookup.resolve_child_dir(canonical_root.as_deref(), parent_dir, &names[name_id])
+                })
+            });
+            let child_probe_dir = child_exact_on_disk
+                .clone()
+                .or_else(|| level.probe_dir.clone());
+            let child_inherited_reason_suffix = if occ.subdir_name_ids.len() > 1 {
+                Some(level_reason_suffix)
+            } else {
+                level.inherited_reason_suffix
+            };
+
+            next_levels.push(DirLevelWork {
+                depth: level.depth + 1,
+                item_indices: occ.subdir_items,
+                probe_dir: child_probe_dir,
+                exact_on_disk_dir: child_exact_on_disk,
+                inherited_reason_suffix: child_inherited_reason_suffix,
+            });
+        }
+
+        // Push in reverse order so child directories are visited in first-appearance order.
+        for next in next_levels.into_iter().rev() {
+            work_stack.push(next);
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates that no two planned entries collide on either a final destination path,
+/// a `.part` staging path, or a planned directory path according to each parent directory's
+/// actual filesystem lookup rules.
+///
+/// Probes only existing parent directories (or the nearest existing ancestor when directories do
+/// not exist yet, without creating missing directories or following symlinks inside `dir`) and
+/// avoids filesystem I/O when all names at a directory level are pure ASCII without case
+/// conflicts.
 pub fn validate_download_paths_for_dir<'a, I>(dir: &Path, entries: I) -> Result<()>
 where
     I: IntoIterator<Item = (&'a str, &'a str)>,
 {
     let entries: Vec<(&'a str, &'a str)> = entries.into_iter().collect();
-    validate_collision_keys(&entries, Path::to_path_buf, "")?;
-
-    if let Err(case_err) = validate_collision_keys(
-        &entries,
-        case_folded_collision_key,
-        " on a case-insensitive filesystem",
-    ) {
-        if detect_path_case_sensitivity(dir) == PathCaseSensitivity::CaseInsensitive {
-            return Err(case_err);
-        }
-    }
-
-    Ok(())
+    validate_download_paths_with_lookup(dir, &entries, &OsDirectoryLookup)
 }
 
 /// Validates that no two planned entries collide on either a final destination path
@@ -10498,6 +11219,752 @@ mod tests {
                 let requests = server.finish().await;
                 assert_eq!(requests.len(), 2);
             }
+        }
+    }
+
+    /// Lookup rule simulated by [`MockDirectoryLookup`] for deterministic per-directory tests.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum MockDirRule {
+        /// Case-sensitive and Unicode-normalisation-sensitive (for example Linux ext4).
+        Exact,
+        /// ASCII case-insensitive (for example a FAT32/SMB mount).
+        CaseInsensitiveAscii,
+        /// Case-sensitive, Unicode NFC/NFD normalisation-insensitive (for example case-sensitive
+        /// APFS/HFS+).
+        NormalizationInsensitive,
+        /// Both Unicode case-folding (including `ß` -> `ss`) and NFC/NFD normalisation-insensitive
+        /// (for example default APFS or ext4 `+F`).
+        CaseAndNormalizationInsensitive,
+    }
+
+    impl MockDirRule {
+        fn canonical_key(self, name: &str) -> String {
+            let normalize_nfc = |s: &str| {
+                s.replace("e\u{0301}", "\u{00e9}")
+                    .replace("E\u{0301}", "\u{00c9}")
+                    .replace("a\u{030a}", "\u{00e5}")
+                    .replace("A\u{030a}", "\u{00c5}")
+            };
+
+            match self {
+                MockDirRule::Exact => name.to_string(),
+                MockDirRule::CaseInsensitiveAscii => name.to_ascii_lowercase(),
+                MockDirRule::NormalizationInsensitive => normalize_nfc(name),
+                MockDirRule::CaseAndNormalizationInsensitive => {
+                    normalize_nfc(name).replace('\u{00df}', "ss").to_lowercase()
+                }
+            }
+        }
+    }
+
+    /// Deterministic in-memory [`DirectoryLookup`] simulating mixed-mount directory trees and
+    /// recording every probed directory path.
+    struct MockDirectoryLookup {
+        dirs: HashMap<PathBuf, MockDirRule>,
+        probed_dirs: std::cell::RefCell<Vec<PathBuf>>,
+    }
+
+    impl MockDirectoryLookup {
+        fn new(entries: impl IntoIterator<Item = (&'static str, MockDirRule)>) -> Self {
+            Self {
+                dirs: entries
+                    .into_iter()
+                    .map(|(path, rule)| (PathBuf::from(path), rule))
+                    .collect(),
+                probed_dirs: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn probed(&self) -> Vec<PathBuf> {
+            self.probed_dirs.borrow().clone()
+        }
+
+        fn clear_probed(&self) {
+            self.probed_dirs.borrow_mut().clear();
+        }
+    }
+
+    impl DirectoryLookup for MockDirectoryLookup {
+        fn resolve_root(&self, dir: &Path) -> ProbeRoot {
+            if self.dirs.contains_key(dir) {
+                return ProbeRoot {
+                    probe_dir: Some(dir.to_path_buf()),
+                    exact_on_disk_dir: Some(dir.to_path_buf()),
+                };
+            }
+
+            let ancestor = dir
+                .ancestors()
+                .find(|candidate| self.dirs.contains_key(*candidate))
+                .map(Path::to_path_buf);
+            ProbeRoot {
+                probe_dir: ancestor,
+                exact_on_disk_dir: None,
+            }
+        }
+
+        fn resolve_child_dir(
+            &self,
+            _canonical_root: Option<&Path>,
+            parent_on_disk: &Path,
+            segment: &str,
+        ) -> Option<PathBuf> {
+            let exact = parent_on_disk.join(segment);
+            if self.dirs.contains_key(&exact) {
+                return Some(exact);
+            }
+
+            let parent_rule = self
+                .dirs
+                .get(parent_on_disk)
+                .copied()
+                .unwrap_or(MockDirRule::Exact);
+            let target_key = parent_rule.canonical_key(segment);
+            self.dirs.keys().find_map(|candidate| {
+                if candidate.parent() == Some(parent_on_disk) {
+                    let child_name = candidate.file_name()?.to_str()?;
+                    if parent_rule.canonical_key(child_name) == target_key {
+                        return Some(candidate.clone());
+                    }
+                }
+                None
+            })
+        }
+
+        fn resolve_equivalences(
+            &self,
+            probe_dir: Option<&Path>,
+            names: &[String],
+            candidates: &[usize],
+        ) -> DirEquivalenceResult {
+            let dir = probe_dir.expect("mock lookup expects a resolved probe_dir");
+            self.probed_dirs.borrow_mut().push(dir.to_path_buf());
+            let rule = self.dirs.get(dir).copied().unwrap_or(MockDirRule::Exact);
+
+            let mut groups: Vec<usize> = (0..names.len()).collect();
+            let mut seen: HashMap<String, usize> = HashMap::new();
+            for &idx in candidates {
+                let key = rule.canonical_key(&names[idx]);
+                let group = *seen.entry(key).or_insert(idx);
+                groups[idx] = group;
+            }
+
+            DirEquivalenceResult {
+                groups,
+                reason_suffix: " under the destination directory's filesystem lookup rules",
+            }
+        }
+    }
+
+    #[test]
+    fn test_per_parent_lookup_case_insensitive_subdir_under_case_sensitive_root() {
+        let lookup = MockDirectoryLookup::new([
+            ("/root", MockDirRule::Exact),
+            ("/root/sub", MockDirRule::CaseInsensitiveAscii),
+        ]);
+        let root = Path::new("/root");
+
+        // Case-only difference in the case-sensitive root is allowed.
+        assert!(validate_download_paths_with_lookup(
+            root,
+            &[("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
+            &lookup,
+        )
+        .is_ok());
+        assert_eq!(lookup.probed(), vec![PathBuf::from("/root")]);
+
+        // Case-only collisions inside the case-insensitive sub-mount are rejected.
+        let sub_cases = [
+            (
+                "final-vs-final",
+                ("sub/Foo.txt", "sub/Foo.txt"),
+                ("sub/foo.txt", "sub/foo.txt"),
+                "sub/foo.txt",
+            ),
+            (
+                "staging-vs-final",
+                ("sub/a.txt", "sub/a.txt"),
+                ("sub/A.TXT.part", "sub/A.TXT.part"),
+                "sub/A.TXT.part",
+            ),
+            (
+                "final-vs-staging",
+                ("sub/A.TXT.part", "sub/A.TXT.part"),
+                ("sub/a.txt", "sub/a.txt"),
+                "sub/a.txt.part",
+            ),
+            (
+                "missing-nested-under-submount",
+                ("sub/newdir/Foo.txt", "sub/newdir/Foo.txt"),
+                ("sub/newdir/foo.txt", "sub/newdir/foo.txt"),
+                "sub/newdir/foo.txt",
+            ),
+        ];
+
+        for (label, first, second, expected_local) in sub_cases {
+            lookup.clear_probed();
+            let err =
+                validate_download_paths_with_lookup(root, &[first, second], &lookup).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    IaGetError::PathCollision {
+                        ref local_path,
+                        ref first_entry,
+                        ref second_entry,
+                        ref reason,
+                    } if local_path == expected_local
+                        && first_entry == first.0
+                        && second_entry == second.0
+                        && reason.contains("filesystem lookup rules")
+                ),
+                "case {label}: expected PathCollision for '{expected_local}', got {err:?}"
+            );
+            assert_eq!(
+                lookup.probed(),
+                vec![PathBuf::from("/root/sub")],
+                "case {label}: expected probe inside /root/sub"
+            );
+        }
+    }
+
+    #[test]
+    fn test_per_parent_lookup_case_sensitive_subdir_under_case_insensitive_root() {
+        let lookup = MockDirectoryLookup::new([
+            ("/root", MockDirRule::CaseInsensitiveAscii),
+            ("/root/sub", MockDirRule::Exact),
+        ]);
+        let root = Path::new("/root");
+
+        // Case-only collision in the case-insensitive root is rejected.
+        let root_err = validate_download_paths_with_lookup(
+            root,
+            &[("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
+            &lookup,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            root_err,
+            IaGetError::PathCollision {
+                ref local_path,
+                ..
+            } if local_path == "foo.txt"
+        ));
+
+        // Case-only difference inside the case-sensitive subdirectory is allowed.
+        lookup.clear_probed();
+        assert!(validate_download_paths_with_lookup(
+            root,
+            &[
+                ("sub/Foo.txt", "sub/Foo.txt"),
+                ("sub/foo.txt", "sub/foo.txt")
+            ],
+            &lookup,
+        )
+        .is_ok());
+        assert_eq!(lookup.probed(), vec![PathBuf::from("/root/sub")]);
+
+        // Equivalent parent spellings (`Sub` and `sub`) merge onto the existing case-sensitive
+        // `/root/sub`, where `Foo.txt` and `foo.txt` remain distinct.
+        lookup.clear_probed();
+        assert!(validate_download_paths_with_lookup(
+            root,
+            &[
+                ("Sub/Foo.txt", "Sub/Foo.txt"),
+                ("sub/foo.txt", "sub/foo.txt")
+            ],
+            &lookup,
+        )
+        .is_ok());
+        assert_eq!(
+            lookup.probed(),
+            vec![PathBuf::from("/root"), PathBuf::from("/root/sub")]
+        );
+
+        // Merging `Sub` and `sub` with an identical leaf filename still collides!
+        let merged_leaf_err = validate_download_paths_with_lookup(
+            root,
+            &[
+                ("Sub/Foo.txt", "Sub/Foo.txt"),
+                ("sub/Foo.txt", "sub/Foo.txt"),
+            ],
+            &lookup,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                merged_leaf_err,
+                IaGetError::PathCollision {
+                    ref local_path,
+                    ref first_entry,
+                    ref second_entry,
+                    ref reason,
+                } if local_path == "sub/Foo.txt"
+                    && first_entry == "Sub/Foo.txt"
+                    && second_entry == "sub/Foo.txt"
+                    && reason.contains("filesystem lookup rules")
+            ),
+            "unexpected merged-parent collision error: {merged_leaf_err:?}"
+        );
+    }
+
+    #[test]
+    fn test_per_parent_lookup_unicode_nfc_nfd_and_folding_equivalence() {
+        let norm_only = MockDirectoryLookup::new([
+            ("/apfs-cs", MockDirRule::NormalizationInsensitive),
+            ("/ext4", MockDirRule::Exact),
+            ("/apfs-ci", MockDirRule::CaseAndNormalizationInsensitive),
+        ]);
+
+        // Case-sensitive but normalisation-insensitive directory allows ASCII case differences.
+        assert!(validate_download_paths_with_lookup(
+            Path::new("/apfs-cs"),
+            &[("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
+            &norm_only,
+        )
+        .is_ok());
+
+        // NFC vs NFD collisions (final, staging in both orders, and colliding parent dirs).
+        let nfc_nfd_collisions = [
+            (
+                "nfc-vs-nfd-final",
+                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                ("Cafe\u{0301}.txt", "Cafe\u{0301}.txt"),
+                "Cafe\u{0301}.txt",
+            ),
+            (
+                "nfc-vs-nfd-staging-after",
+                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                ("Cafe\u{0301}.txt.part", "Cafe\u{0301}.txt.part"),
+                "Cafe\u{0301}.txt.part",
+            ),
+            (
+                "nfd-staging-before-nfc",
+                ("Cafe\u{0301}.txt.part", "Cafe\u{0301}.txt.part"),
+                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                "Caf\u{00e9}.txt.part",
+            ),
+            (
+                "nfc-vs-nfd-parent-dir",
+                ("Dir_Caf\u{00e9}/a.txt", "Dir_Caf\u{00e9}/a.txt"),
+                ("Dir_Cafe\u{0301}/a.txt", "Dir_Cafe\u{0301}/a.txt"),
+                "Dir_Cafe\u{0301}/a.txt",
+            ),
+        ];
+
+        for (label, first, second, expected_local) in nfc_nfd_collisions {
+            let err = validate_download_paths_with_lookup(
+                Path::new("/apfs-cs"),
+                &[first, second],
+                &norm_only,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    IaGetError::PathCollision {
+                        ref local_path,
+                        ref first_entry,
+                        ref second_entry,
+                        ref reason,
+                    } if local_path == expected_local
+                        && first_entry == first.0
+                        && second_entry == second.0
+                        && reason.contains("filesystem lookup rules")
+                ),
+                "case {label}: expected NFC/NFD PathCollision for '{expected_local}', got {err:?}"
+            );
+
+            // On a normalisation-sensitive filesystem, the exact same pair is allowed.
+            assert!(
+                validate_download_paths_with_lookup(
+                    Path::new("/ext4"),
+                    &[first, second],
+                    &norm_only,
+                )
+                .is_ok(),
+                "case {label}: normalisation-sensitive directory should allow {first:?} and {second:?}"
+            );
+        }
+
+        // Equivalent NFC/NFD parent directories with distinct child filenames are allowed.
+        assert!(validate_download_paths_with_lookup(
+            Path::new("/apfs-cs"),
+            &[
+                ("Dir_Caf\u{00e9}/a.txt", "Dir_Caf\u{00e9}/a.txt"),
+                ("Dir_Cafe\u{0301}/b.txt", "Dir_Cafe\u{0301}/b.txt"),
+            ],
+            &norm_only,
+        )
+        .is_ok());
+
+        // Non-ASCII entry colliding with a pure-ASCII entry under Unicode full case folding.
+        let folding_err = validate_download_paths_with_lookup(
+            Path::new("/apfs-ci"),
+            &[
+                ("Stra\u{00df}e.txt", "Stra\u{00df}e.txt"),
+                ("STRASSE.TXT", "STRASSE.TXT"),
+            ],
+            &norm_only,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            folding_err,
+            IaGetError::PathCollision {
+                ref local_path,
+                ..
+            } if local_path == "STRASSE.TXT"
+        ));
+    }
+
+    #[test]
+    fn test_per_parent_lookup_merges_colliding_parent_subdirectories() {
+        let lookup = MockDirectoryLookup::new([("/ci", MockDirRule::CaseInsensitiveAscii)]);
+        let root = Path::new("/ci");
+
+        let cases = [
+            (
+                "dir-case-and-file-case",
+                ("Dir/a.txt", "Dir/a.txt"),
+                ("dir/A.txt", "dir/A.txt"),
+                "dir/A.txt",
+            ),
+            (
+                "dir-case-and-staging-upper-part",
+                ("Dir/a.txt", "Dir/a.txt"),
+                ("dir/a.txt.PART", "dir/a.txt.PART"),
+                "dir/a.txt.PART",
+            ),
+            (
+                "dir-case-and-staging-before-final",
+                ("Dir/a.txt.PART", "Dir/a.txt.PART"),
+                ("dir/a.txt", "dir/a.txt"),
+                "dir/a.txt.part",
+            ),
+        ];
+
+        for (label, first, second, expected_local) in cases {
+            let err =
+                validate_download_paths_with_lookup(root, &[first, second], &lookup).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    IaGetError::PathCollision {
+                        ref local_path,
+                        ref first_entry,
+                        ref second_entry,
+                        ..
+                    } if local_path == expected_local
+                        && first_entry == first.0
+                        && second_entry == second.0
+                ),
+                "case {label}: expected PathCollision for '{expected_local}', got {err:?}"
+            );
+        }
+
+        // Distinct files under merged case-equivalent parent directories are allowed.
+        assert!(validate_download_paths_with_lookup(
+            root,
+            &[("Dir/a.txt", "Dir/a.txt"), ("dir/b.txt", "dir/b.txt")],
+            &lookup,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_per_parent_lookup_file_vs_directory_collisions() {
+        let lookup = MockDirectoryLookup::new([
+            ("/exact", MockDirRule::Exact),
+            ("/ci", MockDirRule::CaseInsensitiveAscii),
+        ]);
+
+        // Exact file-vs-directory and staging-vs-directory collisions fail with zero probing.
+        let exact_cases = [
+            (("foo", "foo"), ("foo/bar.txt", "foo/bar.txt"), "foo"),
+            (("foo/bar.txt", "foo/bar.txt"), ("foo", "foo"), "foo"),
+            (
+                ("foo", "foo"),
+                ("foo.part/bar.txt", "foo.part/bar.txt"),
+                "foo.part",
+            ),
+            (
+                ("foo.part/bar.txt", "foo.part/bar.txt"),
+                ("foo", "foo"),
+                "foo.part",
+            ),
+        ];
+        for (first, second, expected_local) in exact_cases {
+            lookup.clear_probed();
+            let err =
+                validate_download_paths_with_lookup(Path::new("/exact"), &[first, second], &lookup)
+                    .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    IaGetError::PathCollision {
+                        ref local_path,
+                        ref first_entry,
+                        ref second_entry,
+                        ..
+                    } if local_path == expected_local
+                        && first_entry == first.0
+                        && second_entry == second.0
+                ),
+                "expected exact file-vs-dir PathCollision for '{expected_local}', got {err:?}"
+            );
+            assert!(
+                lookup.probed().is_empty(),
+                "exact file-vs-dir collision must not require filesystem probing"
+            );
+        }
+
+        // Case-only file-vs-directory collision is allowed on exact dir and rejected on CI dir.
+        assert!(validate_download_paths_with_lookup(
+            Path::new("/exact"),
+            &[("foo", "foo"), ("FOO/bar.txt", "FOO/bar.txt")],
+            &lookup,
+        )
+        .is_ok());
+
+        let ci_cases = [
+            (("foo", "foo"), ("FOO/bar.txt", "FOO/bar.txt"), "FOO"),
+            (("FOO/bar.txt", "FOO/bar.txt"), ("foo", "foo"), "foo"),
+            (
+                ("foo", "foo"),
+                ("FOO.PART/bar.txt", "FOO.PART/bar.txt"),
+                "FOO.PART",
+            ),
+        ];
+        for (first, second, expected_local) in ci_cases {
+            let err =
+                validate_download_paths_with_lookup(Path::new("/ci"), &[first, second], &lookup)
+                    .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    IaGetError::PathCollision {
+                        ref local_path,
+                        ref first_entry,
+                        ref second_entry,
+                        ..
+                    } if local_path == expected_local
+                        && first_entry == first.0
+                        && second_entry == second.0
+                ),
+                "expected CI file-vs-dir PathCollision for '{expected_local}', got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_per_parent_lookup_zero_io_fast_path_and_missing_root_isolation() {
+        let lookup = MockDirectoryLookup::new([
+            ("/ancestor", MockDirRule::Exact),
+            ("/ancestor/sub", MockDirRule::CaseInsensitiveAscii),
+        ]);
+
+        // Pure-ASCII batch with no ASCII case duplicates performs zero probing.
+        assert!(validate_download_paths_with_lookup(
+            Path::new("/ancestor"),
+            &[
+                ("a.txt", "a.txt"),
+                ("b.txt", "b.txt"),
+                ("sub/c.txt", "sub/c.txt"),
+                ("sub/d.txt", "sub/d.txt"),
+            ],
+            &lookup,
+        )
+        .is_ok());
+        assert!(lookup.probed().is_empty());
+
+        // Single non-ASCII entry performs zero probing.
+        assert!(validate_download_paths_with_lookup(
+            Path::new("/ancestor"),
+            &[("Caf\u{00e9}.txt", "Caf\u{00e9}.txt")],
+            &lookup,
+        )
+        .is_ok());
+        assert!(lookup.probed().is_empty());
+
+        // When the output root does not exist yet (`/ancestor/missing`), planned child `sub` must
+        // NOT resolve to the unrelated sibling `/ancestor/sub`; it must inherit `/ancestor`.
+        assert!(validate_download_paths_with_lookup(
+            Path::new("/ancestor/missing"),
+            &[
+                ("sub/Foo.txt", "sub/Foo.txt"),
+                ("sub/foo.txt", "sub/foo.txt")
+            ],
+            &lookup,
+        )
+        .is_ok());
+        assert_eq!(lookup.probed(), vec![PathBuf::from("/ancestor")]);
+    }
+
+    /// Independently observes whether `dir` treats NFC (`Caf\u{00e9}`) and NFD (`Cafe\u{0301}`)
+    /// filenames as equivalent.
+    fn measure_host_dir_nfc_nfd_equivalent(dir: &Path) -> bool {
+        let nfc = dir.join("host-nfc-probe-caf\u{00e9}.txt");
+        let nfd = dir.join("host-nfc-probe-cafe\u{0301}.txt");
+        fs::write(&nfc, b"probe").expect("write host NFC probe");
+        let equivalent = match fs::symlink_metadata(&nfd) {
+            Ok(_) => true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(err) => panic!("unexpected error probing host NFC/NFD equivalence: {err}"),
+        };
+        let _ = fs::remove_file(&nfc);
+        equivalent
+    }
+
+    /// Asserts that `dir` contains no leftover `.ia-get-fs-probe-*` entries.
+    fn assert_no_probe_dirs_remaining(dir: &Path) {
+        for entry in fs::read_dir(dir).expect("read directory for probe cleanup check") {
+            let name = entry.expect("dir entry").file_name();
+            let name_str = name.to_string_lossy();
+            assert!(
+                !name_str.starts_with(".ia-get-fs-probe-"),
+                "leftover temporary probe directory found in {}: {}",
+                dir.display(),
+                name_str
+            );
+        }
+    }
+
+    #[test]
+    fn test_real_host_probe_unicode_cleanup_symlink_safety_and_readonly_fallback() {
+        let sandbox = TempTestDir::new("real-host-per-parent-probe");
+        let host_case = measure_host_dir_case_sensitivity(&sandbox.path);
+        let host_nfc_nfd = measure_host_dir_nfc_nfd_equivalent(&sandbox.path);
+
+        // 1. NFC vs NFD final and `.part` pairs match the real host filesystem and leave no probe
+        // directories behind.
+        let nfc_pairs = [
+            [
+                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                ("Cafe\u{0301}.txt", "Cafe\u{0301}.txt"),
+            ],
+            [
+                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                ("Cafe\u{0301}.txt.part", "Cafe\u{0301}.txt.part"),
+            ],
+        ];
+        for pair in nfc_pairs {
+            let result = validate_download_paths_for_dir(&sandbox.path, pair);
+            if host_nfc_nfd {
+                assert!(
+                    matches!(result, Err(IaGetError::PathCollision { .. })),
+                    "normalisation-insensitive host should reject {pair:?}, got {result:?}"
+                );
+            } else {
+                assert!(
+                    result.is_ok(),
+                    "normalisation-sensitive host should allow {pair:?}, got {result:?}"
+                );
+            }
+            assert_no_probe_dirs_remaining(&sandbox.path);
+        }
+
+        // 2. Missing output dir is never created and leaves no probe dirs in its existing parent.
+        let missing_dir = sandbox.join("never-created/nested");
+        let case_res = validate_download_paths_for_dir(
+            &missing_dir,
+            [("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
+        );
+        match host_case {
+            PathCaseSensitivity::CaseSensitive => assert!(case_res.is_ok()),
+            PathCaseSensitivity::CaseInsensitive => {
+                assert!(matches!(case_res, Err(IaGetError::PathCollision { .. })));
+            }
+        }
+        assert!(
+            !sandbox.join("never-created").exists(),
+            "validate_download_paths_for_dir must not create missing directories"
+        );
+        assert_no_probe_dirs_remaining(&sandbox.path);
+
+        // 3. Overlong filenames trigger `create_new` error -> clean probe dir removal -> fallback.
+        let long_lower = "a".repeat(300);
+        let long_upper = "A".repeat(300);
+        let long_res = validate_download_paths_for_dir(
+            &sandbox.path,
+            [
+                (long_lower.as_str(), long_lower.as_str()),
+                (long_upper.as_str(), long_upper.as_str()),
+            ],
+        );
+        match host_case {
+            PathCaseSensitivity::CaseSensitive => assert!(long_res.is_ok()),
+            PathCaseSensitivity::CaseInsensitive => {
+                assert!(matches!(long_res, Err(IaGetError::PathCollision { .. })));
+            }
+        }
+        assert_no_probe_dirs_remaining(&sandbox.path);
+
+        // 4. Symlinks inside output_dir are never followed for probing, and read-only directories
+        // fall back cleanly on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+
+            let external_target = TempTestDir::new("symlink-probe-external");
+            fs::set_permissions(&external_target.path, fs::Permissions::from_mode(0o555)).unwrap();
+            let link_path = sandbox.join("linked_sub");
+            symlink(&external_target.path, &link_path).unwrap();
+
+            let link_res = validate_download_paths_for_dir(
+                &sandbox.path,
+                [
+                    ("linked_sub/Foo.txt", "linked_sub/Foo.txt"),
+                    ("linked_sub/foo.txt", "linked_sub/foo.txt"),
+                ],
+            );
+            fs::set_permissions(&external_target.path, fs::Permissions::from_mode(0o755)).unwrap();
+            match host_case {
+                PathCaseSensitivity::CaseSensitive => assert!(link_res.is_ok()),
+                PathCaseSensitivity::CaseInsensitive => {
+                    assert!(matches!(link_res, Err(IaGetError::PathCollision { .. })));
+                }
+            }
+            assert_eq!(
+                fs::read_dir(&external_target.path).unwrap().count(),
+                0,
+                "symlink target outside output_dir must never be written to during probing"
+            );
+            assert_no_probe_dirs_remaining(&sandbox.path);
+
+            // Read-only directory (populated and empty) falls back cleanly.
+            let ro_populated = TempTestDir::new("ro-probe-populated");
+            fs::write(ro_populated.join("Sample.txt"), b"ro").unwrap();
+            fs::set_permissions(&ro_populated.path, fs::Permissions::from_mode(0o555)).unwrap();
+            let ro_pop_res = validate_download_paths_for_dir(
+                &ro_populated.path,
+                [("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
+            );
+            fs::set_permissions(&ro_populated.path, fs::Permissions::from_mode(0o755)).unwrap();
+            match host_case {
+                PathCaseSensitivity::CaseSensitive => assert!(ro_pop_res.is_ok()),
+                PathCaseSensitivity::CaseInsensitive => {
+                    assert!(matches!(ro_pop_res, Err(IaGetError::PathCollision { .. })));
+                }
+            }
+            assert_no_probe_dirs_remaining(&ro_populated.path);
+
+            let ro_empty = TempTestDir::new("ro-probe-empty");
+            fs::set_permissions(&ro_empty.path, fs::Permissions::from_mode(0o555)).unwrap();
+            let ro_empty_res = validate_download_paths_for_dir(
+                &ro_empty.path,
+                [("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
+            );
+            fs::set_permissions(&ro_empty.path, fs::Permissions::from_mode(0o755)).unwrap();
+            match default_platform_case_sensitivity() {
+                PathCaseSensitivity::CaseSensitive => assert!(ro_empty_res.is_ok()),
+                PathCaseSensitivity::CaseInsensitive => {
+                    assert!(matches!(
+                        ro_empty_res,
+                        Err(IaGetError::PathCollision { .. })
+                    ));
+                }
+            }
+            assert_no_probe_dirs_remaining(&ro_empty.path);
         }
     }
 }
