@@ -5,10 +5,10 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::future::Future;
-use std::hash::BuildHasher;
+use std::hash::{BuildHasher, Hash};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1833,6 +1833,208 @@ pub(crate) fn part_file_path(file_path: &str) -> PathBuf {
     PathBuf::from(part_path)
 }
 
+/// Counter for generating unique temporary probe filenames during case-sensitivity detection.
+static CASE_PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Maximum directory entries inspected during read-only case-sensitivity probing.
+const MAX_READ_ONLY_CASE_PROBE_ENTRIES: usize = 32;
+
+/// Maximum attempts to create a unique temporary probe file before falling back.
+const MAX_TEMP_CASE_PROBE_ATTEMPTS: usize = 16;
+
+/// Case-sensitivity rule used when checking planned download paths for collisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathCaseSensitivity {
+    /// Treat paths differing only in letter case as distinct (for example ext4, tmpfs, or
+    /// case-sensitive APFS).
+    CaseSensitive,
+    /// Treat paths differing only in letter case as colliding (for example default APFS, NTFS,
+    /// FAT32, or exFAT).
+    CaseInsensitive,
+}
+
+/// Guard that removes a temporary filesystem probe file when dropped.
+struct ProbeFileGuard(PathBuf);
+
+impl Drop for ProbeFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Returns the default filesystem case sensitivity for the current target platform when a
+/// directory cannot be probed directly.
+const fn default_platform_case_sensitivity() -> PathCaseSensitivity {
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
+    {
+        PathCaseSensitivity::CaseInsensitive
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
+    {
+        PathCaseSensitivity::CaseSensitive
+    }
+}
+
+/// Resolves `dir` (or its nearest existing ancestor directory) for filesystem probing.
+fn resolve_existing_probe_dir(dir: &Path) -> Option<PathBuf> {
+    if dir.as_os_str().is_empty() {
+        return None;
+    }
+
+    let candidate = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(dir)
+    };
+
+    for ancestor in candidate.ancestors() {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        if fs::metadata(ancestor)
+            .map(|meta| meta.is_dir())
+            .unwrap_or(false)
+        {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+
+    None
+}
+
+/// Flips the ASCII letter case of `name`, returning `None` if `name` contains no ASCII letters.
+fn toggle_ascii_case(name: &str) -> Option<String> {
+    if !name.bytes().any(|b| b.is_ascii_alphabetic()) {
+        return None;
+    }
+
+    let toggled: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_lowercase() {
+                ch.to_ascii_uppercase()
+            } else if ch.is_ascii_uppercase() {
+                ch.to_ascii_lowercase()
+            } else {
+                ch
+            }
+        })
+        .collect();
+    Some(toggled)
+}
+
+/// Probes case sensitivity inside `probe_dir` without writing by inspecting existing entries.
+fn probe_existing_child_case_sensitivity(probe_dir: &Path) -> Option<PathCaseSensitivity> {
+    let entries = fs::read_dir(probe_dir).ok()?;
+
+    for entry in entries.take(MAX_READ_ONLY_CASE_PROBE_ENTRIES) {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let file_name = entry.file_name();
+        let Some(name_str) = file_name.to_str() else {
+            continue;
+        };
+        let Some(toggled) = toggle_ascii_case(name_str) else {
+            continue;
+        };
+
+        let toggled_path = probe_dir.join(&toggled);
+        match fs::symlink_metadata(&toggled_path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                // Re-verify the original entry still exists so a concurrent deletion in a shared
+                // directory cannot be misclassified as case-sensitive.
+                if fs::symlink_metadata(probe_dir.join(&file_name)).is_ok() {
+                    return Some(PathCaseSensitivity::CaseSensitive);
+                }
+            }
+            Ok(toggled_meta) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    if let Ok(orig_meta) = entry.metadata() {
+                        if orig_meta.dev() == toggled_meta.dev()
+                            && orig_meta.ino() == toggled_meta.ino()
+                            && (orig_meta.is_dir() || orig_meta.nlink() == 1)
+                        {
+                            return Some(PathCaseSensitivity::CaseInsensitive);
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = toggled_meta;
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    None
+}
+
+/// Probes case sensitivity inside `probe_dir` by creating and immediately removing a unique
+/// zero-byte file with `create_new(true)`.
+fn probe_temp_file_case_sensitivity(probe_dir: &Path) -> Option<PathCaseSensitivity> {
+    let pid = std::process::id();
+
+    for _ in 0..MAX_TEMP_CASE_PROBE_ATTEMPTS {
+        let seq = CASE_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let lower_path = probe_dir.join(format!(".ia-get-case-probe-{pid}-{seq}-a"));
+        let upper_path = probe_dir.join(format!(".ia-get-case-probe-{pid}-{seq}-A"));
+
+        match fs::symlink_metadata(&upper_path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => continue,
+            Err(_) => return None,
+        }
+
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        configure_no_follow(&mut options);
+
+        let file = match options.open(&lower_path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        };
+        let _guard = ProbeFileGuard(lower_path);
+        drop(file);
+
+        return match fs::symlink_metadata(&upper_path) {
+            Ok(_) => Some(PathCaseSensitivity::CaseInsensitive),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Some(PathCaseSensitivity::CaseSensitive)
+            }
+            Err(_) => None,
+        };
+    }
+
+    None
+}
+
+/// Detects whether the filesystem hosting `dir` (or its nearest existing ancestor directory when
+/// `dir` does not exist yet) treats filenames as case-sensitive or case-insensitive.
+///
+/// Tries a read-only probe of existing entries inside the directory first, then a temporary
+/// probe file with guaranteed cleanup, and falls back to the platform default when the directory
+/// is unreadable or unwritable.
+pub fn detect_path_case_sensitivity(dir: &Path) -> PathCaseSensitivity {
+    let Some(probe_dir) = resolve_existing_probe_dir(dir) else {
+        return default_platform_case_sensitivity();
+    };
+
+    if let Some(sensitivity) = probe_existing_child_case_sensitivity(&probe_dir) {
+        return sensitivity;
+    }
+
+    if let Some(sensitivity) = probe_temp_file_case_sensitivity(&probe_dir) {
+        return sensitivity;
+    }
+
+    default_platform_case_sensitivity()
+}
+
 /// Normalises a relative destination path into a collision-detection key.
 fn collision_path_key(path: &Path) -> PathBuf {
     validate_relative_path(path).unwrap_or_else(|_| path.to_path_buf())
@@ -1854,59 +2056,71 @@ fn format_collision_path(path: &Path) -> String {
     }
 }
 
-/// Validates that no two planned entries collide on either a final destination path
-/// or a `.part` staging path.
-///
-/// Each item is `(entry_label, local_path)`, where `entry_label` identifies the source
-/// archive entry for error reporting and `local_path` is the local destination path.
-///
-/// Comparison is exact (case-sensitive) so distinct filenames differing only by case
-/// are preserved.
-pub fn validate_download_paths<'a, I>(entries: I) -> Result<()>
-where
-    I: IntoIterator<Item = (&'a str, &'a str)>,
-{
-    let mut final_paths: HashMap<PathBuf, String> = HashMap::new();
-    let mut staging_paths: HashMap<PathBuf, String> = HashMap::new();
+/// Normalises a relative destination path into a Unicode case-folded key for case-insensitive
+/// collision detection.
+fn case_folded_collision_key(path: &Path) -> String {
+    format_collision_path(path).to_lowercase()
+}
 
-    for (entry_label, local_path) in entries {
-        let final_key = collision_path_key(Path::new(local_path));
+/// Checks planned `(entry_label, local_path)` pairs for final and `.part` staging collisions
+/// using `make_key` to derive comparison keys while preserving exact display paths in errors.
+fn validate_collision_keys<K, F>(
+    entries: &[(&str, &str)],
+    mut make_key: F,
+    reason_suffix: &str,
+) -> Result<()>
+where
+    K: Eq + Hash,
+    F: FnMut(&Path) -> K,
+{
+    let mut final_paths: HashMap<K, String> = HashMap::new();
+    let mut staging_paths: HashMap<K, String> = HashMap::new();
+
+    for &(entry_label, local_path) in entries {
+        let clean_final = collision_path_key(Path::new(local_path));
         let part_path = part_file_path(local_path);
-        let staging_key = collision_path_key(&part_path);
+        let clean_staging = collision_path_key(&part_path);
+
+        let final_key = make_key(&clean_final);
+        let staging_key = make_key(&clean_staging);
 
         if let Some(first_entry) = final_paths.get(&final_key) {
             return Err(IaGetError::PathCollision {
-                local_path: format_collision_path(&final_key),
+                local_path: format_collision_path(&clean_final),
                 first_entry: first_entry.clone(),
                 second_entry: entry_label.to_string(),
-                reason: "both entries map to the same destination path".to_string(),
+                reason: format!("both entries map to the same destination path{reason_suffix}"),
             });
         }
 
         if let Some(first_entry) = staging_paths.get(&final_key) {
             return Err(IaGetError::PathCollision {
-                local_path: format_collision_path(&final_key),
+                local_path: format_collision_path(&clean_final),
                 first_entry: first_entry.clone(),
                 second_entry: entry_label.to_string(),
-                reason: "destination path collides with staging '.part' path".to_string(),
+                reason: format!(
+                    "destination path collides with staging '.part' path{reason_suffix}"
+                ),
             });
         }
 
         if let Some(first_entry) = final_paths.get(&staging_key) {
             return Err(IaGetError::PathCollision {
-                local_path: format_collision_path(&staging_key),
+                local_path: format_collision_path(&clean_staging),
                 first_entry: first_entry.clone(),
                 second_entry: entry_label.to_string(),
-                reason: "staging '.part' path collides with destination path".to_string(),
+                reason: format!(
+                    "staging '.part' path collides with destination path{reason_suffix}"
+                ),
             });
         }
 
         if let Some(first_entry) = staging_paths.get(&staging_key) {
             return Err(IaGetError::PathCollision {
-                local_path: format_collision_path(&staging_key),
+                local_path: format_collision_path(&clean_staging),
                 first_entry: first_entry.clone(),
                 second_entry: entry_label.to_string(),
-                reason: "both entries map to the same staging '.part' path".to_string(),
+                reason: format!("both entries map to the same staging '.part' path{reason_suffix}"),
             });
         }
 
@@ -1915,6 +2129,73 @@ where
     }
 
     Ok(())
+}
+
+/// Validates that no two planned entries collide on either a final destination path
+/// or a `.part` staging path under an explicit [`PathCaseSensitivity`] rule.
+///
+/// Each item is `(entry_label, local_path)`, where `entry_label` identifies the source
+/// archive entry for error reporting and `local_path` is the local destination path.
+pub fn validate_download_paths_with_case_sensitivity<'a, I>(
+    entries: I,
+    case_sensitivity: PathCaseSensitivity,
+) -> Result<()>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let entries: Vec<(&'a str, &'a str)> = entries.into_iter().collect();
+    validate_collision_keys(&entries, Path::to_path_buf, "")?;
+
+    if case_sensitivity == PathCaseSensitivity::CaseInsensitive {
+        validate_collision_keys(
+            &entries,
+            case_folded_collision_key,
+            " on a case-insensitive filesystem",
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Validates that no two planned entries collide on either a final destination path
+/// or a `.part` staging path according to the destination directory's filesystem case sensitivity.
+///
+/// Only probes `dir` when a case-only collision is present, avoiding filesystem I/O for batches
+/// with exact duplicates or no case conflicts.
+pub fn validate_download_paths_for_dir<'a, I>(dir: &Path, entries: I) -> Result<()>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let entries: Vec<(&'a str, &'a str)> = entries.into_iter().collect();
+    validate_collision_keys(&entries, Path::to_path_buf, "")?;
+
+    if let Err(case_err) = validate_collision_keys(
+        &entries,
+        case_folded_collision_key,
+        " on a case-insensitive filesystem",
+    ) {
+        if detect_path_case_sensitivity(dir) == PathCaseSensitivity::CaseInsensitive {
+            return Err(case_err);
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates that no two planned entries collide on either a final destination path
+/// or a `.part` staging path using exact (case-sensitive) matching.
+///
+/// Each item is `(entry_label, local_path)`, where `entry_label` identifies the source
+/// archive entry for error reporting and `local_path` is the local destination path.
+///
+/// Callers targeting a specific destination directory should use
+/// [`validate_download_paths_for_dir`] so case-insensitive filesystems also reject
+/// case-only collisions.
+pub fn validate_download_paths<'a, I>(entries: I) -> Result<()>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    validate_download_paths_with_case_sensitivity(entries, PathCaseSensitivity::CaseSensitive)
 }
 
 /// Returns the current byte length of a `.part` file inside `root`, or `0` if it does not exist.
@@ -2971,7 +3252,8 @@ where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
 {
     let files: Vec<(String, String, Option<String>)> = files.into_iter().collect();
-    validate_download_paths(
+    validate_download_paths_for_dir(
+        root,
         files
             .iter()
             .map(|(_, file_path, _)| (file_path.as_str(), file_path.as_str())),
@@ -9940,6 +10222,282 @@ mod tests {
                 !target_dir.exists(),
                 "case {label}: colliding batch must fail before creating output directory"
             );
+        }
+    }
+
+    #[test]
+    fn test_validate_download_paths_case_insensitive_rejects_case_only_final_and_staging_collisions(
+    ) {
+        let cases = [
+            (
+                "filename-case",
+                ("Foo.txt", "Foo.txt"),
+                ("foo.txt", "foo.txt"),
+                "foo.txt",
+            ),
+            (
+                "subdir-and-filename-case",
+                ("Dir/a.txt", "Dir/a.txt"),
+                ("dir/A.txt", "dir/A.txt"),
+                "dir/A.txt",
+            ),
+            (
+                "staging-then-final-upper-base",
+                ("a.txt", "a.txt"),
+                ("A.TXT.part", "A.TXT.part"),
+                "A.TXT.part",
+            ),
+            (
+                "staging-then-final-upper-part",
+                ("a.txt", "a.txt"),
+                ("a.txt.PART", "a.txt.PART"),
+                "a.txt.PART",
+            ),
+            (
+                "final-then-staging-upper-base",
+                ("A.TXT.part", "A.TXT.part"),
+                ("a.txt", "a.txt"),
+                "a.txt.part",
+            ),
+            (
+                "final-then-staging-upper-part",
+                ("a.txt.PART", "a.txt.PART"),
+                ("a.txt", "a.txt"),
+                "a.txt.part",
+            ),
+            (
+                "nested-staging-case",
+                ("Dir/a.txt", "Dir/a.txt"),
+                ("dir/A.TXT.PART", "dir/A.TXT.PART"),
+                "dir/A.TXT.PART",
+            ),
+            (
+                "unicode-case",
+                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                ("CAF\u{00c9}.txt", "CAF\u{00c9}.txt"),
+                "CAF\u{00c9}.txt",
+            ),
+            (
+                "sanitised-case",
+                ("foo?.txt", "foo_.txt"),
+                ("FOO*.TXT", "FOO_.TXT"),
+                "FOO_.TXT",
+            ),
+        ];
+
+        for (label, first, second, expected_local) in cases {
+            let err = validate_download_paths_with_case_sensitivity(
+                [first, second],
+                PathCaseSensitivity::CaseInsensitive,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    IaGetError::PathCollision {
+                        ref local_path,
+                        ref first_entry,
+                        ref second_entry,
+                        ref reason,
+                    } if local_path == expected_local
+                        && first_entry == first.0
+                        && second_entry == second.0
+                        && reason.contains("case-insensitive")
+                ),
+                "case {label}: expected case-insensitive PathCollision for '{expected_local}', got {err:?}"
+            );
+        }
+
+        // Exact duplicates still report the exact reason even in case-insensitive mode.
+        let exact_err = validate_download_paths_with_case_sensitivity(
+            [("foo?.txt", "foo_.txt"), ("foo*.txt", "foo_.txt")],
+            PathCaseSensitivity::CaseInsensitive,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                exact_err,
+                IaGetError::PathCollision {
+                    ref local_path,
+                    ref reason,
+                    ..
+                } if local_path == "foo_.txt"
+                    && reason == "both entries map to the same destination path"
+            ),
+            "expected exact collision reason, got {exact_err:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_download_paths_case_sensitive_allows_case_only_differences() {
+        assert!(validate_download_paths_with_case_sensitivity(
+            [
+                ("Foo.txt", "Foo.txt"),
+                ("foo.txt", "foo.txt"),
+                ("Dir/a.txt", "Dir/a.txt"),
+                ("dir/A.txt", "dir/A.txt"),
+                ("a.txt", "a.txt"),
+                ("A.TXT.part", "A.TXT.part"),
+                ("a.txt.PART", "a.txt.PART"),
+                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                ("CAF\u{00c9}.txt", "CAF\u{00c9}.txt"),
+            ],
+            PathCaseSensitivity::CaseSensitive,
+        )
+        .is_ok());
+    }
+
+    /// Independently observes whether `dir` is hosted on a case-sensitive or case-insensitive
+    /// filesystem by creating a single file and looking up its toggled-case counterpart.
+    fn measure_host_dir_case_sensitivity(dir: &Path) -> PathCaseSensitivity {
+        let lower = dir.join("host-case-probe-file.txt");
+        let upper = dir.join("HOST-CASE-PROBE-FILE.TXT");
+        fs::write(&lower, b"probe").expect("write host case probe");
+        let sensitive = match fs::symlink_metadata(&upper) {
+            Ok(_) => PathCaseSensitivity::CaseInsensitive,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                PathCaseSensitivity::CaseSensitive
+            }
+            Err(err) => panic!("unexpected error probing host case sensitivity: {err}"),
+        };
+        let _ = fs::remove_file(&lower);
+        sensitive
+    }
+
+    #[test]
+    fn test_detect_path_case_sensitivity_and_validate_for_dir_match_host_filesystem() {
+        let oracle_dir = TempTestDir::new("case-oracle");
+        let expected = measure_host_dir_case_sensitivity(&oracle_dir.path);
+
+        // 1. Empty existing directory (exercises temp probe file + cleanup).
+        let empty_dir = TempTestDir::new("case-empty");
+        assert_eq!(detect_path_case_sensitivity(&empty_dir.path), expected);
+        assert_eq!(
+            fs::read_dir(&empty_dir.path).unwrap().count(),
+            0,
+            "temporary case probe file must be cleaned up"
+        );
+
+        // 2. Non-empty existing directory (exercises read-only child probe).
+        let populated_dir = TempTestDir::new("case-populated");
+        fs::write(populated_dir.join("Existing.txt"), b"data").unwrap();
+        assert_eq!(detect_path_case_sensitivity(&populated_dir.path), expected);
+        assert_eq!(
+            fs::read_dir(&populated_dir.path).unwrap().count(),
+            1,
+            "read-only probe must not leave extra entries"
+        );
+
+        // 3. Not-yet-created nested directory resolves nearest existing ancestor without creating it.
+        let missing_dir = empty_dir.join("not-created-yet/nested");
+        assert_eq!(detect_path_case_sensitivity(&missing_dir), expected);
+        assert!(
+            !empty_dir.join("not-created-yet").exists(),
+            "case sensitivity detection must not create missing output directories"
+        );
+
+        // 4. Read-only directory with an existing child still probes cleanly on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let ro_dir = TempTestDir::new("case-readonly");
+            fs::write(ro_dir.join("Sample.txt"), b"ro").unwrap();
+            fs::set_permissions(&ro_dir.path, fs::Permissions::from_mode(0o555)).unwrap();
+            let detected = detect_path_case_sensitivity(&ro_dir.path);
+            fs::set_permissions(&ro_dir.path, fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(detected, expected);
+        }
+
+        // 5. validate_download_paths_for_dir matches host sensitivity for case-only pairs.
+        let case_only_pairs = [
+            [("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
+            [("a.txt", "a.txt"), ("A.TXT.part", "A.TXT.part")],
+        ];
+        for pair in case_only_pairs {
+            let result = validate_download_paths_for_dir(&missing_dir, pair);
+            match expected {
+                PathCaseSensitivity::CaseSensitive => assert!(
+                    result.is_ok(),
+                    "case-sensitive host should allow {pair:?}, got {result:?}"
+                ),
+                PathCaseSensitivity::CaseInsensitive => assert!(
+                    matches!(result, Err(IaGetError::PathCollision { .. })),
+                    "case-insensitive host should reject {pair:?}, got {result:?}"
+                ),
+            }
+        }
+        assert!(
+            !empty_dir.join("not-created-yet").exists(),
+            "validate_download_paths_for_dir must not create missing directories"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_download_files_in_dir_case_only_entries_follow_host_filesystem() {
+        let sandbox = TempTestDir::new("case-download-host");
+        let expected = measure_host_dir_case_sensitivity(&sandbox.path);
+        let target_dir = sandbox.join("not-created-yet");
+
+        let payload_upper = b"upper-file-contents";
+        let payload_lower = b"lower-file-contents";
+        let server = MockServer::start(vec![
+            MockResponse::ok(payload_upper),
+            MockResponse::ok(payload_lower),
+        ])
+        .await;
+
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+        let files = vec![
+            (
+                server.url("/upper"),
+                "Foo.txt".to_string(),
+                Some(format!("{:x}", md5::compute(payload_upper))),
+            ),
+            (
+                server.url("/lower"),
+                "foo.txt".to_string(),
+                Some(format!("{:x}", md5::compute(payload_lower))),
+            ),
+        ];
+
+        let result = download_files_in_dir(
+            &client,
+            &target_dir,
+            files,
+            2,
+            None,
+            &RetryPolicy::default(),
+            &signal,
+        )
+        .await;
+
+        match expected {
+            PathCaseSensitivity::CaseInsensitive => {
+                let err = result.unwrap_err();
+                assert!(
+                    matches!(err, IaGetError::PathCollision { .. }),
+                    "expected PathCollision on case-insensitive volume, got {err:?}"
+                );
+                let requests = server.abort_and_collect().await;
+                assert!(
+                    requests.is_empty(),
+                    "expected 0 HTTP requests on case collision, got {requests:?}"
+                );
+                assert!(
+                    !target_dir.exists(),
+                    "case collision must abort before creating output directory"
+                );
+            }
+            PathCaseSensitivity::CaseSensitive => {
+                let summary = result.expect("case-sensitive volume should download both files");
+                assert_eq!(summary.ok, 2);
+                assert!(summary.failed.is_empty());
+                assert_eq!(fs::read(target_dir.join("Foo.txt")).unwrap(), payload_upper);
+                assert_eq!(fs::read(target_dir.join("foo.txt")).unwrap(), payload_lower);
+                let requests = server.finish().await;
+                assert_eq!(requests.len(), 2);
+            }
         }
     }
 }

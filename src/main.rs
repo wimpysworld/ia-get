@@ -438,11 +438,16 @@ struct DownloadPlan {
     sanitized: Vec<(String, String)>,
 }
 
-/// Builds and validates a sanitised download plan from selected archive metadata entries.
-///
-/// Rejects plans where two entries map to the same sanitised destination path or where one
-/// entry's `.part` staging path collides with another entry's destination path.
-fn plan_downloads(files: XmlFiles, base_url: &Url) -> Result<DownloadPlan> {
+/// Builds an unvalidated download plan tuple of `(items, original_names, sanitized_renames)`.
+#[allow(clippy::type_complexity)]
+fn build_unvalidated_download_plan(
+    files: XmlFiles,
+    base_url: &Url,
+) -> (
+    Vec<disk_space::PlannedDownload>,
+    Vec<String>,
+    Vec<(String, String)>,
+) {
     let mut items = Vec::with_capacity(files.files.len());
     let mut original_names = Vec::with_capacity(files.files.len());
     let mut sanitized = Vec::new();
@@ -464,7 +469,44 @@ fn plan_downloads(files: XmlFiles, base_url: &Url) -> Result<DownloadPlan> {
         });
     }
 
-    downloader::validate_download_paths(
+    (items, original_names, sanitized)
+}
+
+/// Builds and validates a sanitised download plan from selected archive metadata entries
+/// using an explicit path case-sensitivity rule.
+#[cfg(test)]
+fn plan_downloads_with_case_sensitivity(
+    files: XmlFiles,
+    base_url: &Url,
+    case_sensitivity: downloader::PathCaseSensitivity,
+) -> Result<DownloadPlan> {
+    let (items, original_names, sanitized) = build_unvalidated_download_plan(files, base_url);
+
+    downloader::validate_download_paths_with_case_sensitivity(
+        original_names
+            .iter()
+            .zip(items.iter())
+            .map(|(original, item)| (original.as_str(), item.file_path.as_str())),
+        case_sensitivity,
+    )?;
+
+    Ok(DownloadPlan { items, sanitized })
+}
+
+/// Builds and validates a sanitised download plan from selected archive metadata entries
+/// according to the destination directory's filesystem case sensitivity.
+///
+/// Rejects plans where two entries map to the same sanitised destination path or where one
+/// entry's `.part` staging path collides with another entry's destination path.
+fn plan_downloads_for_dir(
+    files: XmlFiles,
+    base_url: &Url,
+    output_dir: &Path,
+) -> Result<DownloadPlan> {
+    let (items, original_names, sanitized) = build_unvalidated_download_plan(files, base_url);
+
+    downloader::validate_download_paths_for_dir(
+        output_dir,
         original_names
             .iter()
             .zip(items.iter())
@@ -472,6 +514,16 @@ fn plan_downloads(files: XmlFiles, base_url: &Url) -> Result<DownloadPlan> {
     )?;
 
     Ok(DownloadPlan { items, sanitized })
+}
+
+/// Builds and validates a sanitised download plan using case-sensitive path matching.
+#[cfg(test)]
+fn plan_downloads(files: XmlFiles, base_url: &Url) -> Result<DownloadPlan> {
+    plan_downloads_with_case_sensitivity(
+        files,
+        base_url,
+        downloader::PathCaseSensitivity::CaseSensitive,
+    )
 }
 
 /// Prints per-file warnings and a summary when filenames were sanitised.
@@ -516,6 +568,13 @@ async fn run_planned_downloads_with_logger<F>(
 where
     F: FnOnce(&Path, &[disk_space::PlannedDownload], &downloader::ShutdownSignal) -> Result<()>,
 {
+    downloader::validate_download_paths_for_dir(
+        output_dir,
+        plan.items
+            .iter()
+            .map(|item| (item.file_path.as_str(), item.file_path.as_str())),
+    )?;
+
     check_space(output_dir, &plan.items, signal)?;
 
     print_sanitization_warnings(&plan.sanitized);
@@ -599,6 +658,24 @@ where
     .await
 }
 
+/// Validates a check directory or prepares the download output directory.
+fn prepare_phase_dir(cli: &Cli, spinner: &indicatif::ProgressBar) -> Result<PathBuf> {
+    let target_dir = resolve_output_dir(cli.output_dir.as_deref());
+    let dir_result = if cli.check {
+        verify::validate_check_dir(target_dir)
+    } else {
+        downloader::prepare_output_dir(target_dir)
+    };
+
+    match dir_result {
+        Ok(canonical_dir) => Ok(canonical_dir),
+        Err(e) => {
+            spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
+            Err(e)
+        }
+    }
+}
+
 /// Finalises the metadata phase by listing files, validating a check directory,
 /// or preparing the output directory.
 fn finalize_metadata_phase(
@@ -611,20 +688,7 @@ fn finalize_metadata_phase(
         return Ok(None);
     }
 
-    let target_dir = resolve_output_dir(cli.output_dir.as_deref());
-    let dir_result = if cli.check {
-        verify::validate_check_dir(target_dir)
-    } else {
-        downloader::prepare_output_dir(target_dir)
-    };
-
-    match dir_result {
-        Ok(canonical_dir) => Ok(Some(canonical_dir)),
-        Err(e) => {
-            spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
-            Err(e)
-        }
-    }
+    prepare_phase_dir(cli, spinner).map(Some)
 }
 
 /// Command-line interface for ia-get
@@ -772,18 +836,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // If requested, list parsed filenames and exit; otherwise prepare or validate directory
-    let Some(output_dir) = finalize_metadata_phase(&cli, &files, &spinner)? else {
-        return Ok(());
-    };
+    // If requested, list parsed filenames and exit; or validate directory and verify local files
+    if cli.list || cli.check {
+        let Some(output_dir) = finalize_metadata_phase(&cli, &files, &spinner)? else {
+            return Ok(());
+        };
 
-    let file_label = if files.files.len() == 1 {
-        "file"
-    } else {
-        "files"
-    };
+        let file_label = if files.files.len() == 1 {
+            "file"
+        } else {
+            "files"
+        };
 
-    if cli.check {
         spinner.set_style(
             ProgressStyle::default_spinner()
                 .template(&format!(
@@ -802,14 +866,19 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let plan = match plan_downloads(files, &base_url) {
+    // Build and validate the download plan against the destination filesystem's case sensitivity
+    // before creating missing output directories, checking disk space, or starting transfers.
+    let target_dir = resolve_output_dir(cli.output_dir.as_deref());
+    let plan = match plan_downloads_for_dir(files, &base_url, target_dir) {
         Ok(plan) => plan,
         Err(e) => {
             spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
             return Err(e.into());
         }
     };
+    let output_dir = prepare_phase_dir(&cli, &spinner)?;
     let total_files = plan.items.len();
+    let file_label = if total_files == 1 { "file" } else { "files" };
     let options = downloader::DownloadOptions {
         retry_policy: downloader::RetryPolicy::default(),
         limit_rate: cli.limit_rate,
@@ -5459,9 +5528,9 @@ mod tests {
     }
 
     #[test]
-    fn plan_downloads_allows_non_colliding_and_case_differing_entries() {
+    fn plan_downloads_allows_non_colliding_and_case_differing_entries_when_case_sensitive() {
         let base_url = Url::parse("https://archive.org/download/item/item_files.xml").unwrap();
-        let plan = plan_downloads(
+        let plan = plan_downloads_with_case_sensitivity(
             XmlFiles {
                 files: vec![
                     xml_file("foo.txt", Some(10)),
@@ -5470,14 +5539,98 @@ mod tests {
                     xml_file("b/foo.txt", Some(40)),
                     xml_file("README.md", Some(50)),
                     xml_file("readme.md", Some(60)),
+                    xml_file("Dir/a.txt", Some(70)),
+                    xml_file("dir/A.txt", Some(80)),
+                    xml_file("A.TXT.part", Some(90)),
+                    xml_file("a.txt.PART", Some(100)),
+                    xml_file("a.txt", Some(110)),
                 ],
             },
             &base_url,
+            downloader::PathCaseSensitivity::CaseSensitive,
         )
-        .expect("non-colliding and case-differing entries should succeed");
+        .expect(
+            "non-colliding and case-differing entries should succeed on case-sensitive volumes",
+        );
 
-        assert_eq!(plan.items.len(), 6);
+        assert_eq!(plan.items.len(), 11);
         assert!(plan.sanitized.is_empty());
+    }
+
+    #[test]
+    fn plan_downloads_case_insensitive_rejects_case_only_final_and_staging_collisions() {
+        let base_url = Url::parse("https://archive.org/download/item/item_files.xml").unwrap();
+        let cases = [
+            ("Foo.txt", "foo.txt", "foo.txt"),
+            ("Dir/a.txt", "dir/A.txt", "dir/A.txt"),
+            ("a.txt", "A.TXT.part", "A.TXT.part"),
+            ("a.txt", "a.txt.PART", "a.txt.PART"),
+            ("A.TXT.part", "a.txt", "a.txt.part"),
+            ("a.txt.PART", "a.txt", "a.txt.part"),
+            ("foo?.txt", "FOO*.TXT", "FOO_.TXT"),
+            ("Caf\u{00e9}.txt", "CAF\u{00c9}.txt", "CAF\u{00c9}.txt"),
+        ];
+
+        for (first, second, expected_local) in cases {
+            let err = plan_downloads_with_case_sensitivity(
+                XmlFiles {
+                    files: vec![xml_file(first, Some(10)), xml_file(second, Some(20))],
+                },
+                &base_url,
+                downloader::PathCaseSensitivity::CaseInsensitive,
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(
+                    err,
+                    IaGetError::PathCollision {
+                        ref local_path,
+                        ref first_entry,
+                        ref second_entry,
+                        ref reason,
+                    } if local_path == expected_local
+                        && first_entry == first
+                        && second_entry == second
+                        && reason.contains("case-insensitive")
+                ),
+                "case ({first}, {second}): expected case-insensitive PathCollision for '{expected_local}', got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_downloads_for_dir_matches_host_filesystem_and_preserves_missing_dir() {
+        let base_url = Url::parse("https://archive.org/download/item/item_files.xml").unwrap();
+        let sandbox = TempTestDir::new("plan-case-host");
+        let missing_dir = sandbox.join("not-created-yet");
+        let host_sensitivity = downloader::detect_path_case_sensitivity(&missing_dir);
+
+        let result = plan_downloads_for_dir(
+            XmlFiles {
+                files: vec![xml_file("Foo.txt", Some(10)), xml_file("foo.txt", Some(20))],
+            },
+            &base_url,
+            &missing_dir,
+        );
+
+        match host_sensitivity {
+            downloader::PathCaseSensitivity::CaseSensitive => {
+                let plan = result.expect("case-sensitive host should allow Foo.txt and foo.txt");
+                assert_eq!(plan.items.len(), 2);
+            }
+            downloader::PathCaseSensitivity::CaseInsensitive => {
+                let err = result.unwrap_err();
+                assert!(
+                    matches!(err, IaGetError::PathCollision { .. }),
+                    "case-insensitive host should reject Foo.txt and foo.txt, got {err:?}"
+                );
+            }
+        }
+        assert!(
+            !missing_dir.exists(),
+            "plan_downloads_for_dir must not create missing output directories"
+        );
     }
 
     #[test]
@@ -5560,7 +5713,7 @@ mod tests {
                     .await
                     .unwrap();
 
-            let err = plan_downloads(files, &base_url).unwrap_err();
+            let err = plan_downloads_for_dir(files, &base_url, &output_dir.0).unwrap_err();
             spinner.finish_with_message(format!("{} {}", "✘".red().bold(), err));
 
             assert!(
@@ -5635,7 +5788,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        let plan = plan_downloads(files, &base_url).unwrap();
+        let plan = plan_downloads_for_dir(files, &base_url, &output_dir.0).unwrap();
         let summary = run_planned_downloads_with_space_check(
             &client,
             &output_dir.0,
