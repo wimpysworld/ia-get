@@ -432,14 +432,19 @@ fn resolve_output_dir(output_dir: Option<&Path>) -> &Path {
 }
 
 /// Sanitised download plan built from selected archive metadata entries.
+#[derive(Debug)]
 struct DownloadPlan {
     items: Vec<disk_space::PlannedDownload>,
     sanitized: Vec<(String, String)>,
 }
 
-/// Builds a sanitised download plan from selected archive metadata entries.
-fn plan_downloads(files: XmlFiles, base_url: &Url) -> DownloadPlan {
+/// Builds and validates a sanitised download plan from selected archive metadata entries.
+///
+/// Rejects plans where two entries map to the same sanitised destination path or where one
+/// entry's `.part` staging path collides with another entry's destination path.
+fn plan_downloads(files: XmlFiles, base_url: &Url) -> Result<DownloadPlan> {
     let mut items = Vec::with_capacity(files.files.len());
+    let mut original_names = Vec::with_capacity(files.files.len());
     let mut sanitized = Vec::new();
 
     for file in files.files {
@@ -447,9 +452,10 @@ fn plan_downloads(files: XmlFiles, base_url: &Url) -> DownloadPlan {
         let (sanitized_name, was_modified) = sanitize_filename(&file.name);
 
         if was_modified {
-            sanitized.push((file.name, sanitized_name.clone()));
+            sanitized.push((file.name.clone(), sanitized_name.clone()));
         }
 
+        original_names.push(file.name);
         items.push(disk_space::PlannedDownload {
             url: absolute_url.to_string(),
             file_path: sanitized_name,
@@ -458,7 +464,14 @@ fn plan_downloads(files: XmlFiles, base_url: &Url) -> DownloadPlan {
         });
     }
 
-    DownloadPlan { items, sanitized }
+    downloader::validate_download_paths(
+        original_names
+            .iter()
+            .zip(items.iter())
+            .map(|(original, item)| (original.as_str(), item.file_path.as_str())),
+    )?;
+
+    Ok(DownloadPlan { items, sanitized })
 }
 
 /// Prints per-file warnings and a summary when filenames were sanitised.
@@ -789,7 +802,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let plan = plan_downloads(files, &base_url);
+    let plan = match plan_downloads(files, &base_url) {
+        Ok(plan) => plan,
+        Err(e) => {
+            spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
+            return Err(e.into());
+        }
+    };
     let total_files = plan.items.len();
     let options = downloader::DownloadOptions {
         retry_policy: downloader::RetryPolicy::default(),
@@ -4036,7 +4055,8 @@ mod tests {
                 files: vec![first, second, third],
             },
             &base_url,
-        );
+        )
+        .unwrap();
 
         assert_eq!(plan.items.len(), 3);
         assert_eq!(
@@ -4100,7 +4120,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        let plan = plan_downloads(files, &base_url);
+        let plan = plan_downloads(files, &base_url).unwrap();
         let err = run_planned_downloads_with_space_check(
             &client,
             &output_dir.0,
@@ -4167,7 +4187,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        let plan = plan_downloads(files, &base_url);
+        let plan = plan_downloads(files, &base_url).unwrap();
         let summary = run_planned_downloads_with_space_check(
             &client,
             &output_dir.0,
@@ -4231,7 +4251,7 @@ mod tests {
         let filter = FileFilter::compile(["*.pdf", "!*draft*"]).unwrap();
         let selected_details =
             select_and_filter_files(make_files(), &details_target, &filter).unwrap();
-        let details_plan = plan_downloads(selected_details, &base_url);
+        let details_plan = plan_downloads(selected_details, &base_url).unwrap();
 
         assert_eq!(
             details_plan.items,
@@ -4265,7 +4285,7 @@ mod tests {
         let no_filter = FileFilter::compile::<[&str; 0], _>([]).unwrap();
         let selected_download =
             select_and_filter_files(make_files(), &download_target, &no_filter).unwrap();
-        let download_plan = plan_downloads(selected_download, &base_url);
+        let download_plan = plan_downloads(selected_download, &base_url).unwrap();
 
         assert_eq!(
             download_plan.items,
@@ -4349,7 +4369,7 @@ mod tests {
                 .unwrap();
 
         let filtered = select_and_filter_files(all_files, &target, &file_filter).unwrap();
-        let plan = plan_downloads(filtered, &base_url);
+        let plan = plan_downloads(filtered, &base_url).unwrap();
         let expected_required = (alpha.len() + beta.len()) as u64;
         let available = expected_required - 1;
 
@@ -4468,7 +4488,7 @@ mod tests {
                 .unwrap();
 
         let selected = select_and_filter_files(all_files, &target, &filter).unwrap();
-        let plan = plan_downloads(selected, &base_url);
+        let plan = plan_downloads(selected, &base_url).unwrap();
 
         let summary = run_planned_downloads_with_space_check(
             &client,
@@ -4650,7 +4670,7 @@ mod tests {
             ));
 
             // Confirm the exact same metadata would fail download mode's disk-space check.
-            let plan = plan_downloads(filtered, &base_url);
+            let plan = plan_downloads(filtered, &base_url).unwrap();
             assert!(matches!(
                 disk_space::check_disk_space(&verified_dir, &plan.items),
                 Err(IaGetError::InsufficientDiskSpace {
@@ -4855,7 +4875,7 @@ mod tests {
                 .unwrap();
 
         let selected = select_and_filter_files(all_files, &target, &filter).unwrap();
-        let plan = plan_downloads(selected, &base_url);
+        let plan = plan_downloads(selected, &base_url).unwrap();
         let options = downloader::DownloadOptions {
             retry_policy: policy,
             limit_rate: cli.limit_rate,
@@ -5179,7 +5199,7 @@ mod tests {
         .await
         .expect("XML metadata fetch should succeed");
 
-        let plan = plan_downloads(files, &base_url);
+        let plan = plan_downloads(files, &base_url).unwrap();
         let summary = run_planned_downloads_with_logger(
             &client,
             &output_dir.0,
@@ -5333,7 +5353,7 @@ mod tests {
         .await
         .expect("silent XML metadata fetch should succeed");
 
-        let silent_plan = plan_downloads(silent_files, &silent_base_url);
+        let silent_plan = plan_downloads(silent_files, &silent_base_url).unwrap();
         let silent_summary = run_planned_downloads_with_logger(
             &client,
             &silent_output_dir.0,
@@ -5358,5 +5378,285 @@ mod tests {
 
         let silent_requests = silent_server.finish().await;
         assert_eq!(silent_requests.len(), 4);
+    }
+
+    #[test]
+    fn plan_downloads_rejects_sanitized_final_path_collisions() {
+        let base_url = Url::parse("https://archive.org/download/item/item_files.xml").unwrap();
+        let cases = [
+            ("foo?.txt", "foo*.txt", "foo_.txt"),
+            ("CON.txt", "CON .txt", "CON_.txt"),
+            ("a/file.txt", "/a/file.txt", "a/file.txt"),
+        ];
+
+        for (first, second, expected_local) in cases {
+            let err = plan_downloads(
+                XmlFiles {
+                    files: vec![xml_file(first, Some(10)), xml_file(second, Some(20))],
+                },
+                &base_url,
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(
+                    err,
+                    IaGetError::PathCollision {
+                        ref local_path,
+                        ref first_entry,
+                        ref second_entry,
+                        ..
+                    } if local_path == expected_local
+                        && first_entry == first
+                        && second_entry == second
+                ),
+                "case ({first}, {second}): expected PathCollision for '{expected_local}', got {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(msg.contains(first), "error missing '{first}': {msg}");
+            assert!(msg.contains(second), "error missing '{second}': {msg}");
+            assert!(
+                msg.contains(expected_local),
+                "error missing '{expected_local}': {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_downloads_rejects_staging_part_path_collisions_in_either_order() {
+        let base_url = Url::parse("https://archive.org/download/item/item_files.xml").unwrap();
+        let cases = [
+            ("foo.txt", "foo.txt.part", "foo.txt.part"),
+            ("foo.txt.part", "foo.txt", "foo.txt.part"),
+            ("foo?.txt", "foo*.txt.part", "foo_.txt.part"),
+            ("foo*.txt.part", "foo?.txt", "foo_.txt.part"),
+        ];
+
+        for (first, second, expected_local) in cases {
+            let err = plan_downloads(
+                XmlFiles {
+                    files: vec![xml_file(first, Some(10)), xml_file(second, Some(20))],
+                },
+                &base_url,
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(
+                    err,
+                    IaGetError::PathCollision {
+                        ref local_path,
+                        ref first_entry,
+                        ref second_entry,
+                        ..
+                    } if local_path == expected_local
+                        && first_entry == first
+                        && second_entry == second
+                ),
+                "case ({first}, {second}): expected PathCollision for '{expected_local}', got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_downloads_allows_non_colliding_and_case_differing_entries() {
+        let base_url = Url::parse("https://archive.org/download/item/item_files.xml").unwrap();
+        let plan = plan_downloads(
+            XmlFiles {
+                files: vec![
+                    xml_file("foo.txt", Some(10)),
+                    xml_file("foo.txt.bak", Some(20)),
+                    xml_file("a/foo.txt", Some(30)),
+                    xml_file("b/foo.txt", Some(40)),
+                    xml_file("README.md", Some(50)),
+                    xml_file("readme.md", Some(60)),
+                ],
+            },
+            &base_url,
+        )
+        .expect("non-colliding and case-differing entries should succeed");
+
+        assert_eq!(plan.items.len(), 6);
+        assert!(plan.sanitized.is_empty());
+    }
+
+    #[test]
+    fn list_mode_remains_unaffected_by_colliding_archive_entries() {
+        let cli =
+            Cli::try_parse_from(["ia-get", "--list", "https://archive.org/details/item"]).unwrap();
+        let files = XmlFiles {
+            files: vec![
+                xml_file("foo?.txt", Some(10)),
+                xml_file("foo*.txt", Some(20)),
+                xml_file("foo.txt", Some(30)),
+                xml_file("foo.txt.part", Some(40)),
+            ],
+        };
+        let spinner = indicatif::ProgressBar::hidden();
+
+        let result = finalize_metadata_phase(&cli, &files, &spinner)
+            .expect("--list should succeed even when entries would collide on download");
+        assert!(result.is_none());
+        assert!(spinner.is_finished());
+    }
+
+    #[tokio::test]
+    async fn plan_downloads_collision_e2e_aborts_before_file_http_requests() {
+        let cases = [
+            ("sanitized-final", "foo?.txt", "foo*.txt", "foo_.txt"),
+            (
+                "staging-then-final",
+                "foo.txt",
+                "foo.txt.part",
+                "foo.txt.part",
+            ),
+            (
+                "final-then-staging",
+                "foo.txt.part",
+                "foo.txt",
+                "foo.txt.part",
+            ),
+        ];
+
+        let client = downloader::http_client_builder().build().unwrap();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 0,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        for (label, first, second, expected_local) in cases {
+            let payload_a = b"entry-a-bytes";
+            let payload_b = b"entry-b-bytes";
+            let xml_body = build_xml_metadata(&[
+                (
+                    first,
+                    payload_a.len(),
+                    format!("{:x}", md5::compute(payload_a)),
+                ),
+                (
+                    second,
+                    payload_b.len(),
+                    format!("{:x}", md5::compute(payload_b)),
+                ),
+            ]);
+
+            let server = MockHttpServer::start(vec![
+                MockResponse::ok(b""),
+                MockResponse::ok(xml_body.as_bytes()),
+                MockResponse::ok(b"must never be requested"),
+            ])
+            .await;
+
+            let output_dir = TempTestDir::new(&format!("plan-collision-{label}"));
+            let before = snapshot_check_dir(&output_dir.0);
+            let spinner = indicatif::ProgressBar::hidden();
+
+            let xml_url = server.url("/download/item/item_files.xml");
+            let (files, base_url) =
+                fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                    .await
+                    .unwrap();
+
+            let err = plan_downloads(files, &base_url).unwrap_err();
+            spinner.finish_with_message(format!("{} {}", "✘".red().bold(), err));
+
+            assert!(
+                matches!(
+                    err,
+                    IaGetError::PathCollision {
+                        ref local_path,
+                        ref first_entry,
+                        ref second_entry,
+                        ..
+                    } if local_path == expected_local
+                        && first_entry == first
+                        && second_entry == second
+                ),
+                "case {label}: unexpected error {err:?}"
+            );
+            assert!(spinner.is_finished());
+
+            let requests = server.abort_and_collect().await;
+            assert_eq!(
+                requests.len(),
+                2,
+                "case {label}: collision must abort before any file HTTP requests: {requests:?}"
+            );
+            assert!(requests[0]
+                .request_line
+                .starts_with("HEAD /download/item/item_files.xml "));
+            assert!(requests[1]
+                .request_line
+                .starts_with("GET /download/item/item_files.xml "));
+            assert_eq!(before, snapshot_check_dir(&output_dir.0));
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_downloads_non_colliding_entries_e2e_succeed() {
+        let p1 = b"root-foo-txt";
+        let p2 = b"root-foo-txt-bak";
+        let p3 = b"dir-a-foo-txt";
+        let p4 = b"dir-b-foo-txt";
+        let xml_body = build_xml_metadata(&[
+            ("foo.txt", p1.len(), format!("{:x}", md5::compute(p1))),
+            ("foo.txt.bak", p2.len(), format!("{:x}", md5::compute(p2))),
+            ("a/foo.txt", p3.len(), format!("{:x}", md5::compute(p3))),
+            ("b/foo.txt", p4.len(), format!("{:x}", md5::compute(p4))),
+        ]);
+
+        let server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+            MockResponse::ok(p1),
+            MockResponse::ok(p2),
+            MockResponse::ok(p3),
+            MockResponse::ok(p4),
+        ])
+        .await;
+
+        let output_dir = TempTestDir::new("plan-non-colliding-e2e");
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 0,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let xml_url = server.url("/download/item/item_files.xml");
+        let (files, base_url) =
+            fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                .await
+                .unwrap();
+
+        let plan = plan_downloads(files, &base_url).unwrap();
+        let summary = run_planned_downloads_with_space_check(
+            &client,
+            &output_dir.0,
+            plan,
+            None,
+            &policy,
+            &signal,
+            |_, _, _| Ok(()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.ok, 4);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert_eq!(std::fs::read(output_dir.join("foo.txt")).unwrap(), p1);
+        assert_eq!(std::fs::read(output_dir.join("foo.txt.bak")).unwrap(), p2);
+        assert_eq!(std::fs::read(output_dir.join("a/foo.txt")).unwrap(), p3);
+        assert_eq!(std::fs::read(output_dir.join("b/foo.txt")).unwrap(), p4);
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 6);
     }
 }

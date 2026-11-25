@@ -1,7 +1,7 @@
 //! Module for handling file downloads, verification, and related operations.
 
 use std::collections::hash_map::RandomState;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::future::Future;
@@ -1833,6 +1833,90 @@ pub(crate) fn part_file_path(file_path: &str) -> PathBuf {
     PathBuf::from(part_path)
 }
 
+/// Normalises a relative destination path into a collision-detection key.
+fn collision_path_key(path: &Path) -> PathBuf {
+    validate_relative_path(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Formats a normalised relative collision path using `/` separators for consistent diagnostics.
+fn format_collision_path(path: &Path) -> String {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => parts.push(segment.to_string_lossy()),
+            _ => return path.display().to_string(),
+        }
+    }
+    if parts.is_empty() {
+        path.display().to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+/// Validates that no two planned entries collide on either a final destination path
+/// or a `.part` staging path.
+///
+/// Each item is `(entry_label, local_path)`, where `entry_label` identifies the source
+/// archive entry for error reporting and `local_path` is the local destination path.
+///
+/// Comparison is exact (case-sensitive) so distinct filenames differing only by case
+/// are preserved.
+pub fn validate_download_paths<'a, I>(entries: I) -> Result<()>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let mut final_paths: HashMap<PathBuf, String> = HashMap::new();
+    let mut staging_paths: HashMap<PathBuf, String> = HashMap::new();
+
+    for (entry_label, local_path) in entries {
+        let final_key = collision_path_key(Path::new(local_path));
+        let part_path = part_file_path(local_path);
+        let staging_key = collision_path_key(&part_path);
+
+        if let Some(first_entry) = final_paths.get(&final_key) {
+            return Err(IaGetError::PathCollision {
+                local_path: format_collision_path(&final_key),
+                first_entry: first_entry.clone(),
+                second_entry: entry_label.to_string(),
+                reason: "both entries map to the same destination path".to_string(),
+            });
+        }
+
+        if let Some(first_entry) = staging_paths.get(&final_key) {
+            return Err(IaGetError::PathCollision {
+                local_path: format_collision_path(&final_key),
+                first_entry: first_entry.clone(),
+                second_entry: entry_label.to_string(),
+                reason: "destination path collides with staging '.part' path".to_string(),
+            });
+        }
+
+        if let Some(first_entry) = final_paths.get(&staging_key) {
+            return Err(IaGetError::PathCollision {
+                local_path: format_collision_path(&staging_key),
+                first_entry: first_entry.clone(),
+                second_entry: entry_label.to_string(),
+                reason: "staging '.part' path collides with destination path".to_string(),
+            });
+        }
+
+        if let Some(first_entry) = staging_paths.get(&staging_key) {
+            return Err(IaGetError::PathCollision {
+                local_path: format_collision_path(&staging_key),
+                first_entry: first_entry.clone(),
+                second_entry: entry_label.to_string(),
+                reason: "both entries map to the same staging '.part' path".to_string(),
+            });
+        }
+
+        final_paths.insert(final_key, entry_label.to_string());
+        staging_paths.insert(staging_key, entry_label.to_string());
+    }
+
+    Ok(())
+}
+
 /// Returns the current byte length of a `.part` file inside `root`, or `0` if it does not exist.
 fn existing_part_size(root: &Path, rel_part_path: &Path) -> Result<u64> {
     let canonical_root = resolve_destination_root(root)?;
@@ -2886,6 +2970,13 @@ pub async fn download_files_in_dir_with_logger<I>(
 where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
 {
+    let files: Vec<(String, String, Option<String>)> = files.into_iter().collect();
+    validate_download_paths(
+        files
+            .iter()
+            .map(|(_, file_path, _)| (file_path.as_str(), file_path.as_str())),
+    )?;
+
     let canonical_root = prepare_output_dir(root)?;
     let mut summary = BatchSummary::default();
 
@@ -9708,5 +9799,147 @@ mod tests {
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 1);
+    }
+
+    #[test]
+    fn test_validate_download_paths_rejects_final_and_staging_collisions() {
+        let dup_err = validate_download_paths([("foo?.txt", "foo_.txt"), ("foo*.txt", "foo_.txt")])
+            .unwrap_err();
+        assert!(
+            matches!(
+                dup_err,
+                IaGetError::PathCollision {
+                    ref local_path,
+                    ref first_entry,
+                    ref second_entry,
+                    ..
+                } if local_path == "foo_.txt"
+                    && first_entry == "foo?.txt"
+                    && second_entry == "foo*.txt"
+            ),
+            "unexpected duplicate collision error: {dup_err:?}"
+        );
+
+        let slash_err =
+            validate_download_paths([("a/file.txt", "a/file.txt"), ("a//file.txt", "a//file.txt")])
+                .unwrap_err();
+        assert!(
+            matches!(
+                slash_err,
+                IaGetError::PathCollision {
+                    ref local_path,
+                    ..
+                } if local_path == "a/file.txt"
+            ),
+            "unexpected normalised duplicate error: {slash_err:?}"
+        );
+
+        let part_after_err =
+            validate_download_paths([("foo.txt", "foo.txt"), ("foo.txt.part", "foo.txt.part")])
+                .unwrap_err();
+        assert!(
+            matches!(
+                part_after_err,
+                IaGetError::PathCollision {
+                    ref local_path,
+                    ref first_entry,
+                    ref second_entry,
+                    ..
+                } if local_path == "foo.txt.part"
+                    && first_entry == "foo.txt"
+                    && second_entry == "foo.txt.part"
+            ),
+            "unexpected staging collision error (foo.txt then foo.txt.part): {part_after_err:?}"
+        );
+
+        let part_before_err =
+            validate_download_paths([("foo.txt.part", "foo.txt.part"), ("foo.txt", "foo.txt")])
+                .unwrap_err();
+        assert!(
+            matches!(
+                part_before_err,
+                IaGetError::PathCollision {
+                    ref local_path,
+                    ref first_entry,
+                    ref second_entry,
+                    ..
+                } if local_path == "foo.txt.part"
+                    && first_entry == "foo.txt.part"
+                    && second_entry == "foo.txt"
+            ),
+            "unexpected staging collision error (foo.txt.part then foo.txt): {part_before_err:?}"
+        );
+
+        assert!(validate_download_paths([
+            ("foo.txt", "foo.txt"),
+            ("foo.txt.bak", "foo.txt.bak"),
+            ("a/foo.txt", "a/foo.txt"),
+            ("b/foo.txt", "b/foo.txt"),
+            ("README.md", "README.md"),
+            ("readme.md", "readme.md"),
+        ])
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_download_files_in_dir_rejects_colliding_paths_before_any_http_requests() {
+        let cases: &[(&str, Vec<(&str, &str)>)] = &[
+            (
+                "duplicate-final",
+                vec![("/a", "foo_.txt"), ("/b", "foo_.txt")],
+            ),
+            (
+                "staging-then-final",
+                vec![("/a", "foo.txt"), ("/b", "foo.txt.part")],
+            ),
+            (
+                "final-then-staging",
+                vec![("/a", "foo.txt.part"), ("/b", "foo.txt")],
+            ),
+        ];
+
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        for (label, entries) in cases {
+            let server =
+                MockServer::start(vec![MockResponse::ok(b"must never be requested")]).await;
+            let sandbox = TempTestDir::new(&format!("collision-{label}"));
+            let target_dir = sandbox.join("not-created-yet");
+
+            let files: Vec<(String, String, Option<String>)> = entries
+                .iter()
+                .map(|(url_path, local_path)| {
+                    (server.url(url_path), (*local_path).to_string(), None)
+                })
+                .collect();
+            let total = files.len();
+
+            let err = download_files_in_dir(
+                &client,
+                &target_dir,
+                files,
+                total,
+                None,
+                &RetryPolicy::default(),
+                &signal,
+            )
+            .await
+            .unwrap_err();
+            let requests = server.abort_and_collect().await;
+
+            assert!(
+                matches!(err, IaGetError::PathCollision { .. }),
+                "case {label}: expected PathCollision, got {err:?}"
+            );
+            assert!(
+                requests.is_empty(),
+                "case {label}: expected 0 HTTP requests on collision, got {requests:?}"
+            );
+            assert!(
+                !target_dir.exists(),
+                "case {label}: colliding batch must fail before creating output directory"
+            );
+        }
     }
 }

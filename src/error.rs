@@ -109,6 +109,21 @@ pub enum IaGetError {
         reason: String,
     },
 
+    /// Two or more planned entries map to the same local destination or staging path
+    #[error(
+        "Path collision for '{local_path}': '{first_entry}' conflicts with '{second_entry}' ({reason})"
+    )]
+    PathCollision {
+        /// Local destination or staging path where the collision occurs
+        local_path: String,
+        /// First archive entry or path claiming the local path
+        first_entry: String,
+        /// Second archive entry or path colliding with it
+        second_entry: String,
+        /// Description of whether the conflict is final-vs-final or staging-vs-final
+        reason: String,
+    },
+
     /// Download was interrupted by the user
     #[error("Download interrupted by user")]
     Interrupted,
