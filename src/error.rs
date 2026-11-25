@@ -23,6 +23,10 @@ pub enum IaGetError {
     /// XML parsing errors
     #[error("Failed to parse XML: {0}")]
     XmlParsing(String),
+
+    /// Integrity verification errors (such as MD5 hash mismatches)
+    #[error("Integrity check failed: {0}")]
+    Integrity(String),
 }
 
 impl From<reqwest::Error> for IaGetError {

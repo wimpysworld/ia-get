@@ -42,6 +42,11 @@ Simply pass the URL of an [archive.org](https://archive.org) details page you wa
 ia-get https://archive.org/details/<identifier>
 ```
 
+`ia-get` downloads each file into `<file>.part`.
+When a `.part` file exists, `ia-get` sends a range request and validates HTTP `200`, `206`, and `416` responses plus the `Content-Range` header.
+If the server returns HTTP `200` or an invalid range response, `ia-get` restarts the download from byte 0.
+`ia-get` verifies the MD5 hash when archive.org provides one, and renames the `.part` file to the final path atomically only after verification succeeds.
+
 Pass cookies for archive.org items that require a logged-in session.
 `--cookies`/`-b` accepts either a raw Cookie header string or a Netscape `cookies.txt` file exported from your browser.
 
@@ -71,8 +76,8 @@ So I co-authored `ia-get` to automate the download process.
 
 - 🔽 Reliably download files from the Internet Archive
 - 🌳 Preserves the original directory structure
-- 🔄 Automatically resumes partial or failed downloads
-- 🔏 Hash checks to confirm file integrity
+- 🔄 Stages downloads in `.part` files, resumes partial transfers, and validates HTTP range responses
+- 🔏 Verifies MD5 hashes and renames `.part` files atomically only after verification succeeds
 - 🌱 Can be run multiple times to update existing downloads
 - 📊 Gets all the metadata for the archive
 - 📦️ Available for **Linux** 🐧 **macOS** 🍏 and **Windows** 🪟
