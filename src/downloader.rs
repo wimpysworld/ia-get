@@ -889,6 +889,47 @@ fn resolve_destination_root(root: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+/// Validates and prepares the destination output directory, creating missing directories
+/// when needed and returning its canonical path.
+pub fn prepare_output_dir(path: &Path) -> Result<PathBuf> {
+    if path.as_os_str().is_empty() {
+        return Err(IaGetError::FileSystem(
+            "Output directory path must not be empty".to_string(),
+        ));
+    }
+
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => resolve_destination_root(path),
+        Ok(_) => Err(IaGetError::FileSystem(format!(
+            "Output path '{}' exists and is not a directory",
+            path.display()
+        ))),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if fs::symlink_metadata(path).is_ok() {
+                return Err(IaGetError::FileSystem(format!(
+                    "Output path '{}' is a broken symlink",
+                    path.display()
+                )));
+            }
+
+            fs::create_dir_all(path).map_err(|create_err| {
+                IaGetError::FileSystem(format!(
+                    "Failed to create output directory '{}': {}",
+                    path.display(),
+                    create_err
+                ))
+            })?;
+
+            resolve_destination_root(path)
+        }
+        Err(err) => Err(IaGetError::FileSystem(format!(
+            "Failed to access output directory '{}': {}",
+            path.display(),
+            err
+        ))),
+    }
+}
+
 /// Validates that a destination path is a non-empty relative path made solely of normal segments.
 pub(crate) fn validate_relative_path(path: &Path) -> Result<PathBuf> {
     if path.as_os_str().is_empty() {
@@ -1950,9 +1991,9 @@ async fn download_single_file(
 
 /// Downloads multiple files into destination `root` with an explicit retry policy and shutdown signal.
 ///
-/// Continues past per-file failures after printing a warning, stops promptly on
-/// shutdown signal interruption, prints an end-of-batch summary, and returns the
-/// collected [`BatchSummary`].
+/// Validates and prepares `root` before downloading, continues past per-file failures
+/// after printing a warning, stops promptly on shutdown signal interruption, prints an
+/// end-of-batch summary, and returns the collected [`BatchSummary`].
 pub async fn download_files_in_dir<I>(
     client: &Client,
     root: &Path,
@@ -1961,10 +2002,11 @@ pub async fn download_files_in_dir<I>(
     cookie_source: Option<&CookieSource>,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
-) -> BatchSummary
+) -> Result<BatchSummary>
 where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
 {
+    let canonical_root = prepare_output_dir(root)?;
     let mut summary = BatchSummary::default();
 
     for (index, (url, file_path, expected_md5)) in files.into_iter().enumerate() {
@@ -1995,7 +2037,7 @@ where
 
         match download_single_file_with_policy(
             client,
-            root,
+            &canonical_root,
             &url,
             &file_path,
             expected_md5.as_deref(),
@@ -2034,7 +2076,7 @@ where
     }
 
     print_batch_summary(&summary);
-    summary
+    Ok(summary)
 }
 
 /// Downloads multiple files with an explicit retry policy and shutdown signal.
@@ -2049,7 +2091,7 @@ pub async fn download_files_with_policy_and_signal<I>(
     cookie_source: Option<&CookieSource>,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
-) -> BatchSummary
+) -> Result<BatchSummary>
 where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
 {
@@ -2067,21 +2109,25 @@ where
 
 /// Download multiple files with shared signal handling.
 ///
-/// Sets up signal handling once for the entire download session, continues past
+/// Prepares `output_dir` (defaulting to the current working directory when `None`),
+/// sets up signal handling once for the entire download session, continues past
 /// individual file failures, prints an end-of-batch summary, and returns the
 /// collected [`BatchSummary`].
 pub async fn download_files<I>(
     client: &Client,
+    output_dir: Option<&Path>,
     files: I,
     total_files: usize,
     cookie_source: Option<&CookieSource>,
-) -> BatchSummary
+) -> Result<BatchSummary>
 where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
 {
+    let root = output_dir.unwrap_or_else(|| Path::new("."));
     let signal = install_signal_handler();
-    download_files_with_policy_and_signal(
+    download_files_in_dir(
         client,
+        root,
         files,
         total_files,
         cookie_source,
@@ -4615,8 +4661,9 @@ mod tests {
             (server.url("/file3.bin"), file3.clone(), Some(md5_3)),
         ];
 
-        let summary =
-            download_files_in_dir(&client, &dir.path, files, 3, None, &policy, &signal).await;
+        let summary = download_files_in_dir(&client, &dir.path, files, 3, None, &policy, &signal)
+            .await
+            .unwrap();
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 3);
@@ -4687,7 +4734,9 @@ mod tests {
         ];
 
         let summary =
-            download_files_in_dir(&client, &dir.path, files, 2, None, &fast_policy, &signal).await;
+            download_files_in_dir(&client, &dir.path, files, 2, None, &fast_policy, &signal)
+                .await
+                .unwrap();
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 3);
@@ -4740,8 +4789,9 @@ mod tests {
             (server.url("/good.bin"), file2.clone(), Some(md5_2)),
         ];
 
-        let summary =
-            download_files_in_dir(&client, &dir.path, files, 2, None, &policy, &signal).await;
+        let summary = download_files_in_dir(&client, &dir.path, files, 2, None, &policy, &signal)
+            .await
+            .unwrap();
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 2);
@@ -4821,8 +4871,9 @@ mod tests {
             (server.url("/missing_fail.bin"), missing_fail.clone(), None),
         ];
 
-        let summary =
-            download_files_in_dir(&client, &dir.path, files, 4, None, &policy, &signal).await;
+        let summary = download_files_in_dir(&client, &dir.path, files, 4, None, &policy, &signal)
+            .await
+            .unwrap();
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 2);
@@ -4895,8 +4946,9 @@ mod tests {
             (server.url("/file3.bin"), file3.clone(), None),
         ];
 
-        let summary =
-            download_files_in_dir(&client, &dir.path, files, 3, None, &policy, &signal).await;
+        let summary = download_files_in_dir(&client, &dir.path, files, 3, None, &policy, &signal)
+            .await
+            .unwrap();
 
         let requests = server.abort_and_collect().await;
         assert_eq!(requests.len(), 2);
@@ -4948,8 +5000,9 @@ mod tests {
             (server.url("/file2.bin"), file2.clone(), None),
         ];
 
-        let summary =
-            download_files_in_dir(&client, &dir.path, files, 2, None, &policy, &signal).await;
+        let summary = download_files_in_dir(&client, &dir.path, files, 2, None, &policy, &signal)
+            .await
+            .unwrap();
 
         let requests = server.abort_and_collect().await;
         assert!(
@@ -6290,6 +6343,531 @@ mod tests {
             assert!(
                 err.to_string().contains(expected_msg),
                 "location '{location}': expected '{expected_msg}' in '{err}'"
+            );
+        }
+    }
+
+    static CURRENT_DIR_LOCK: Mutex<()> = Mutex::const_new(());
+
+    struct CurrentDirGuard {
+        original: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn enter(target: &Path) -> Self {
+            let original = std::env::current_dir().expect("read current working directory");
+            std::env::set_current_dir(target).expect("switch current working directory");
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prepare_output_dir_dot_returns_canonical_current_working_dir() {
+        let _cwd_lock = CURRENT_DIR_LOCK.lock().await;
+        let dir = TempTestDir::new("prepare-dot");
+        let _cwd_guard = CurrentDirGuard::enter(&dir.path);
+
+        let canonical = prepare_output_dir(Path::new("."))
+            .expect("prepare_output_dir('.') should resolve current working directory");
+        assert_eq!(canonical, fs::canonicalize(&dir.path).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_download_files_with_policy_and_signal_writes_to_default_working_dir() {
+        let _cwd_lock = CURRENT_DIR_LOCK.lock().await;
+        let dir = TempTestDir::new("default-cwd-download");
+        let _cwd_guard = CurrentDirGuard::enter(&dir.path);
+
+        let payload_top = b"default working directory top-level payload";
+        let payload_nested = b"default working directory nested payload";
+        let md5_top = md5_hex(payload_top);
+        let md5_nested = md5_hex(payload_nested);
+
+        let server = MockServer::start(vec![
+            MockResponse::ok(payload_top),
+            MockResponse::ok(payload_nested),
+        ])
+        .await;
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        let files = vec![
+            (server.url("/top.bin"), "top.bin".to_string(), Some(md5_top)),
+            (
+                server.url("/nested.bin"),
+                "sub/nested.bin".to_string(),
+                Some(md5_nested),
+            ),
+        ];
+
+        let summary = download_files_with_policy_and_signal(
+            &client,
+            files,
+            2,
+            None,
+            &RetryPolicy::default(),
+            &signal,
+        )
+        .await
+        .expect("default working directory download should succeed");
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(summary.ok, 2);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert!(!summary.interrupted);
+        assert_eq!(fs::read(dir.join("top.bin")).unwrap(), payload_top);
+        assert_eq!(
+            fs::read(dir.join("sub/nested.bin")).unwrap(),
+            payload_nested
+        );
+        assert!(!dir.part_path("top.bin").exists());
+        assert!(!dir.part_path("sub/nested.bin").exists());
+    }
+
+    #[test]
+    fn test_prepare_output_dir_creates_missing_nested_directories() {
+        let sandbox = TempTestDir::new("prepare-nested");
+        let target = sandbox.join("level1/level2/output");
+        assert!(!target.exists());
+
+        let canonical = prepare_output_dir(&target)
+            .expect("prepare_output_dir should create missing nested directories");
+        assert!(target.is_dir());
+        assert_eq!(canonical, fs::canonicalize(&target).unwrap());
+
+        let canonical_again = prepare_output_dir(&target)
+            .expect("prepare_output_dir should accept already-created directory");
+        assert_eq!(canonical_again, canonical);
+    }
+
+    #[tokio::test]
+    async fn test_download_files_in_dir_creates_nested_output_dir_and_preserves_archive_paths() {
+        let sandbox = TempTestDir::new("nested-output-dir");
+        let output_dir = sandbox.join("downloads/archive/item");
+        assert!(!output_dir.exists());
+
+        let payload_top = b"top-level archive file";
+        let payload_deep = b"deeply nested archive binary payload";
+        let payload_sibling = b"second nested archive file";
+        let md5_top = md5_hex(payload_top);
+        let md5_deep = md5_hex(payload_deep);
+        let md5_sibling = md5_hex(payload_sibling);
+
+        let server = MockServer::start(vec![
+            MockResponse::ok(payload_top),
+            MockResponse::ok(payload_deep),
+            MockResponse::ok(payload_sibling),
+        ])
+        .await;
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        let files = vec![
+            (server.url("/top.txt"), "top.txt".to_string(), Some(md5_top)),
+            (
+                server.url("/dir1/sub/file.bin"),
+                "dir1/sub/file.bin".to_string(),
+                Some(md5_deep),
+            ),
+            (
+                server.url("/dir2/data.bin"),
+                "dir2/data.bin".to_string(),
+                Some(md5_sibling),
+            ),
+        ];
+
+        let summary = download_files_in_dir(
+            &client,
+            &output_dir,
+            files,
+            3,
+            None,
+            &RetryPolicy::default(),
+            &signal,
+        )
+        .await
+        .expect("download_files_in_dir should create missing nested output dir");
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 3);
+        assert!(output_dir.is_dir());
+        assert_eq!(summary.ok, 3);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert!(!summary.interrupted);
+
+        assert_eq!(fs::read(output_dir.join("top.txt")).unwrap(), payload_top);
+        assert_eq!(
+            fs::read(output_dir.join("dir1/sub/file.bin")).unwrap(),
+            payload_deep
+        );
+        assert_eq!(
+            fs::read(output_dir.join("dir2/data.bin")).unwrap(),
+            payload_sibling
+        );
+        assert!(!output_dir.join(part_file_path("top.txt")).exists());
+        assert!(!output_dir
+            .join(part_file_path("dir1/sub/file.bin"))
+            .exists());
+        assert!(!output_dir.join(part_file_path("dir2/data.bin")).exists());
+
+        let sandbox_entries: Vec<OsString> = fs::read_dir(&sandbox.path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            sandbox_entries,
+            vec![OsString::from("downloads")],
+            "nothing should be written outside the target output directory"
+        );
+        assert!(!sandbox.join("top.txt").exists());
+        assert!(!sandbox.join("dir1").exists());
+    }
+
+    #[tokio::test]
+    async fn test_prepare_output_dir_and_download_reject_invalid_paths_with_zero_requests() {
+        let sandbox = TempTestDir::new("invalid-output-paths");
+        let existing_file = sandbox.join("existing.txt");
+        fs::write(&existing_file, b"untouched-regular-file").unwrap();
+        let file_ancestor = existing_file.join("sub");
+        let empty_path = PathBuf::from("");
+
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        for (label, bad_path) in [
+            ("existing-file", &existing_file),
+            ("file-ancestor", &file_ancestor),
+            ("empty-path", &empty_path),
+        ] {
+            let prep_err = prepare_output_dir(bad_path).unwrap_err();
+            assert!(
+                matches!(prep_err, IaGetError::FileSystem(_)),
+                "case {label}: expected FileSystem error from prepare_output_dir, got {prep_err:?}"
+            );
+
+            let server =
+                MockServer::start(vec![MockResponse::ok(b"must never be requested")]).await;
+            let dl_err = download_files_in_dir(
+                &client,
+                bad_path,
+                vec![(server.url("/file.bin"), "file.bin".to_string(), None)],
+                1,
+                None,
+                &RetryPolicy::default(),
+                &signal,
+            )
+            .await
+            .unwrap_err();
+            let requests = server.abort_and_collect().await;
+
+            assert!(
+                matches!(dl_err, IaGetError::FileSystem(_)),
+                "case {label}: expected FileSystem error from download_files_in_dir, got {dl_err:?}"
+            );
+            assert!(
+                requests.is_empty(),
+                "case {label}: expected 0 HTTP requests for invalid output path"
+            );
+        }
+
+        assert_eq!(fs::read(&existing_file).unwrap(), b"untouched-regular-file");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_unix_prepare_output_dir_and_download_reject_broken_symlink_with_zero_requests() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = TempTestDir::new("broken-output-symlink");
+        let missing_target = sandbox.join("missing-target");
+        let broken_link = sandbox.join("broken-out");
+        symlink(&missing_target, &broken_link).unwrap();
+
+        let prep_err = prepare_output_dir(&broken_link).unwrap_err();
+        assert!(
+            matches!(prep_err, IaGetError::FileSystem(_)),
+            "expected FileSystem error for broken symlink, got {prep_err:?}"
+        );
+        assert!(
+            prep_err.to_string().contains("broken symlink"),
+            "unexpected error message: {prep_err}"
+        );
+
+        let server = MockServer::start(vec![MockResponse::ok(b"must never be requested")]).await;
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        let dl_err = download_files_in_dir(
+            &client,
+            &broken_link,
+            vec![(server.url("/file.bin"), "file.bin".to_string(), None)],
+            1,
+            None,
+            &RetryPolicy::default(),
+            &signal,
+        )
+        .await
+        .unwrap_err();
+        let requests = server.abort_and_collect().await;
+
+        assert!(
+            matches!(dl_err, IaGetError::FileSystem(_)),
+            "expected FileSystem error from download_files_in_dir, got {dl_err:?}"
+        );
+        assert!(
+            requests.is_empty(),
+            "broken symlink output path must send 0 HTTP requests"
+        );
+        assert!(!missing_target.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_unix_symlink_escape_relative_to_output_dir_rejects_escapes_and_downloads_siblings(
+    ) {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = TempTestDir::new("output-dir-symlink-escape");
+        let output_dir = sandbox.join("out");
+        let outside_dir = sandbox.join("outside");
+        fs::create_dir_all(&output_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+
+        let outside_victim = outside_dir.join("victim.bin");
+        fs::write(&outside_victim, b"untouched-outside-victim").unwrap();
+
+        symlink(&outside_dir, output_dir.join("escape_dir")).unwrap();
+        symlink(&outside_victim, output_dir.join("escape_file.bin")).unwrap();
+
+        let canonical_out = prepare_output_dir(&output_dir).unwrap();
+        assert!(matches!(
+            validate_contained_path(&canonical_out, Path::new("escape_dir/payload.bin"), true),
+            Err(IaGetError::FileSystem(_))
+        ));
+        assert!(matches!(
+            validate_contained_path(&canonical_out, Path::new("escape_file.bin"), true),
+            Err(IaGetError::FileSystem(_))
+        ));
+
+        let safe_payload = b"safe sibling downloaded inside output-dir";
+        let safe_md5 = md5_hex(safe_payload);
+        let server = MockServer::start(vec![MockResponse::ok(safe_payload)]).await;
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        let files = vec![
+            (
+                server.url("/escape-dir.bin"),
+                "escape_dir/payload.bin".to_string(),
+                None,
+            ),
+            (
+                server.url("/escape-file.bin"),
+                "escape_file.bin".to_string(),
+                None,
+            ),
+            (
+                server.url("/safe.bin"),
+                "safe/sibling.bin".to_string(),
+                Some(safe_md5),
+            ),
+        ];
+
+        let summary = download_files_in_dir(
+            &client,
+            &output_dir,
+            files,
+            3,
+            None,
+            &RetryPolicy::default(),
+            &signal,
+        )
+        .await
+        .expect("batch with escaped entries should return summary");
+
+        let requests = server.finish().await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "escaped entries must send 0 HTTP requests; only safe sibling should be fetched"
+        );
+        assert!(requests[0].request_line.starts_with("GET /safe.bin "));
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 0);
+        assert!(!summary.interrupted);
+        assert_eq!(summary.failed.len(), 2);
+        assert_eq!(summary.failed[0].file_path, "escape_dir/payload.bin");
+        assert!(
+            summary.failed[0]
+                .error
+                .starts_with("File operation failed:"),
+            "expected FileSystem error display, got: {}",
+            summary.failed[0].error
+        );
+        assert_eq!(summary.failed[1].file_path, "escape_file.bin");
+        assert!(
+            summary.failed[1]
+                .error
+                .starts_with("File operation failed:"),
+            "expected FileSystem error display, got: {}",
+            summary.failed[1].error
+        );
+
+        assert!(!outside_dir.join("payload.bin").exists());
+        assert!(!outside_dir.join("payload.bin.part").exists());
+        assert_eq!(
+            fs::read(&outside_victim).unwrap(),
+            b"untouched-outside-victim"
+        );
+        assert_eq!(
+            fs::read(output_dir.join("safe/sibling.bin")).unwrap(),
+            safe_payload
+        );
+        assert!(!output_dir.join(part_file_path("safe/sibling.bin")).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_unix_prepare_output_dir_allows_symlinked_output_dir_while_inner_escapes_fail() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = TempTestDir::new("symlinked-output-dir");
+        let real_out = sandbox.join("real_out");
+        let link_out = sandbox.join("link_out");
+        let outside_dir = sandbox.join("outside");
+        fs::create_dir_all(&real_out).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        symlink(&real_out, &link_out).unwrap();
+        symlink(&outside_dir, real_out.join("escape_dir")).unwrap();
+
+        let canonical = prepare_output_dir(&link_out)
+            .expect("symlinked --output-dir pointing to an existing directory should succeed");
+        assert_eq!(canonical, fs::canonicalize(&real_out).unwrap());
+
+        assert!(matches!(
+            validate_contained_path(&canonical, Path::new("escape_dir/bad.bin"), true),
+            Err(IaGetError::FileSystem(_))
+        ));
+
+        let safe_payload = b"downloaded via symlinked output-dir";
+        let safe_md5 = md5_hex(safe_payload);
+        let server = MockServer::start(vec![MockResponse::ok(safe_payload)]).await;
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        let files = vec![
+            (
+                server.url("/bad.bin"),
+                "escape_dir/bad.bin".to_string(),
+                None,
+            ),
+            (
+                server.url("/good.bin"),
+                "nested/good.bin".to_string(),
+                Some(safe_md5),
+            ),
+        ];
+
+        let summary = download_files_in_dir(
+            &client,
+            &link_out,
+            files,
+            2,
+            None,
+            &RetryPolicy::default(),
+            &signal,
+        )
+        .await
+        .expect("batch into symlinked output-dir should return summary");
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].request_line.starts_with("GET /good.bin "));
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].file_path, "escape_dir/bad.bin");
+        assert!(summary.failed[0]
+            .error
+            .starts_with("File operation failed:"));
+        assert!(!outside_dir.join("bad.bin").exists());
+        assert_eq!(
+            fs::read(real_out.join("nested/good.bin")).unwrap(),
+            safe_payload
+        );
+        assert!(!real_out.join(part_file_path("nested/good.bin")).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unix_root_path_prepare_and_contained_validation() {
+        let root = prepare_output_dir(Path::new("/"))
+            .expect("Unix root path '/' should pass prepare_output_dir");
+        assert_eq!(root, PathBuf::from("/"));
+
+        let validated =
+            validate_contained_path(&root, Path::new("ia-get-nonexistent/file.bin"), true)
+                .expect("missing relative path under '/' should be accepted");
+        assert_eq!(validated, PathBuf::from("/ia-get-nonexistent/file.bin"));
+
+        let escape_err =
+            validate_contained_path(&root, Path::new("../outside.bin"), true).unwrap_err();
+        assert!(matches!(escape_err, IaGetError::FileSystem(_)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_drive_root_prepare_and_escape_rejection() {
+        let temp = std::env::temp_dir();
+        let mut drive_root = PathBuf::new();
+        for component in temp.components() {
+            match component {
+                Component::Prefix(_) | Component::RootDir => drive_root.push(component.as_os_str()),
+                _ => break,
+            }
+        }
+        assert!(
+            drive_root.has_root(),
+            "expected drive root from temp_dir '{}', got '{}'",
+            temp.display(),
+            drive_root.display()
+        );
+
+        let canonical_root = prepare_output_dir(&drive_root)
+            .expect("Windows drive root should pass prepare_output_dir");
+        assert_eq!(canonical_root, fs::canonicalize(&drive_root).unwrap());
+
+        let validated = validate_contained_path(
+            &canonical_root,
+            Path::new("ia-get-nonexistent/file.bin"),
+            true,
+        )
+        .expect("missing relative path under Windows drive root should succeed");
+        assert_eq!(
+            validated,
+            canonical_root.join("ia-get-nonexistent").join("file.bin")
+        );
+
+        for unsafe_path in [
+            Path::new("../escape.bin"),
+            Path::new("nested/../../escape.bin"),
+            Path::new(r"\absolute.bin"),
+            Path::new(r"C:\escape.bin"),
+        ] {
+            let err = validate_contained_path(&canonical_root, unsafe_path, true).unwrap_err();
+            assert!(
+                matches!(err, IaGetError::FileSystem(_)),
+                "path '{}' should be rejected as FileSystem error, got {err:?}",
+                unsafe_path.display()
             );
         }
     }

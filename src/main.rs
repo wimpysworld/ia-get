@@ -5,6 +5,8 @@
 //! This tool takes an archive.org details URL and downloads all associated files,
 //! with support for resumable downloads and MD5 hash verification.
 
+use std::path::{Path, PathBuf};
+
 use clap::Parser;
 use colored::*;
 use ia_get::archive_metadata::{parse_xml_files, XmlFiles};
@@ -285,12 +287,44 @@ fn batch_exit_result(summary: &downloader::BatchSummary, total_files: usize) -> 
     }
 }
 
+/// Resolves the output directory path, defaulting to the current working directory.
+fn resolve_output_dir(output_dir: Option<&Path>) -> &Path {
+    output_dir.unwrap_or_else(|| Path::new("."))
+}
+
+/// Finalises the metadata phase by either listing files or preparing the output directory.
+fn finalize_metadata_phase(
+    cli: &Cli,
+    files: &XmlFiles,
+    spinner: &indicatif::ProgressBar,
+) -> Result<Option<PathBuf>> {
+    if cli.list {
+        list_files(files, spinner);
+        return Ok(None);
+    }
+
+    match downloader::prepare_output_dir(resolve_output_dir(cli.output_dir.as_deref())) {
+        Ok(canonical_dir) => Ok(Some(canonical_dir)),
+        Err(e) => {
+            spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
+            Err(e)
+        }
+    }
+}
+
 /// Command-line interface for ia-get
 #[derive(Parser)]
 #[command(name = "ia-get")]
 #[command(about = "A command-line tool for downloading files from the Internet Archive")]
 #[command(version = option_env!("BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))]
 #[command(author = env!("CARGO_PKG_AUTHORS"))]
+#[command(after_help = "\
+Examples:
+  ia-get https://archive.org/details/deftributetozzap64
+  ia-get -o ./downloads https://archive.org/details/deftributetozzap64
+  ia-get --output-dir /tmp/zzap64 https://archive.org/details/deftributetozzap64
+  ia-get --list https://archive.org/details/deftributetozzap64
+  ia-get -b cookies.txt https://archive.org/details/deftributetozzap64")]
 struct Cli {
     /// URL to an archive.org details page
     url: String,
@@ -300,6 +334,9 @@ struct Cli {
     /// Cookie header or Netscape cookies.txt file for authenticated downloads
     #[arg(short = 'b', long = "cookies", value_name = "COOKIES")]
     cookies: Option<String>,
+    /// Directory to save downloaded files (defaults to current working directory)
+    #[arg(short = 'o', long = "output-dir", value_name = "DIR")]
+    output_dir: Option<PathBuf>,
 }
 
 /// Main application entry point
@@ -362,11 +399,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    // If requested, list parsed filenames and exit
-    if cli.list {
-        list_files(&files, &spinner);
+    // If requested, list parsed filenames and exit; otherwise prepare output directory
+    let Some(output_dir) = finalize_metadata_phase(&cli, &files, &spinner)? else {
         return Ok(());
-    }
+    };
 
     // Successfully finished initialization
     spinner.set_style(
@@ -425,9 +461,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Download all files with integrated signal handling
     let total_files = download_data.len();
-    let summary =
-        downloader::download_files(&client, download_data, total_files, cookie_source.as_ref())
-            .await;
+    let summary = downloader::download_files(
+        &client,
+        Some(output_dir.as_path()),
+        download_data,
+        total_files,
+        cookie_source.as_ref(),
+    )
+    .await?;
 
     batch_exit_result(&summary, total_files)?;
 
@@ -1501,5 +1542,232 @@ mod tests {
         assert_eq!(returned_url, xml_url);
         assert_eq!(files.files.len(), 1);
         assert_eq!(files.files[0].name, "archive.zip");
+    }
+
+    struct TempTestDir(PathBuf);
+
+    impl TempTestDir {
+        fn new(label: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "ia-get-main-test-{}-{}-{}",
+                label,
+                std::process::id(),
+                id
+            ));
+            std::fs::create_dir_all(&path).expect("create temp test dir");
+            Self(path)
+        }
+
+        fn join(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TempTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn cli_command_debug_assert_and_help_include_output_dir_and_examples() {
+        use clap::CommandFactory;
+
+        Cli::command().debug_assert();
+
+        let help = Cli::command().render_help().to_string();
+        assert!(help.contains("-o"), "help should mention -o:\n{help}");
+        assert!(
+            help.contains("--output-dir"),
+            "help should mention --output-dir:\n{help}"
+        );
+        assert!(help.contains("<DIR>"), "help should mention <DIR>:\n{help}");
+        assert!(
+            help.contains("Examples:"),
+            "help should include Examples section:\n{help}"
+        );
+        assert!(
+            help.contains("ia-get -o ./downloads"),
+            "help should include -o usage example:\n{help}"
+        );
+        assert!(
+            help.contains("ia-get --output-dir /tmp/zzap64"),
+            "help should include --output-dir usage example:\n{help}"
+        );
+    }
+
+    #[test]
+    fn cli_parses_output_dir_variants_and_flag_combinations() {
+        let url = "https://archive.org/details/deftributetozzap64";
+
+        let omitted = Cli::try_parse_from(["ia-get", url]).unwrap();
+        assert_eq!(omitted.url, url);
+        assert_eq!(omitted.output_dir, None);
+        assert!(!omitted.list);
+        assert_eq!(omitted.cookies, None);
+
+        let short = Cli::try_parse_from(["ia-get", "-o", "/tmp/out", url]).unwrap();
+        assert_eq!(short.output_dir, Some(PathBuf::from("/tmp/out")));
+
+        let long = Cli::try_parse_from(["ia-get", "--output-dir", "/tmp/out", url]).unwrap();
+        assert_eq!(long.output_dir, Some(PathBuf::from("/tmp/out")));
+
+        let with_list = Cli::try_parse_from(["ia-get", "-l", "-o", "/tmp/out", url]).unwrap();
+        assert!(with_list.list);
+        assert_eq!(with_list.output_dir, Some(PathBuf::from("/tmp/out")));
+
+        let with_cookies = Cli::try_parse_from([
+            "ia-get",
+            "-b",
+            "cookies.txt",
+            "--output-dir",
+            "/tmp/out",
+            url,
+        ])
+        .unwrap();
+        assert_eq!(with_cookies.cookies.as_deref(), Some("cookies.txt"));
+        assert_eq!(with_cookies.output_dir, Some(PathBuf::from("/tmp/out")));
+
+        let combined_trailing =
+            Cli::try_parse_from(["ia-get", url, "-l", "-b", "auth=1", "-o", "./downloads"])
+                .unwrap();
+        assert!(combined_trailing.list);
+        assert_eq!(combined_trailing.cookies.as_deref(), Some("auth=1"));
+        assert_eq!(
+            combined_trailing.output_dir,
+            Some(PathBuf::from("./downloads"))
+        );
+    }
+
+    #[test]
+    fn cli_preserves_verbatim_windows_output_dir_paths() {
+        let url = "https://archive.org/details/deftributetozzap64";
+
+        let drive_root = Cli::try_parse_from(["ia-get", "-o", r"C:\", url]).unwrap();
+        assert_eq!(drive_root.output_dir, Some(PathBuf::from(r"C:\")));
+
+        let windows_abs =
+            Cli::try_parse_from(["ia-get", "--output-dir", r"C:\downloads\archive", url]).unwrap();
+        assert_eq!(
+            windows_abs.output_dir,
+            Some(PathBuf::from(r"C:\downloads\archive"))
+        );
+
+        let windows_verbatim =
+            Cli::try_parse_from(["ia-get", "--output-dir", r"\\?\C:\downloads", url]).unwrap();
+        assert_eq!(
+            windows_verbatim.output_dir,
+            Some(PathBuf::from(r"\\?\C:\downloads"))
+        );
+    }
+
+    #[test]
+    fn resolve_output_dir_defaults_to_dot_and_preserves_explicit_path() {
+        assert_eq!(resolve_output_dir(None), Path::new("."));
+        assert_eq!(
+            resolve_output_dir(Some(Path::new("/tmp/out"))),
+            Path::new("/tmp/out")
+        );
+    }
+
+    #[test]
+    fn finalize_metadata_phase_list_mode_does_not_create_missing_output_dir() {
+        let sandbox = TempTestDir::new("finalize-list");
+        let missing_dir = sandbox.join("missing/nested/output");
+        assert!(!missing_dir.exists());
+
+        let cli = Cli::try_parse_from([
+            "ia-get",
+            "--list",
+            "-o",
+            missing_dir.to_str().unwrap(),
+            "https://archive.org/details/item",
+        ])
+        .unwrap();
+        let files = XmlFiles {
+            files: vec![xml_file("disk1.zip", Some(1024))],
+        };
+        let spinner = indicatif::ProgressBar::hidden();
+
+        let result = finalize_metadata_phase(&cli, &files, &spinner)
+            .expect("--list should succeed without touching output directory");
+        assert_eq!(result, None);
+        assert!(!missing_dir.exists());
+        assert!(!sandbox.join("missing").exists());
+    }
+
+    #[test]
+    fn finalize_metadata_phase_creates_missing_output_dir_when_not_listing() {
+        let sandbox = TempTestDir::new("finalize-create");
+        let target_dir = sandbox.join("new/nested/output");
+        assert!(!target_dir.exists());
+
+        let cli = Cli::try_parse_from([
+            "ia-get",
+            "-o",
+            target_dir.to_str().unwrap(),
+            "https://archive.org/details/item",
+        ])
+        .unwrap();
+        let files = XmlFiles {
+            files: vec![xml_file("disk1.zip", Some(1024))],
+        };
+        let spinner = indicatif::ProgressBar::hidden();
+
+        let result = finalize_metadata_phase(&cli, &files, &spinner)
+            .expect("non-list mode should create missing output directory");
+        assert!(target_dir.is_dir());
+        assert_eq!(result, Some(std::fs::canonicalize(&target_dir).unwrap()));
+    }
+
+    #[test]
+    fn finalize_metadata_phase_fails_on_existing_regular_file() {
+        let sandbox = TempTestDir::new("finalize-file-err");
+        let existing_file = sandbox.join("not-a-dir.txt");
+        std::fs::write(&existing_file, b"existing-data").unwrap();
+
+        let cli = Cli::try_parse_from([
+            "ia-get",
+            "--output-dir",
+            existing_file.to_str().unwrap(),
+            "https://archive.org/details/item",
+        ])
+        .unwrap();
+        let files = XmlFiles {
+            files: vec![xml_file("disk1.zip", Some(1024))],
+        };
+        let spinner = indicatif::ProgressBar::hidden();
+
+        let err = finalize_metadata_phase(&cli, &files, &spinner).unwrap_err();
+        assert!(
+            matches!(err, IaGetError::FileSystem(_)),
+            "expected FileSystem error, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("not a directory"),
+            "unexpected error message: {err}"
+        );
+        assert_eq!(std::fs::read(&existing_file).unwrap(), b"existing-data");
+    }
+
+    #[test]
+    fn finalize_metadata_phase_defaults_to_canonical_current_working_dir() {
+        let cli = Cli::try_parse_from(["ia-get", "https://archive.org/details/item"]).unwrap();
+        assert_eq!(cli.output_dir, None);
+        assert!(!cli.list);
+
+        let files = XmlFiles {
+            files: vec![xml_file("disk1.zip", Some(1024))],
+        };
+        let spinner = indicatif::ProgressBar::hidden();
+        let expected = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+
+        let result = finalize_metadata_phase(&cli, &files, &spinner)
+            .expect("default output directory should resolve current working directory");
+        assert_eq!(result, Some(expected));
     }
 }

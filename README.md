@@ -47,7 +47,7 @@ When a `.part` file exists, `ia-get` sends a range request and validates HTTP `2
 If the server returns HTTP `200` or an invalid range response, `ia-get` restarts the download from byte 0.
 `ia-get` verifies the MD5 hash when archive.org provides one, and renames the `.part` file to the final path atomically only after verification succeeds.
 
-All downloads stay inside the current working directory.
+All downloads stay inside the target output directory (the current working directory by default).
 `ia-get` refuses symlinks, paths outside that directory, and non-regular files such as directories or named pipes (FIFOs).
 For cross-platform safety, `ia-get` sanitises invalid characters, dot segments (`.` and `..`), and trailing spaces or dots in path components.
 It also renames reserved device names on Windows (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `CLOCK$`, `COM0`-`COM9`, `COM¹`-`COM³`, `LPT0`-`LPT9`, and `LPT¹`-`LPT³`).
@@ -60,6 +60,16 @@ Other `4xx` errors fail immediately, and Ctrl+C interrupts retry waits promptly.
 When a file fails to download or fails MD5 verification, `ia-get` prints a warning and continues with the remaining files.
 At the end of a run, `ia-get` prints a summary with `ok`, `skipped`, and `failed` counts and lists any failed files.
 If any file fails or Ctrl+C interrupts the run, `ia-get` exits with a non-zero status.
+
+Save files to a chosen directory with `-o` or `--output-dir <DIR>`.
+`ia-get` creates missing directories when a download starts, and defaults to the current working directory when you omit this option.
+`ia-get` rejects empty paths, broken symlinks, and existing non-directory paths, and keeps every downloaded file inside that directory.
+When you pass `--list`, `ia-get` does not create the output directory.
+
+```shell
+ia-get -o ./downloads https://archive.org/details/<identifier>
+ia-get --output-dir /tmp/archive https://archive.org/details/<identifier>
+```
 
 Pass cookies for archive.org items that require a logged-in session.
 `--cookies`/`-b` accepts either a raw `Cookie` header or a Netscape `cookies.txt` file exported from your browser.
@@ -82,6 +92,14 @@ ia-get --list https://archive.org/details/<identifier>
 ia-get -l https://archive.org/details/<identifier>
 ```
 
+## Options
+
+| Option | Description |
+| --- | --- |
+| `-o`, `--output-dir <DIR>` | Save downloaded files to `<DIR>` (defaults to the current working directory). |
+| `-b`, `--cookies <COOKIES>` | Send a raw `Cookie` header or load cookies from a Netscape `cookies.txt` file. |
+| `-l`, `--list` | List files and sizes from archive metadata XML and exit. |
+
 ## Why? 🤔💭
 
 I wanted to download high-quality scans of [ZZap!64 magazine](https://en.wikipedia.org/wiki/Zzap!64) and some read-only memory from archive.org.
@@ -94,7 +112,8 @@ So I co-authored `ia-get` to automate the download process.
 
 - 🔽 Retries transient errors on metadata and file downloads with exponential backoff, jitter, `Retry-After` support, and prompt Ctrl+C interruption
 - 🌳 Preserves the original directory structure
-- 🛡️ Keeps downloads inside the current working directory, refuses symlinks and non-regular files, and sanitises unsafe paths and reserved device names on Windows
+- 📁 Saves downloads to a chosen directory with `-o`/`--output-dir <DIR>` and creates missing directories automatically
+- 🛡️ Keeps downloads inside the target output directory, refuses symlinks and non-regular files, and sanitises unsafe paths and reserved device names on Windows
 - 🔄 Stages downloads in `.part` files, resumes partial transfers, and validates HTTP range responses
 - 🔏 Verifies MD5 hashes and renames `.part` files atomically only after verification succeeds
 - 📋 Continues past individual file failures, prints a batch summary, and exits with a non-zero status on failed or interrupted runs
