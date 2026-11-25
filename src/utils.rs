@@ -1,11 +1,12 @@
 //! Utility functions for ia-get.
 
-use crate::constants::URL_PATTERN;
+use crate::constants::IDENTIFIER_PATTERN;
 use crate::{IaGetError, Result};
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use std::sync::LazyLock;
+use url::Url;
 
 /// Spinner tick interval in milliseconds
 pub const SPINNER_TICK_INTERVAL: u64 = 100;
@@ -15,11 +16,198 @@ const KB: u64 = 1024;
 const MB: u64 = KB * 1024;
 const GB: u64 = MB * 1024;
 
-/// Compiled regex for URL validation (initialized once)
-static URL_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(URL_PATTERN).expect("Invalid URL regex pattern"));
+/// Compiled regex for archive.org item identifier validation (initialized once)
+static IDENTIFIER_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(IDENTIFIER_PATTERN).expect("Invalid identifier regex pattern"));
 
-/// Validates an archive.org details URL format
+/// Parsed representation of a supported archive.org URL
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArchiveUrl {
+    /// An item details URL (`https://archive.org/details/<identifier>`)
+    Details {
+        /// Archive.org item identifier
+        identifier: String,
+    },
+    /// A direct file download URL (`https://archive.org/download/<identifier>/<path>`)
+    Download {
+        /// Archive.org item identifier
+        identifier: String,
+        /// Decoded relative file path within the archive item
+        file_path: String,
+    },
+}
+
+impl ArchiveUrl {
+    /// Returns the archive.org item identifier.
+    pub fn identifier(&self) -> &str {
+        match self {
+            Self::Details { identifier } | Self::Download { identifier, .. } => identifier,
+        }
+    }
+
+    /// Returns the decoded relative file path for download URLs, or `None` for details URLs.
+    pub fn file_path(&self) -> Option<&str> {
+        match self {
+            Self::Details { .. } => None,
+            Self::Download { file_path, .. } => Some(file_path),
+        }
+    }
+
+    /// Returns the canonical details page URL for this item.
+    pub fn details_url(&self) -> String {
+        format!("https://archive.org/details/{}", self.identifier())
+    }
+
+    /// Returns the XML metadata URL for this item.
+    pub fn xml_url(&self) -> String {
+        let identifier = self.identifier();
+        format!("https://archive.org/download/{identifier}/{identifier}_files.xml")
+    }
+}
+
+fn decode_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Percent-decodes a URL path string into valid UTF-8 without NUL bytes.
+///
+/// Preserves `+` literally according to URL path rules (not form query rules).
+/// Rejects incomplete `%` escapes, non-hex escapes, NUL bytes (`\0` or `%00`),
+/// and invalid UTF-8 byte sequences with [`IaGetError::UrlFormat`].
+///
+/// # Examples
+/// ```
+/// use ia_get::utils::percent_decode_utf8;
+///
+/// assert_eq!(percent_decode_utf8("folder/my%20file+1.pdf").unwrap(), "folder/my file+1.pdf");
+/// assert!(percent_decode_utf8("%2G").is_err());
+/// assert!(percent_decode_utf8("%00").is_err());
+/// ```
+pub fn percent_decode_utf8(input: &str) -> Result<String> {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(IaGetError::UrlFormat(input.to_string()));
+            }
+            let (Some(hi), Some(lo)) = (
+                decode_hex_nibble(bytes[i + 1]),
+                decode_hex_nibble(bytes[i + 2]),
+            ) else {
+                return Err(IaGetError::UrlFormat(input.to_string()));
+            };
+            let value = (hi << 4) | lo;
+            if value == 0 {
+                return Err(IaGetError::UrlFormat(input.to_string()));
+            }
+            decoded.push(value);
+            i += 3;
+        } else {
+            if byte == 0 {
+                return Err(IaGetError::UrlFormat(input.to_string()));
+            }
+            decoded.push(byte);
+            i += 1;
+        }
+    }
+
+    String::from_utf8(decoded).map_err(|_| IaGetError::UrlFormat(input.to_string()))
+}
+
+fn is_valid_identifier(identifier: &str) -> bool {
+    identifier != "." && identifier != ".." && IDENTIFIER_REGEX.is_match(identifier)
+}
+
+fn has_invalid_path_slashes(path: &str) -> bool {
+    path.is_empty() || path.starts_with('/') || path.ends_with('/') || path.contains("//")
+}
+
+/// Parses and validates an archive.org details or direct download URL.
+///
+/// Supports:
+/// - `https://archive.org/details/<identifier>[/]`
+/// - `https://archive.org/download/<identifier>/<path>`
+///
+/// # Arguments
+/// * `url` - The URL to parse
+///
+/// # Returns
+/// * `Ok(ArchiveUrl)` if the URL is valid
+/// * `Err(IaGetError::UrlFormat)` if the URL format is invalid
+///
+/// # Examples
+/// ```
+/// use ia_get::utils::{parse_archive_url, ArchiveUrl};
+///
+/// assert_eq!(
+///     parse_archive_url("https://archive.org/details/valid-item/").unwrap(),
+///     ArchiveUrl::Details {
+///         identifier: "valid-item".to_string(),
+///     }
+/// );
+/// assert_eq!(
+///     parse_archive_url("https://archive.org/download/valid-item/dir/my%20file.pdf").unwrap(),
+///     ArchiveUrl::Download {
+///         identifier: "valid-item".to_string(),
+///         file_path: "dir/my file.pdf".to_string(),
+///     }
+/// );
+/// ```
+pub fn parse_archive_url(url: &str) -> Result<ArchiveUrl> {
+    let invalid = || IaGetError::UrlFormat(url.to_string());
+    let parsed = Url::parse(url).map_err(|_| invalid())?;
+
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("archive.org")
+        || parsed.port().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(invalid());
+    }
+
+    let path = parsed.path();
+
+    if let Some(rest) = path.strip_prefix("/details/") {
+        let identifier = rest.strip_suffix('/').unwrap_or(rest);
+        if !is_valid_identifier(identifier) {
+            return Err(invalid());
+        }
+        return Ok(ArchiveUrl::Details {
+            identifier: identifier.to_string(),
+        });
+    }
+
+    if let Some(rest) = path.strip_prefix("/download/") {
+        let Some((identifier, raw_file_path)) = rest.split_once('/') else {
+            return Err(invalid());
+        };
+        if !is_valid_identifier(identifier) || has_invalid_path_slashes(raw_file_path) {
+            return Err(invalid());
+        }
+        let file_path = percent_decode_utf8(raw_file_path).map_err(|_| invalid())?;
+        if has_invalid_path_slashes(&file_path) {
+            return Err(invalid());
+        }
+        return Ok(ArchiveUrl::Download {
+            identifier: identifier.to_string(),
+            file_path,
+        });
+    }
+
+    Err(invalid())
+}
+
+/// Validates an archive.org details or direct download URL format
 ///
 /// # Arguments
 /// * `url` - The URL to validate
@@ -34,19 +222,11 @@ static URL_REGEX: LazyLock<Regex> =
 ///
 /// assert!(validate_archive_url("https://archive.org/details/valid-item").is_ok());
 /// assert!(validate_archive_url("https://archive.org/details/valid-item/").is_ok());
+/// assert!(validate_archive_url("https://archive.org/download/valid-item/dir/file.pdf").is_ok());
 /// assert!(validate_archive_url("https://example.com/invalid").is_err());
 /// ```
 pub fn validate_archive_url(url: &str) -> Result<()> {
-    if URL_REGEX.is_match(url) {
-        // Further check: ensure there's an identifier after "details/"
-        // and that the identifier is not empty.
-        if let Some(path_segment) = url.split("/details/").nth(1) {
-            if !path_segment.trim_end_matches('/').is_empty() {
-                return Ok(());
-            }
-        }
-    }
-    Err(IaGetError::UrlFormat(url.to_string()))
+    parse_archive_url(url).map(|_| ())
 }
 
 /// Create a progress bar with consistent styling
@@ -619,6 +799,245 @@ mod tests {
             assert_eq!(result, input, "input: {:?}", input);
             assert!(!modified, "expected modified=false for {:?}", input);
             assert_only_normal_components(&result);
+        }
+    }
+
+    #[test]
+    fn test_percent_decode_utf8_valid_inputs() {
+        let cases = [
+            ("", ""),
+            ("plain_file-1.pdf", "plain_file-1.pdf"),
+            ("sub/dir/file.pdf", "sub/dir/file.pdf"),
+            ("file%20name.pdf", "file name.pdf"),
+            ("part%231.pdf", "part#1.pdf"),
+            ("what%3F.txt", "what?.txt"),
+            ("100%25.txt", "100%.txt"),
+            ("a%20b%23c%3Fd%25e", "a b#c?d%e"),
+            ("a+b/file+name%201.pdf", "a+b/file+name 1.pdf"),
+            ("%2f%2F%3a%3A%3f%3F", "//::??"),
+            ("caf%c3%a9.pdf", "café.pdf"),
+            ("caf%C3%A9.pdf", "café.pdf"),
+            ("%D1%84%D0%B0%D0%B9%D0%BB.txt", "файл.txt"),
+            ("%E6%96%87%E4%BB%B6.txt", "文件.txt"),
+            ("emoji%F0%9F%98%80.txt", "emoji😀.txt"),
+        ];
+
+        for (input, expected) in cases {
+            let decoded = percent_decode_utf8(input)
+                .unwrap_or_else(|err| panic!("expected Ok for {input:?}, got {err:?}"));
+            assert_eq!(decoded, expected, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn test_percent_decode_utf8_rejects_invalid_inputs() {
+        let cases = [
+            "%", "file%", "%2", "file%2", "%2G", "%G2", "%ZZ", "%FF", "%C3%28", "%00", "a%00b",
+            "\0", "a\0b",
+        ];
+
+        for input in cases {
+            let err = percent_decode_utf8(input).unwrap_err();
+            assert!(
+                matches!(err, IaGetError::UrlFormat(_)),
+                "expected UrlFormat for {input:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_archive_url_valid_details_and_derived_urls() {
+        let cases = [
+            (
+                "https://archive.org/details/my-item_1.0@org",
+                "my-item_1.0@org",
+            ),
+            ("https://archive.org/details/my-item/", "my-item"),
+            ("https://archive.org/details/my-item?tab=files", "my-item"),
+            ("https://archive.org/details/my-item#description", "my-item"),
+            (
+                "https://archive.org/details/my-item/?view=theater#page/n1",
+                "my-item",
+            ),
+        ];
+
+        for (url, expected_id) in cases {
+            let parsed = parse_archive_url(url)
+                .unwrap_or_else(|err| panic!("expected Ok for {url:?}, got {err:?}"));
+            assert_eq!(
+                parsed,
+                ArchiveUrl::Details {
+                    identifier: expected_id.to_string(),
+                },
+                "url: {url:?}"
+            );
+            assert_eq!(parsed.identifier(), expected_id, "url: {url:?}");
+            assert_eq!(parsed.file_path(), None, "url: {url:?}");
+            assert_eq!(
+                parsed.details_url(),
+                format!("https://archive.org/details/{expected_id}"),
+                "url: {url:?}"
+            );
+            assert_eq!(
+                parsed.xml_url(),
+                format!("https://archive.org/download/{expected_id}/{expected_id}_files.xml"),
+                "url: {url:?}"
+            );
+            assert!(
+                validate_archive_url(url).is_ok(),
+                "validate_archive_url should accept {url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_archive_url_valid_download_and_derived_urls() {
+        let cases = [
+            (
+                "https://archive.org/download/item1/file.pdf",
+                "item1",
+                "file.pdf",
+            ),
+            (
+                "https://archive.org/download/item1/sub/dir/file.pdf",
+                "item1",
+                "sub/dir/file.pdf",
+            ),
+            (
+                "https://archive.org/download/item1/My%20Folder/file%20name+1.pdf",
+                "item1",
+                "My Folder/file name+1.pdf",
+            ),
+            (
+                "https://archive.org/download/item1/sub/caf%C3%A9.pdf",
+                "item1",
+                "sub/café.pdf",
+            ),
+            (
+                "https://archive.org/download/item1/%D1%84%D0%B0%D0%B9%D0%BB.txt",
+                "item1",
+                "файл.txt",
+            ),
+            (
+                "https://archive.org/download/item1/notes%3Fv=1%23top%2520.txt",
+                "item1",
+                "notes?v=1#top%20.txt",
+            ),
+            (
+                "https://archive.org/download/item1/sub/file%20name.pdf?download=1#page=2",
+                "item1",
+                "sub/file name.pdf",
+            ),
+            (
+                "https://archive.org/download/item1/book.epub?foo=bar&baz=1",
+                "item1",
+                "book.epub",
+            ),
+            (
+                "https://archive.org/download/item1/book.epub#chapter-3",
+                "item1",
+                "book.epub",
+            ),
+        ];
+
+        for (url, expected_id, expected_path) in cases {
+            let parsed = parse_archive_url(url)
+                .unwrap_or_else(|err| panic!("expected Ok for {url:?}, got {err:?}"));
+            assert_eq!(
+                parsed,
+                ArchiveUrl::Download {
+                    identifier: expected_id.to_string(),
+                    file_path: expected_path.to_string(),
+                },
+                "url: {url:?}"
+            );
+            assert_eq!(parsed.identifier(), expected_id, "url: {url:?}");
+            assert_eq!(parsed.file_path(), Some(expected_path), "url: {url:?}");
+            assert_eq!(
+                parsed.details_url(),
+                format!("https://archive.org/details/{expected_id}"),
+                "url: {url:?}"
+            );
+            assert_eq!(
+                parsed.xml_url(),
+                format!("https://archive.org/download/{expected_id}/{expected_id}_files.xml"),
+                "url: {url:?}"
+            );
+            assert!(
+                validate_archive_url(url).is_ok(),
+                "validate_archive_url should accept {url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_archive_url_rejects_invalid_urls() {
+        assert!(!is_valid_identifier("."));
+        assert!(!is_valid_identifier(".."));
+
+        let cases = [
+            // Non-HTTPS schemes
+            "http://archive.org/details/item",
+            "http://archive.org/download/item/file.pdf",
+            "ftp://archive.org/details/item",
+            // Non-archive.org hosts
+            "https://example.com/details/item",
+            "https://www.archive.org/details/item",
+            "https://www.archive.org/download/item/file.pdf",
+            "https://archive.org.evil.com/download/item/file.pdf",
+            // Explicit non-default port
+            "https://archive.org:8443/details/item",
+            "https://archive.org:8443/download/item/file.pdf",
+            // Userinfo
+            "https://user@archive.org/details/item",
+            "https://user:pass@archive.org/download/item/file.pdf",
+            "https://:pass@archive.org/details/item",
+            // Unknown path prefixes
+            "https://archive.org/",
+            "https://archive.org/metadata/item",
+            "https://archive.org/stream/item/file.pdf",
+            // Dot identifiers
+            "https://archive.org/details/.",
+            "https://archive.org/details/..",
+            "https://archive.org/download/./file.pdf",
+            "https://archive.org/download/../file.pdf",
+            // Malformed /details/ paths
+            "https://archive.org/details/",
+            "https://archive.org/details/item/extra",
+            "https://archive.org/details/item//",
+            "https://archive.org/details/bad*item",
+            // Malformed /download/ paths
+            "https://archive.org/download/item",
+            "https://archive.org/download/item/",
+            "https://archive.org/download/item/?q=1",
+            "https://archive.org/download/item/sub/",
+            "https://archive.org/download/item//file.pdf",
+            "https://archive.org/download/item/sub//file.pdf",
+            "https://archive.org/download/bad*item/file.pdf",
+            // Malformed percent escapes and decoded slash hazards
+            "https://archive.org/download/item/file%2G.pdf",
+            "https://archive.org/download/item/file%2",
+            "https://archive.org/download/item/file%FF.pdf",
+            "https://archive.org/download/item/file%00.pdf",
+            "https://archive.org/download/item/%2Ffile.pdf",
+            "https://archive.org/download/item/sub%2F%2Ffile.pdf",
+            "https://archive.org/download/item/file.pdf%2F",
+            // Unparseable URLs
+            "",
+            "not-a-url",
+        ];
+
+        for url in cases {
+            let parse_err = parse_archive_url(url).unwrap_err();
+            assert!(
+                matches!(parse_err, IaGetError::UrlFormat(_)),
+                "expected UrlFormat from parse_archive_url({url:?}), got {parse_err:?}"
+            );
+            let validate_err = validate_archive_url(url).unwrap_err();
+            assert!(
+                matches!(validate_err, IaGetError::UrlFormat(_)),
+                "expected UrlFormat from validate_archive_url({url:?}), got {validate_err:?}"
+            );
         }
     }
 }

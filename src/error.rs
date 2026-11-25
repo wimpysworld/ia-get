@@ -17,8 +17,17 @@ pub enum IaGetError {
     FileSystem(String),
 
     /// URL format or parsing errors
-    #[error("Invalid archive.org URL: {0}. Expected format: https://archive.org/details/<identifier>[/]")]
+    #[error("Invalid archive.org URL: {0}. Expected format: https://archive.org/details/<identifier>[/] or https://archive.org/download/<identifier>/<path>")]
     UrlFormat(String),
+
+    /// Requested file was not found in the archive item metadata
+    #[error("File '{file}' not found in archive item '{item}'")]
+    FileNotFound {
+        /// Requested file path within the archive item
+        file: String,
+        /// Archive.org item identifier
+        item: String,
+    },
 
     /// XML parsing errors
     #[error("Failed to parse XML: {0}")]

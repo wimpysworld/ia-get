@@ -2,8 +2,8 @@
 //!
 //! A command-line tool for downloading files from the Internet Archive.
 //!
-//! This tool takes an archive.org details URL and downloads all associated files,
-//! with support for resumable downloads and MD5 hash verification.
+//! This tool takes an archive.org details URL or direct file download URL and downloads
+//! the associated files, with support for resumable downloads and MD5 hash verification.
 
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,10 @@ use colored::*;
 use ia_get::archive_metadata::{parse_xml_files, XmlFiles};
 use ia_get::constants::USER_AGENT;
 use ia_get::downloader;
-use ia_get::utils::{create_spinner, format_size, sanitize_filename, validate_archive_url};
+use ia_get::utils::{
+    create_spinner, format_size, parse_archive_url, percent_decode_utf8, sanitize_filename,
+    ArchiveUrl,
+};
 use ia_get::{CookieSource, IaGetError, Result};
 use indicatif::ProgressStyle;
 use reqwest::header::{HeaderMap, COOKIE};
@@ -70,35 +73,6 @@ async fn is_url_accessible(
         signal,
     )
     .await
-}
-
-/// Converts a details URL to the corresponding XML files list URL
-///
-/// Takes an archive.org details URL and converts it to the XML metadata URL
-/// by replacing "details" with "download" and appending "_files.xml"
-///
-/// # Arguments
-/// * `original_url` - The archive.org details URL
-///
-/// # Returns
-/// The corresponding XML files list URL
-fn get_xml_url(original_url: &str) -> String {
-    // Remove trailing slash if present to get a consistent base for identifier extraction
-    let trimmed_url = original_url.trim_end_matches('/');
-
-    // The identifier is the last segment of the trimmed URL
-    // This expect is considered safe because get_xml_url is only called after
-    // validate_archive_url has confirmed the URL structure.
-    let identifier = trimmed_url
-        .rsplit('/')
-        .next() // Changed from split().last() to address clippy warning
-        .expect("Validated URL should have a valid identifier segment after validation");
-
-    // The base URL for download is "https://archive.org/download/{identifier}"
-    let download_url_base = format!("https://archive.org/download/{}", identifier);
-
-    // The XML URL is "{download_url_base}/{identifier}_files.xml"
-    format!("{}/{}_files.xml", download_url_base, identifier)
 }
 
 /// Fetches and parses XML metadata from an already-resolved XML URL with an explicit retry policy.
@@ -177,7 +151,7 @@ async fn fetch_xml_metadata_from_url(
 /// into a single operation with integrated error handling.
 ///
 /// # Arguments
-/// * `details_url` - The original archive.org details URL
+/// * `target` - The parsed archive.org URL
 /// * `client` - HTTP client for requests
 /// * `spinner` - Progress spinner to update during processing
 /// * `cookie_source` - Optional parsed cookie source evaluated per request URL
@@ -186,13 +160,13 @@ async fn fetch_xml_metadata_from_url(
 /// # Returns
 /// Tuple of (XmlFiles, base_url) for download processing
 async fn fetch_xml_metadata(
-    details_url: &str,
+    target: &ArchiveUrl,
     client: &Client,
     spinner: &indicatif::ProgressBar,
     cookie_source: Option<&CookieSource>,
     signal: &downloader::ShutdownSignal,
 ) -> Result<(XmlFiles, reqwest::Url)> {
-    let xml_url = get_xml_url(details_url);
+    let xml_url = target.xml_url();
     let base_url = reqwest::Url::parse(&xml_url)?;
 
     fetch_xml_metadata_from_url(
@@ -204,6 +178,66 @@ async fn fetch_xml_metadata(
         signal,
     )
     .await
+}
+
+/// Filters parsed archive metadata to the requested target URL.
+///
+/// For details URLs, returns all files unchanged. For direct download URLs,
+/// selects the single matching entry by exact normalized name, falling back to
+/// percent-decoded comparison if the metadata name is percent-encoded.
+fn select_target_files(files: XmlFiles, target: &ArchiveUrl) -> Result<XmlFiles> {
+    match target {
+        ArchiveUrl::Details { .. } => Ok(files),
+        ArchiveUrl::Download {
+            identifier,
+            file_path,
+        } => {
+            let target_norm = file_path.trim_start_matches('/');
+            let matched_pos = files
+                .files
+                .iter()
+                .position(|entry| entry.name.trim_start_matches('/') == target_norm)
+                .or_else(|| {
+                    files.files.iter().position(|entry| {
+                        percent_decode_utf8(entry.name.trim_start_matches('/'))
+                            .ok()
+                            .as_deref()
+                            == Some(target_norm)
+                    })
+                });
+
+            match matched_pos {
+                Some(idx) => {
+                    let mut entries = files.files;
+                    let matched = entries.swap_remove(idx);
+                    Ok(XmlFiles {
+                        files: vec![matched],
+                    })
+                }
+                None => Err(IaGetError::FileNotFound {
+                    file: file_path.clone(),
+                    item: identifier.clone(),
+                }),
+            }
+        }
+    }
+}
+
+/// Builds the download URL for a file relative to the item's XML metadata URL.
+fn build_file_download_url(base_url: &Url, file_name: &str) -> Url {
+    let mut file_url = base_url.clone();
+    file_url.set_query(None);
+    file_url.set_fragment(None);
+    if let Ok(mut segments) = file_url.path_segments_mut() {
+        segments.pop();
+        segments.extend(
+            file_name
+                .trim_start_matches('/')
+                .split('/')
+                .filter(|segment| !segment.is_empty()),
+        );
+    }
+    file_url
 }
 
 /// Return formatted file rows for `--list` output.
@@ -321,12 +355,14 @@ fn finalize_metadata_phase(
 #[command(after_help = "\
 Examples:
   ia-get https://archive.org/details/deftributetozzap64
+  ia-get https://archive.org/download/deftributetozzap64/deftributetozzap64.pdf
   ia-get -o ./downloads https://archive.org/details/deftributetozzap64
   ia-get --output-dir /tmp/zzap64 https://archive.org/details/deftributetozzap64
   ia-get --list https://archive.org/details/deftributetozzap64
+  ia-get --list https://archive.org/download/deftributetozzap64/deftributetozzap64.pdf
   ia-get -b cookies.txt https://archive.org/details/deftributetozzap64")]
 struct Cli {
-    /// URL to an archive.org details page
+    /// Archive.org item details URL (/details/<item>) or direct file URL (/download/<item>/<path>)
     url: String,
     /// List files parsed from archive metadata XML and exit
     #[arg(short = 'l', long = "list")]
@@ -369,13 +405,16 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Start a single spinner for the entire initialization process
     let spinner = create_spinner(&format!("Processing archive.org URL: {}", cli.url.bold()));
 
-    // Validate URL format using consolidated function
-    if let Err(e) = validate_archive_url(&cli.url) {
-        spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
-        return Err(e.into());
-    }
+    // Parse and validate URL format
+    let target = match parse_archive_url(&cli.url) {
+        Ok(target) => target,
+        Err(e) => {
+            spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
+            return Err(e.into());
+        }
+    };
 
-    let details_url = Url::parse(&cli.url)?;
+    let details_url = Url::parse(&target.details_url())?;
 
     // Check URL accessibility
     if let Err(e) =
@@ -391,7 +430,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Fetch and parse XML metadata in one operation
     let (files, base_url) = fetch_xml_metadata(
-        &cli.url,
+        &target,
         &client,
         &spinner,
         cookie_source.as_ref(),
@@ -399,16 +438,30 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
+    // Narrow metadata to the requested file when given a direct download URL
+    let files = match select_target_files(files, &target) {
+        Ok(files) => files,
+        Err(e) => {
+            spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
+            return Err(e.into());
+        }
+    };
+
     // If requested, list parsed filenames and exit; otherwise prepare output directory
     let Some(output_dir) = finalize_metadata_phase(&cli, &files, &spinner)? else {
         return Ok(());
     };
 
     // Successfully finished initialization
+    let file_label = if files.files.len() == 1 {
+        "file"
+    } else {
+        "files"
+    };
     spinner.set_style(
         ProgressStyle::default_spinner()
             .template(&format!(
-                "{} {} to download {} files from archive.org {}",
+                "{} {} to download {} {file_label} from archive.org {}",
                 "✔".green().bold(),
                 "Ready".bold(),
                 files.files.len().to_string().bold(),
@@ -424,10 +477,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .files
         .into_iter()
         .map(|file| {
-            let mut absolute_url = base_url.clone();
-            if let Ok(joined_url) = absolute_url.join(&file.name) {
-                absolute_url = joined_url;
-            }
+            let absolute_url = build_file_download_url(&base_url, &file.name);
 
             // Sanitize filename for filesystem compatibility
             let (sanitized_name, was_modified) = sanitize_filename(&file.name);
@@ -506,20 +556,34 @@ mod tests {
     #[test]
     fn check_get_xml_url() {
         assert_eq!(
-            get_xml_url("https://archive.org/details/item1"),
+            parse_archive_url("https://archive.org/details/item1")
+                .unwrap()
+                .xml_url(),
             "https://archive.org/download/item1/item1_files.xml"
         );
         assert_eq!(
-            get_xml_url("https://archive.org/details/item1/"), // With trailing slash
+            parse_archive_url("https://archive.org/details/item1/")
+                .unwrap()
+                .xml_url(), // With trailing slash
             "https://archive.org/download/item1/item1_files.xml"
         );
         assert_eq!(
-            get_xml_url("https://archive.org/details/another-item_v2.0"),
+            parse_archive_url("https://archive.org/details/another-item_v2.0")
+                .unwrap()
+                .xml_url(),
             "https://archive.org/download/another-item_v2.0/another-item_v2.0_files.xml"
         );
         assert_eq!(
-            get_xml_url("https://archive.org/details/another-item_v2.0/"), // With trailing slash
+            parse_archive_url("https://archive.org/details/another-item_v2.0/")
+                .unwrap()
+                .xml_url(), // With trailing slash
             "https://archive.org/download/another-item_v2.0/another-item_v2.0_files.xml"
+        );
+        assert_eq!(
+            parse_archive_url("https://archive.org/download/item1/dir/file.pdf")
+                .unwrap()
+                .xml_url(),
+            "https://archive.org/download/item1/item1_files.xml"
         );
     }
 
@@ -1769,5 +1833,552 @@ mod tests {
         let result = finalize_metadata_phase(&cli, &files, &spinner)
             .expect("default output directory should resolve current working directory");
         assert_eq!(result, Some(expected));
+    }
+
+    fn xml_file_with_md5(
+        name: &str,
+        size: Option<u64>,
+        md5: Option<&str>,
+    ) -> ia_get::archive_metadata::XmlFile {
+        let mut entry = xml_file(name, size);
+        entry.md5 = md5.map(str::to_string);
+        entry
+    }
+
+    #[test]
+    fn select_target_files_details_returns_all_entries() {
+        let files = XmlFiles {
+            files: vec![
+                xml_file_with_md5(
+                    "cover.jpg",
+                    Some(1024),
+                    Some("11111111111111111111111111111111"),
+                ),
+                xml_file_with_md5(
+                    "sub/dir/issue01.pdf",
+                    Some(8192),
+                    Some("22222222222222222222222222222222"),
+                ),
+            ],
+        };
+        let target = ArchiveUrl::Details {
+            identifier: "item".to_string(),
+        };
+
+        let selected = select_target_files(files, &target).expect("details should return all");
+        assert_eq!(selected.files.len(), 2);
+        assert_eq!(selected.files[0].name, "cover.jpg");
+        assert_eq!(selected.files[0].size, Some(1024));
+        assert_eq!(
+            selected.files[0].md5.as_deref(),
+            Some("11111111111111111111111111111111")
+        );
+        assert_eq!(selected.files[1].name, "sub/dir/issue01.pdf");
+        assert_eq!(selected.files[1].size, Some(8192));
+        assert_eq!(
+            selected.files[1].md5.as_deref(),
+            Some("22222222222222222222222222222222")
+        );
+    }
+
+    #[test]
+    fn select_target_files_download_matches_top_level_and_nested_entries() {
+        let make_files = || XmlFiles {
+            files: vec![
+                xml_file_with_md5(
+                    "issue01.pdf",
+                    Some(4096),
+                    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                ),
+                xml_file_with_md5(
+                    "sub/dir/report.pdf",
+                    Some(12_288),
+                    Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                ),
+                xml_file_with_md5("notes.txt", None, None),
+            ],
+        };
+
+        let top_level_target = ArchiveUrl::Download {
+            identifier: "item".to_string(),
+            file_path: "issue01.pdf".to_string(),
+        };
+        let selected_top = select_target_files(make_files(), &top_level_target)
+            .expect("top-level file should match");
+        assert_eq!(selected_top.files.len(), 1);
+        assert_eq!(selected_top.files[0].name, "issue01.pdf");
+        assert_eq!(selected_top.files[0].size, Some(4096));
+        assert_eq!(
+            selected_top.files[0].md5.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+
+        let nested_target = ArchiveUrl::Download {
+            identifier: "item".to_string(),
+            file_path: "sub/dir/report.pdf".to_string(),
+        };
+        let selected_nested =
+            select_target_files(make_files(), &nested_target).expect("nested file should match");
+        assert_eq!(selected_nested.files.len(), 1);
+        assert_eq!(selected_nested.files[0].name, "sub/dir/report.pdf");
+        assert_eq!(selected_nested.files[0].size, Some(12_288));
+        assert_eq!(
+            selected_nested.files[0].md5.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+    }
+
+    #[test]
+    fn select_target_files_download_normalises_leading_slash_and_percent_encoded_xml_names() {
+        let leading_slash_files = XmlFiles {
+            files: vec![
+                xml_file_with_md5(
+                    "/sub/dir/file.pdf",
+                    Some(2048),
+                    Some("cccccccccccccccccccccccccccccccc"),
+                ),
+                xml_file_with_md5("other.txt", Some(16), None),
+            ],
+        };
+        let target = ArchiveUrl::Download {
+            identifier: "item".to_string(),
+            file_path: "sub/dir/file.pdf".to_string(),
+        };
+        let selected = select_target_files(leading_slash_files, &target)
+            .expect("leading slash in XML name should match");
+        assert_eq!(selected.files.len(), 1);
+        assert_eq!(selected.files[0].name, "/sub/dir/file.pdf");
+        assert_eq!(selected.files[0].size, Some(2048));
+        assert_eq!(
+            selected.files[0].md5.as_deref(),
+            Some("cccccccccccccccccccccccccccccccc")
+        );
+
+        let encoded_xml_files = XmlFiles {
+            files: vec![
+                xml_file_with_md5("other.pdf", Some(512), None),
+                xml_file_with_md5(
+                    "/sub/my%20file%20caf%C3%A9.pdf",
+                    Some(9999),
+                    Some("dddddddddddddddddddddddddddddddd"),
+                ),
+            ],
+        };
+        let decoded_target = ArchiveUrl::Download {
+            identifier: "item".to_string(),
+            file_path: "sub/my file café.pdf".to_string(),
+        };
+        let selected_encoded = select_target_files(encoded_xml_files, &decoded_target)
+            .expect("percent-encoded XML name fallback should match");
+        assert_eq!(selected_encoded.files.len(), 1);
+        assert_eq!(
+            selected_encoded.files[0].name,
+            "/sub/my%20file%20caf%C3%A9.pdf"
+        );
+        assert_eq!(selected_encoded.files[0].size, Some(9999));
+        assert_eq!(
+            selected_encoded.files[0].md5.as_deref(),
+            Some("dddddddddddddddddddddddddddddddd")
+        );
+    }
+
+    #[test]
+    fn select_target_files_download_returns_file_not_found_on_miss() {
+        let files = XmlFiles {
+            files: vec![
+                xml_file_with_md5("cover.jpg", Some(1024), None),
+                xml_file_with_md5("sub/existing.pdf", Some(2048), None),
+            ],
+        };
+        let target = ArchiveUrl::Download {
+            identifier: "my-item".to_string(),
+            file_path: "sub/missing.pdf".to_string(),
+        };
+
+        let err = select_target_files(files, &target).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                IaGetError::FileNotFound { file, item }
+                    if file == "sub/missing.pdf" && item == "my-item"
+            ),
+            "expected FileNotFound {{ file: \"sub/missing.pdf\", item: \"my-item\" }}, got {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "File 'sub/missing.pdf' not found in archive item 'my-item'"
+        );
+    }
+
+    #[test]
+    fn build_file_download_url_encodes_segments_and_strips_leading_slash_query_and_fragment() {
+        let base_url =
+            Url::parse("https://archive.org/download/item/item_files.xml").expect("valid base URL");
+
+        let cases = [
+            ("file.pdf", "https://archive.org/download/item/file.pdf"),
+            (
+                "sub/dir/file.pdf",
+                "https://archive.org/download/item/sub/dir/file.pdf",
+            ),
+            (
+                "sub/file name.pdf",
+                "https://archive.org/download/item/sub/file%20name.pdf",
+            ),
+            (
+                "sub/café.pdf",
+                "https://archive.org/download/item/sub/caf%C3%A9.pdf",
+            ),
+            (
+                "sub/notes?v=1#top.txt",
+                "https://archive.org/download/item/sub/notes%3Fv=1%23top.txt",
+            ),
+            (
+                "/sub/dir/file.pdf",
+                "https://archive.org/download/item/sub/dir/file.pdf",
+            ),
+        ];
+
+        for (file_name, expected) in cases {
+            let built = build_file_download_url(&base_url, file_name);
+            assert_eq!(built.as_str(), expected, "file_name: {file_name:?}");
+            assert_eq!(built.query(), None, "query must be None for {file_name:?}");
+            assert_eq!(
+                built.fragment(),
+                None,
+                "fragment must be None for {file_name:?}"
+            );
+        }
+
+        let base_with_query_and_fragment =
+            Url::parse("https://archive.org/download/item/item_files.xml?download=1#section")
+                .expect("valid base URL");
+        let built = build_file_download_url(&base_with_query_and_fragment, "file.pdf");
+        assert_eq!(built.as_str(), "https://archive.org/download/item/file.pdf");
+        assert_eq!(built.query(), None);
+        assert_eq!(built.fragment(), None);
+    }
+
+    #[test]
+    fn list_mode_for_download_url_lists_only_matched_file_without_creating_output_dir() {
+        let sandbox = TempTestDir::new("list-download-url");
+        let missing_dir = sandbox.join("never/created");
+        assert!(!missing_dir.exists());
+
+        let url = "https://archive.org/download/item/sub/target%20file.pdf?download=1#page=2";
+        let cli =
+            Cli::try_parse_from(["ia-get", "--list", "-o", missing_dir.to_str().unwrap(), url])
+                .unwrap();
+        let target = parse_archive_url(&cli.url).expect("download URL should parse");
+
+        let all_files = XmlFiles {
+            files: vec![
+                xml_file("cover.jpg", Some(2048)),
+                xml_file("sub/target file.pdf", Some(10_240)),
+                xml_file("notes.txt", None),
+            ],
+        };
+        let selected = select_target_files(all_files, &target)
+            .expect("target file should be selected from metadata");
+
+        assert_eq!(selected.files.len(), 1);
+        assert_eq!(
+            list_file_rows(&selected),
+            vec!["  10.00KB sub/target file.pdf".to_string()]
+        );
+        assert_eq!(list_summary(&selected), "1 file, 10.00KB total");
+
+        let spinner = indicatif::ProgressBar::hidden();
+        let output_dir = finalize_metadata_phase(&cli, &selected, &spinner)
+            .expect("--list should succeed without touching output directory");
+        assert_eq!(output_dir, None);
+        assert!(!missing_dir.exists());
+        assert!(!sandbox.join("never").exists());
+    }
+
+    #[tokio::test]
+    async fn direct_download_end_to_end_verifies_md5_and_strips_query_and_fragment() {
+        let target = parse_archive_url(
+            "https://archive.org/download/item/sub/file%20name.pdf?download=1#page=2",
+        )
+        .expect("direct download URL should parse");
+        assert_eq!(
+            target,
+            ArchiveUrl::Download {
+                identifier: "item".to_string(),
+                file_path: "sub/file name.pdf".to_string(),
+            }
+        );
+
+        let payload = b"direct single-file payload for WW-386";
+        let expected_md5 = format!("{:x}", md5::compute(payload));
+        let xml_body = format!(
+            r#"<files>
+                <file name="cover.jpg" source="original">
+                    <size>128</size>
+                    <md5>11111111111111111111111111111111</md5>
+                </file>
+                <file name="sub/file name.pdf" source="original">
+                    <size>{}</size>
+                    <md5>{}</md5>
+                </file>
+                <file name="other/extra.zip" source="original">
+                    <size>512</size>
+                    <md5>22222222222222222222222222222222</md5>
+                </file>
+            </files>"#,
+            payload.len(),
+            expected_md5
+        );
+
+        let server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+            MockResponse::ok(payload),
+        ])
+        .await;
+
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let xml_url = server.url("/download/item/item_files.xml");
+        let (all_files, base_url) =
+            fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                .await
+                .expect("XML metadata fetch should succeed");
+
+        let selected =
+            select_target_files(all_files, &target).expect("single target file should be selected");
+        assert_eq!(selected.files.len(), 1);
+
+        let download_data: Vec<_> = selected
+            .files
+            .into_iter()
+            .map(|file| {
+                let absolute_url = build_file_download_url(&base_url, &file.name);
+                let (sanitized_name, _) = sanitize_filename(&file.name);
+                (absolute_url.to_string(), sanitized_name, file.md5)
+            })
+            .collect();
+
+        let output_dir = TempTestDir::new("direct-download-ok");
+        let summary = downloader::download_files_in_dir(
+            &client,
+            &output_dir.0,
+            download_data,
+            1,
+            None,
+            &policy,
+            &signal,
+        )
+        .await
+        .expect("single-file download should complete");
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert!(!summary.interrupted);
+        assert!(batch_exit_result(&summary, 1).is_ok());
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0]
+            .request_line
+            .starts_with("HEAD /download/item/item_files.xml "));
+        assert!(requests[1]
+            .request_line
+            .starts_with("GET /download/item/item_files.xml "));
+        assert!(
+            requests[2]
+                .request_line
+                .starts_with("GET /download/item/sub/file%20name.pdf "),
+            "unexpected download request line: {}",
+            requests[2].request_line
+        );
+        assert!(!requests[2].request_line.contains('?'));
+        assert!(!requests[2].request_line.contains('#'));
+
+        let saved_path = output_dir.join("sub/file name.pdf");
+        assert_eq!(
+            std::fs::read(&saved_path).expect("saved file should exist"),
+            payload
+        );
+        assert!(!output_dir.join("cover.jpg").exists());
+        assert!(!output_dir.join("other/extra.zip").exists());
+
+        let sub_entries: Vec<_> = std::fs::read_dir(output_dir.join("sub"))
+            .expect("sub directory should exist")
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(sub_entries, vec!["file name.pdf".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn direct_download_end_to_end_fails_on_md5_mismatch_without_promoting_file() {
+        let target = parse_archive_url("https://archive.org/download/item/sub/file%20name.pdf")
+            .expect("direct download URL should parse");
+
+        let expected_payload = b"expected clean content";
+        let corrupt_payload = b"corrupted download bytes";
+        let expected_md5 = format!("{:x}", md5::compute(expected_payload));
+        let xml_body = format!(
+            r#"<files>
+                <file name="other.pdf" source="original">
+                    <size>64</size>
+                    <md5>11111111111111111111111111111111</md5>
+                </file>
+                <file name="sub/file name.pdf" source="original">
+                    <size>{}</size>
+                    <md5>{}</md5>
+                </file>
+            </files>"#,
+            expected_payload.len(),
+            expected_md5
+        );
+
+        let server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+            MockResponse::ok(corrupt_payload),
+        ])
+        .await;
+
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let xml_url = server.url("/download/item/item_files.xml");
+        let (all_files, base_url) =
+            fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                .await
+                .expect("XML metadata fetch should succeed");
+
+        let selected =
+            select_target_files(all_files, &target).expect("single target file should be selected");
+        let download_data: Vec<_> = selected
+            .files
+            .into_iter()
+            .map(|file| {
+                let absolute_url = build_file_download_url(&base_url, &file.name);
+                let (sanitized_name, _) = sanitize_filename(&file.name);
+                (absolute_url.to_string(), sanitized_name, file.md5)
+            })
+            .collect();
+
+        let output_dir = TempTestDir::new("direct-download-md5-fail");
+        let summary = downloader::download_files_in_dir(
+            &client,
+            &output_dir.0,
+            download_data,
+            1,
+            None,
+            &policy,
+            &signal,
+        )
+        .await
+        .expect("batch runner should return summary with failure");
+
+        assert_eq!(summary.ok, 0);
+        assert_eq!(summary.skipped, 0);
+        assert!(!summary.interrupted);
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].file_path, "sub/file name.pdf");
+        assert!(
+            summary.failed[0].error.contains("MD5 mismatch"),
+            "expected MD5 mismatch error, got: {}",
+            summary.failed[0].error
+        );
+        assert!(matches!(
+            batch_exit_result(&summary, 1),
+            Err(IaGetError::BatchFailed {
+                failed: 1,
+                total: 1
+            })
+        ));
+        assert!(
+            !output_dir.join("sub/file name.pdf").exists(),
+            "corrupt download must not be promoted to the final filename"
+        );
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2]
+            .request_line
+            .starts_with("GET /download/item/sub/file%20name.pdf "));
+    }
+
+    #[test]
+    fn cli_help_documents_details_and_download_urls_and_exact_flags() {
+        use clap::CommandFactory;
+
+        Cli::command().debug_assert();
+        let mut cmd = Cli::command();
+
+        let option_flags: Vec<(Option<char>, Option<&str>)> = cmd
+            .get_arguments()
+            .filter(|arg| {
+                !arg.is_positional() && arg.get_id() != "help" && arg.get_id() != "version"
+            })
+            .map(|arg| (arg.get_short(), arg.get_long()))
+            .collect();
+        assert_eq!(
+            option_flags,
+            vec![
+                (Some('l'), Some("list")),
+                (Some('b'), Some("cookies")),
+                (Some('o'), Some("output-dir")),
+            ]
+        );
+
+        let help = cmd.render_help().to_string();
+        assert!(
+            help.contains("/details/<item>"),
+            "help should document /details/<item>:\n{help}"
+        );
+        assert!(
+            help.contains("/download/<item>/<path>"),
+            "help should document /download/<item>/<path>:\n{help}"
+        );
+        assert!(
+            help.contains("ia-get https://archive.org/details/deftributetozzap64"),
+            "help should include /details/ example:\n{help}"
+        );
+        assert!(
+            help.contains(
+                "ia-get https://archive.org/download/deftributetozzap64/deftributetozzap64.pdf"
+            ),
+            "help should include /download/ example:\n{help}"
+        );
+        assert!(
+            help.contains(
+                "ia-get --list https://archive.org/download/deftributetozzap64/deftributetozzap64.pdf"
+            ),
+            "help should include --list /download/ example:\n{help}"
+        );
+        assert!(
+            help.contains("-l, --list"),
+            "help should expose -l/--list:\n{help}"
+        );
+        assert!(
+            help.contains("-b, --cookies"),
+            "help should expose -b/--cookies:\n{help}"
+        );
+        assert!(
+            help.contains("-o, --output-dir"),
+            "help should expose -o/--output-dir:\n{help}"
+        );
     }
 }

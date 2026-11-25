@@ -36,11 +36,17 @@ bin install github.com/wimpysworld/ia-get
 
 # Usage 📖
 
-Simply pass the URL of an [archive.org](https://archive.org) details page you want to download and `ia-get` will automatically get the XML metadata and download all files to the current working directory.
+`ia-get` accepts an [archive.org](https://archive.org) details URL to download every file in an item, or a direct download URL to download one file.
+`ia-get` fetches the item's XML metadata and saves files to the current working directory.
 
 ```shell
 ia-get https://archive.org/details/<identifier>
+ia-get https://archive.org/download/<identifier>/<path>
 ```
+
+For `/download/<identifier>/<path>` URLs, `ia-get` strips query strings and fragments, percent-decodes the path, and fetches `<identifier>_files.xml` to match the file's size and MD5 metadata.
+If that file is absent from the XML metadata, `ia-get` exits with an error.
+Otherwise, `ia-get` downloads only that file and keeps its relative path in the output directory.
 
 `ia-get` downloads each file into `<file>.part`.
 When a `.part` file exists, `ia-get` sends a range request and validates HTTP `200`, `206`, and `416` responses plus the `Content-Range` header.
@@ -84,12 +90,14 @@ ia-get -b 'logged-in-user=...; logged-in-sig=...' https://archive.org/details/<i
 ```
 
 Preview the files first with `--list` or `-l`.
-This lists the names and sizes reported by archive.org metadata without downloading anything.
+For a details URL, `ia-get` prints the names and sizes from archive.org metadata and does not download files.
+For a direct download URL, `ia-get` prints only the matched file and its size.
 If archive.org does not provide a size for an entry, `ia-get` reports it as `unknown` and excludes it from the total known size.
 
 ```shell
 ia-get --list https://archive.org/details/<identifier>
 ia-get -l https://archive.org/details/<identifier>
+ia-get --list https://archive.org/download/<identifier>/<path>
 ```
 
 ## Options
@@ -110,6 +118,7 @@ So I co-authored `ia-get` to automate the download process.
 
 ### Features ✨
 
+- 🎯 Downloads full items from `/details/<identifier>` URLs or single files from `/download/<identifier>/<path>` URLs
 - 🔽 Retries transient errors on metadata and file downloads with exponential backoff, jitter, `Retry-After` support, and prompt Ctrl+C interruption
 - 🌳 Preserves the original directory structure
 - 📁 Saves downloads to a chosen directory with `-o`/`--output-dir <DIR>` and creates missing directories automatically
