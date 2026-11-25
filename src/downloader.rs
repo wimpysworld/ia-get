@@ -1,16 +1,24 @@
 //! Module for handling file downloads, verification, and related operations.
 
+use std::collections::hash_map::RandomState;
 use std::ffi::OsString;
 use std::fs::{self, File};
+use std::future::Future;
+use std::hash::BuildHasher;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use colored::*;
 use reqwest::header::{HeaderMap, HeaderValue};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, RequestBuilder, Response, StatusCode};
+use tokio::sync::Notify;
 
+use crate::constants::{
+    INITIAL_RETRY_DELAY_MS, MAX_RETRIES, MAX_RETRY_AFTER_SECS, MAX_RETRY_DELAY_SECS,
+};
 use crate::error::IaGetError; // Import IaGetError for explicit error conversion
 use crate::utils::{create_progress_bar, format_duration, format_size, format_transfer_rate};
 use crate::Result; // Import utility functions
@@ -21,11 +29,578 @@ const BUFFER_SIZE: usize = 8192;
 /// File size threshold for showing hash progress bar (2MB)
 const LARGE_FILE_THRESHOLD: u64 = 2 * 1024 * 1024;
 
-/// Maximum number of retry attempts for failed downloads
-const MAX_RETRIES: u32 = 3;
+/// Configuration controlling retry attempts and backoff delays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    pub max_retries: u32,
+    pub initial_delay: Duration,
+    pub max_delay: Duration,
+    pub max_retry_after: Duration,
+}
 
-/// Initial delay between retries in milliseconds (doubles with each retry)
-const INITIAL_RETRY_DELAY_MS: u64 = 1000;
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: MAX_RETRIES,
+            initial_delay: Duration::from_millis(INITIAL_RETRY_DELAY_MS),
+            max_delay: Duration::from_secs(MAX_RETRY_DELAY_SECS),
+            max_retry_after: Duration::from_secs(MAX_RETRY_AFTER_SECS),
+        }
+    }
+}
+
+/// Context passed to retry callbacks before waiting for the next attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryEvent<'a> {
+    pub attempt: u32,
+    pub max_retries: u32,
+    pub delay: Duration,
+    pub reason: &'a str,
+}
+
+/// Shared shutdown signal that wakes waiting tasks immediately on Ctrl+C.
+#[derive(Clone, Debug)]
+pub struct ShutdownSignal {
+    running: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl ShutdownSignal {
+    /// Creates a new active shutdown signal.
+    pub fn new() -> Self {
+        Self {
+            running: Arc::new(AtomicBool::new(true)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Returns `true` while shutdown has not been triggered.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    /// Marks shutdown as triggered and wakes all waiting tasks immediately.
+    pub fn trigger(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Returns the underlying atomic flag indicating whether work should continue.
+    pub fn running_flag(&self) -> &Arc<AtomicBool> {
+        &self.running
+    }
+}
+
+impl Default for ShutdownSignal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static SHUTDOWN_SIGNAL: OnceLock<ShutdownSignal> = OnceLock::new();
+
+/// Installs a process-wide Ctrl+C handler once and returns the shared shutdown signal.
+pub fn install_signal_handler() -> ShutdownSignal {
+    SHUTDOWN_SIGNAL
+        .get_or_init(|| {
+            let signal = ShutdownSignal::new();
+            let handler_signal = signal.clone();
+
+            match ctrlc::set_handler(move || {
+                handler_signal.trigger();
+                println!(
+                    "\n{} Received Ctrl+C, finishing current operation...",
+                    "✘".red().bold()
+                );
+            }) {
+                Ok(()) | Err(ctrlc::Error::MultipleHandlers) => {}
+                Err(err) => {
+                    eprintln!("Warning: failed to install Ctrl+C handler: {}", err);
+                }
+            }
+
+            signal
+        })
+        .clone()
+}
+
+fn interrupted_error() -> IaGetError {
+    std::io::Error::new(
+        std::io::ErrorKind::Interrupted,
+        "Download interrupted by user",
+    )
+    .into()
+}
+
+/// Sleeps for `duration`, waking immediately with an interrupted error if `signal` triggers.
+pub async fn sleep_interruptible(duration: Duration, signal: &ShutdownSignal) -> Result<()> {
+    let notified = signal.notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+
+    if !signal.is_running() {
+        return Err(interrupted_error());
+    }
+
+    if duration.is_zero() {
+        return Ok(());
+    }
+
+    tokio::select! {
+        biased;
+        () = &mut notified => Err(interrupted_error()),
+        () = tokio::time::sleep(duration) => Ok(()),
+    }
+}
+
+async fn await_interruptible<Fut, T>(future: Fut, signal: &ShutdownSignal) -> Result<T>
+where
+    Fut: Future<Output = T>,
+{
+    let notified = signal.notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+
+    if !signal.is_running() {
+        return Err(interrupted_error());
+    }
+
+    tokio::select! {
+        biased;
+        () = &mut notified => Err(interrupted_error()),
+        output = future => Ok(output),
+    }
+}
+
+/// Returns whether an HTTP status code represents a transient failure worth retrying.
+pub fn is_retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+/// Returns whether a `reqwest` error represents a transient failure worth retrying.
+pub fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
+    !err.is_builder() && !err.is_redirect() && err.status().is_none_or(is_retryable_status)
+}
+
+fn parse_fixed_u8(input: &str, expected_len: usize) -> Option<u8> {
+    if input.len() != expected_len || !input.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    input.parse::<u8>().ok()
+}
+
+fn parse_fixed_i64(input: &str, expected_len: usize) -> Option<i64> {
+    if input.len() != expected_len || !input.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    input.parse::<i64>().ok()
+}
+
+fn is_short_weekday(input: &str) -> bool {
+    matches!(input, "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat" | "Sun")
+}
+
+fn is_long_weekday(input: &str) -> bool {
+    matches!(
+        input,
+        "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday" | "Sunday"
+    )
+}
+
+fn parse_month(input: &str) -> Option<u8> {
+    match input {
+        "Jan" => Some(1),
+        "Feb" => Some(2),
+        "Mar" => Some(3),
+        "Apr" => Some(4),
+        "May" => Some(5),
+        "Jun" => Some(6),
+        "Jul" => Some(7),
+        "Aug" => Some(8),
+        "Sep" => Some(9),
+        "Oct" => Some(10),
+        "Nov" => Some(11),
+        "Dec" => Some(12),
+        _ => None,
+    }
+}
+
+fn parse_hms(input: &str) -> Option<(u8, u8, u8)> {
+    let bytes = input.as_bytes();
+    if bytes.len() != 8 || bytes[2] != b':' || bytes[5] != b':' {
+        return None;
+    }
+    let hour = parse_fixed_u8(&input[0..2], 2)?;
+    let minute = parse_fixed_u8(&input[3..5], 2)?;
+    let second = parse_fixed_u8(&input[6..8], 2)?;
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    Some((hour, minute, second))
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+fn days_in_month(year: i64, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn days_from_civil(year: i64, month: u8, day: u8) -> i64 {
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let m = i64::from(month);
+    let d = i64::from(day);
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn civil_year_from_days(days_since_epoch: i64) -> i64 {
+    let z = days_since_epoch + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    y + i64::from(m <= 2)
+}
+
+fn system_time_to_unix_nanos(time: SystemTime) -> i128 {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => {
+            i128::from(duration.as_secs()) * 1_000_000_000 + i128::from(duration.subsec_nanos())
+        }
+        Err(err) => {
+            let duration = err.duration();
+            -(i128::from(duration.as_secs()) * 1_000_000_000 + i128::from(duration.subsec_nanos()))
+        }
+    }
+}
+
+fn parse_imf_fixdate(input: &str) -> Option<(i64, u8, u8, u8, u8, u8)> {
+    if input.len() != 29 {
+        return None;
+    }
+    let bytes = input.as_bytes();
+    if !is_short_weekday(&input[0..3])
+        || &input[3..5] != ", "
+        || bytes[7] != b' '
+        || bytes[11] != b' '
+        || bytes[16] != b' '
+        || &input[25..29] != " GMT"
+    {
+        return None;
+    }
+    let day = parse_fixed_u8(&input[5..7], 2)?;
+    let month = parse_month(&input[8..11])?;
+    let year = parse_fixed_i64(&input[12..16], 4)?;
+    let (hour, minute, second) = parse_hms(&input[17..25])?;
+    Some((year, month, day, hour, minute, second))
+}
+
+fn parse_rfc850_date(input: &str, now_year: i64) -> Option<(i64, u8, u8, u8, u8, u8)> {
+    let (weekday, rest) = input.split_once(", ")?;
+    if !is_long_weekday(weekday) || rest.len() != 22 {
+        return None;
+    }
+    let bytes = rest.as_bytes();
+    if bytes[2] != b'-' || bytes[6] != b'-' || bytes[9] != b' ' || &rest[18..22] != " GMT" {
+        return None;
+    }
+    let day = parse_fixed_u8(&rest[0..2], 2)?;
+    let month = parse_month(&rest[3..6])?;
+    let two_digit_year = parse_fixed_i64(&rest[7..9], 2)?;
+    let (hour, minute, second) = parse_hms(&rest[10..18])?;
+
+    let mut year = (now_year / 100) * 100 + two_digit_year;
+    if year > now_year + 50 {
+        year -= 100;
+    } else if year + 50 <= now_year {
+        year += 100;
+    }
+
+    Some((year, month, day, hour, minute, second))
+}
+
+fn parse_asctime_date(input: &str) -> Option<(i64, u8, u8, u8, u8, u8)> {
+    if input.len() != 24 {
+        return None;
+    }
+    let bytes = input.as_bytes();
+    if !is_short_weekday(&input[0..3])
+        || bytes[3] != b' '
+        || bytes[7] != b' '
+        || bytes[10] != b' '
+        || bytes[19] != b' '
+    {
+        return None;
+    }
+    let month = parse_month(&input[4..7])?;
+    let day_str = &input[8..10];
+    let day = if let Some(single_digit) = day_str.strip_prefix(' ') {
+        parse_fixed_u8(single_digit, 1)?
+    } else {
+        parse_fixed_u8(day_str, 2)?
+    };
+    let (hour, minute, second) = parse_hms(&input[11..19])?;
+    let year = parse_fixed_i64(&input[20..24], 4)?;
+    Some((year, month, day, hour, minute, second))
+}
+
+/// Parses an RFC 9110 Section 10.2.3 `Retry-After` header (delta-seconds or HTTP-date)
+/// and clamps the resulting delay to `max_delay`.
+pub fn parse_retry_after(value: &str, now: SystemTime, max_delay: Duration) -> Option<Duration> {
+    let trimmed = value.trim_matches(|c| c == ' ' || c == '\t');
+    if trimmed.is_empty() || !trimmed.is_ascii() {
+        return None;
+    }
+
+    if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(match parse_ascii_u64(trimmed) {
+            Some(secs) => Duration::from_secs(secs).min(max_delay),
+            None => max_delay,
+        });
+    }
+
+    let now_nanos = system_time_to_unix_nanos(now);
+    let now_secs = now_nanos.div_euclid(1_000_000_000);
+    let now_days = now_secs.div_euclid(86_400) as i64;
+    let now_year = civil_year_from_days(now_days);
+
+    let (year, month, day, hour, minute, second) = parse_imf_fixdate(trimmed)
+        .or_else(|| parse_rfc850_date(trimmed, now_year))
+        .or_else(|| parse_asctime_date(trimmed))?;
+
+    if day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+
+    let target_secs = i128::from(days_from_civil(year, month, day)) * 86_400
+        + i128::from(hour) * 3600
+        + i128::from(minute) * 60
+        + i128::from(second);
+    let target_nanos = target_secs * 1_000_000_000;
+    let delta_nanos = target_nanos - now_nanos;
+
+    if delta_nanos <= 0 {
+        return Some(Duration::ZERO);
+    }
+
+    let max_nanos =
+        i128::from(max_delay.as_secs()) * 1_000_000_000 + i128::from(max_delay.subsec_nanos());
+    let clamped_nanos = delta_nanos.min(max_nanos);
+    let secs = (clamped_nanos / 1_000_000_000) as u64;
+    let subsec_nanos = (clamped_nanos % 1_000_000_000) as u32;
+    Some(Duration::new(secs, subsec_nanos))
+}
+
+fn random_u64() -> u64 {
+    RandomState::new().hash_one(0u64)
+}
+
+/// Computes equal-jitter exponential backoff in `[base/2, base]` for a 1-based `attempt`
+/// using an explicit random `sample`.
+pub fn compute_backoff_delay_with_sample(
+    attempt: u32,
+    policy: &RetryPolicy,
+    sample: u64,
+) -> Duration {
+    let initial_nanos = policy.initial_delay.as_nanos();
+    let max_nanos = policy.max_delay.as_nanos();
+    let base_nanos = if initial_nanos == 0 || max_nanos == 0 {
+        0
+    } else {
+        let shift = attempt.saturating_sub(1);
+        if shift >= 128 {
+            max_nanos
+        } else {
+            let factor = 1u128 << shift;
+            initial_nanos.saturating_mul(factor).min(max_nanos)
+        }
+    };
+
+    let half = base_nanos / 2;
+    let spread = base_nanos - half;
+    let denom = u128::from(u64::MAX);
+    let sample_u128 = u128::from(sample);
+    let jitter = (spread / denom) * sample_u128 + ((spread % denom) * sample_u128) / denom;
+    let total_nanos = half + jitter;
+
+    Duration::new(
+        (total_nanos / 1_000_000_000) as u64,
+        (total_nanos % 1_000_000_000) as u32,
+    )
+}
+
+/// Computes the retry delay for a 1-based `attempt`, preferring a valid `Retry-After` header
+/// and falling back to jittered exponential backoff otherwise.
+pub fn compute_retry_delay(
+    attempt: u32,
+    retry_after_header: Option<&str>,
+    now: SystemTime,
+    policy: &RetryPolicy,
+) -> Duration {
+    if let Some(delay) =
+        retry_after_header.and_then(|value| parse_retry_after(value, now, policy.max_retry_after))
+    {
+        return delay;
+    }
+
+    compute_backoff_delay_with_sample(attempt, policy, random_u64())
+}
+
+enum AttemptOutcome {
+    Ready(Response),
+    Retry { delay: Duration, reason: String },
+}
+
+async fn send_attempt<F>(
+    build_request: &mut F,
+    retry_count: u32,
+    policy: &RetryPolicy,
+    signal: &ShutdownSignal,
+) -> Result<AttemptOutcome>
+where
+    F: FnMut() -> RequestBuilder,
+{
+    let send_result = await_interruptible(build_request().send(), signal).await?;
+
+    match send_result {
+        Ok(response) => {
+            let status = response.status();
+            if is_retryable_status(status) {
+                if retry_count >= policy.max_retries {
+                    return match response.error_for_status() {
+                        Ok(resp) => Ok(AttemptOutcome::Ready(resp)),
+                        Err(err) => Err(err.into()),
+                    };
+                }
+
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok());
+                let delay =
+                    compute_retry_delay(retry_count + 1, retry_after, SystemTime::now(), policy);
+                let reason = format!("HTTP {}", status);
+                drop(response);
+                Ok(AttemptOutcome::Retry { delay, reason })
+            } else {
+                let response = response.error_for_status()?;
+                Ok(AttemptOutcome::Ready(response))
+            }
+        }
+        Err(err) => {
+            if !is_retryable_reqwest_error(&err) || retry_count >= policy.max_retries {
+                return Err(err.into());
+            }
+
+            let delay = compute_retry_delay(retry_count + 1, None, SystemTime::now(), policy);
+            let reason = err.to_string();
+            Ok(AttemptOutcome::Retry { delay, reason })
+        }
+    }
+}
+
+/// Sends an HTTP request with retries on transient transport errors and retryable HTTP statuses,
+/// honouring `Retry-After` headers and immediate cancellation via `ShutdownSignal`.
+pub async fn send_with_retry<F, H>(
+    policy: &RetryPolicy,
+    signal: &ShutdownSignal,
+    mut build_request: F,
+    mut on_retry: H,
+) -> Result<Response>
+where
+    F: FnMut() -> RequestBuilder,
+    H: FnMut(&RetryEvent<'_>),
+{
+    let mut retry_count: u32 = 0;
+
+    loop {
+        match send_attempt(&mut build_request, retry_count, policy, signal).await? {
+            AttemptOutcome::Ready(response) => return Ok(response),
+            AttemptOutcome::Retry { delay, reason } => {
+                retry_count += 1;
+                on_retry(&RetryEvent {
+                    attempt: retry_count,
+                    max_retries: policy.max_retries,
+                    delay,
+                    reason: &reason,
+                });
+                sleep_interruptible(delay, signal).await?;
+            }
+        }
+    }
+}
+
+/// Fetches a text response body with retries on transient transport errors, retryable HTTP
+/// statuses, and transient body read errors, honouring `Retry-After` and `ShutdownSignal`.
+pub async fn fetch_text_with_retry<F, H>(
+    policy: &RetryPolicy,
+    signal: &ShutdownSignal,
+    mut build_request: F,
+    mut on_retry: H,
+) -> Result<String>
+where
+    F: FnMut() -> RequestBuilder,
+    H: FnMut(&RetryEvent<'_>),
+{
+    let mut retry_count: u32 = 0;
+
+    loop {
+        match send_attempt(&mut build_request, retry_count, policy, signal).await? {
+            AttemptOutcome::Retry { delay, reason } => {
+                retry_count += 1;
+                on_retry(&RetryEvent {
+                    attempt: retry_count,
+                    max_retries: policy.max_retries,
+                    delay,
+                    reason: &reason,
+                });
+                sleep_interruptible(delay, signal).await?;
+            }
+            AttemptOutcome::Ready(response) => {
+                match await_interruptible(response.text(), signal).await? {
+                    Ok(text) => return Ok(text),
+                    Err(err) => {
+                        if !is_retryable_reqwest_error(&err) || retry_count >= policy.max_retries {
+                            return Err(err.into());
+                        }
+                        retry_count += 1;
+                        let delay =
+                            compute_retry_delay(retry_count, None, SystemTime::now(), policy);
+                        let reason = err.to_string();
+                        on_retry(&RetryEvent {
+                            attempt: retry_count,
+                            max_retries: policy.max_retries,
+                            delay,
+                            reason: &reason,
+                        });
+                        sleep_interruptible(delay, signal).await?;
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Parsed RFC 9110 Section 14.4 `Content-Range` header value for the `bytes` unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,26 +767,6 @@ fn promote_part_file(part_path: &Path, final_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Sets up signal handling for graceful shutdown on Ctrl+C
-///
-/// Returns an Arc<AtomicBool> that can be checked to see if the process
-/// should stop. When Ctrl+C is pressed, this will be set to false.
-fn setup_signal_handler() -> Arc<AtomicBool> {
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-
-    ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-        println!(
-            "\n{} Received Ctrl+C, finishing current operation...",
-            "✘".red().bold()
-        );
-    })
-    .expect("Error setting Ctrl+C handler");
-
-    running
-}
-
 /// Calculates the MD5 hash of a file
 fn calculate_md5(file_path: &Path, running: &Arc<AtomicBool>) -> Result<String> {
     let file = File::open(file_path)?;
@@ -335,14 +890,19 @@ async fn download_file_content(
     client: &Client,
     url: &str,
     part_path: &Path,
-    running: &Arc<AtomicBool>,
+    signal: &ShutdownSignal,
     cookie_header: Option<&str>,
     expected_md5: Option<&str>,
+    policy: &RetryPolicy,
 ) -> Result<(u64, bool)> {
-    let mut retry_count = 0;
+    let mut retry_count: u32 = 0;
     let mut has_reset_range = false;
 
     loop {
+        if !signal.is_running() {
+            return Err(interrupted_error());
+        }
+
         // Re-check `.part` file size at start of each attempt (in case of retry)
         let current_file_size = existing_part_size(part_path)?;
 
@@ -370,47 +930,96 @@ async fn download_file_content(
             request = request.headers(headers);
         }
 
-        let mut response = match request.send().await {
+        let mut response = match await_interruptible(request.send(), signal).await? {
             Ok(resp) => resp,
             Err(e) => {
                 // Request failed before we even got a response
-                retry_count += 1;
+                if !is_retryable_reqwest_error(&e) {
+                    return Err(e.into());
+                }
 
-                if retry_count > MAX_RETRIES {
+                if retry_count >= policy.max_retries {
                     println!(
                         "{} {}      {} Maximum retries ({}) exceeded",
                         "├╼".cyan().dimmed(),
                         "Failed".red().bold(),
                         "✘".red().bold(),
-                        MAX_RETRIES
+                        policy.max_retries
                     );
                     return Err(e.into());
                 }
 
-                let delay = INITIAL_RETRY_DELAY_MS * 2u64.pow(retry_count - 1);
+                retry_count += 1;
+                let delay = compute_retry_delay(retry_count, None, SystemTime::now(), policy);
                 println!(
                     "{} {}      {} Connection error (attempt {}/{}): {}",
                     "├╼".cyan().dimmed(),
                     "Retry".yellow().bold(),
                     "⟳".yellow().bold(),
                     retry_count,
-                    MAX_RETRIES,
+                    policy.max_retries,
                     e
                 );
                 println!(
                     "{} {}      Waiting {:.1}s before retry...",
                     "├╼".cyan().dimmed(),
                     "Wait".white(),
-                    delay as f64 / 1000.0
+                    delay.as_secs_f64()
                 );
 
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                sleep_interruptible(delay, signal).await?;
 
                 continue; // Retry from the top of the loop
             }
         };
 
         let status = response.status();
+        if is_retryable_status(status) {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            drop(response);
+
+            if retry_count < policy.max_retries {
+                retry_count += 1;
+                let delay = compute_retry_delay(
+                    retry_count,
+                    retry_after.as_deref(),
+                    SystemTime::now(),
+                    policy,
+                );
+                println!(
+                    "{} {}      {} HTTP {} (attempt {}/{})",
+                    "├╼".cyan().dimmed(),
+                    "Retry".yellow().bold(),
+                    "⟳".yellow().bold(),
+                    status,
+                    retry_count,
+                    policy.max_retries
+                );
+                println!(
+                    "{} {}      Waiting {:.1}s before retry...",
+                    "├╼".cyan().dimmed(),
+                    "Wait".white(),
+                    delay.as_secs_f64()
+                );
+
+                sleep_interruptible(delay, signal).await?;
+                continue;
+            }
+
+            println!(
+                "{} {}      {} Maximum retries ({}) exceeded",
+                "├╼".cyan().dimmed(),
+                "Failed".red().bold(),
+                "✘".red().bold(),
+                policy.max_retries
+            );
+            return Err(IaGetError::Network(format!("HTTP error {}", status)));
+        }
+
         let content_range_header = response
             .headers()
             .get(reqwest::header::CONTENT_RANGE)
@@ -442,11 +1051,12 @@ async fn download_file_content(
             ),
             ResponseAction::VerifyCompletePart => {
                 if expected_md5.is_some() {
-                    if !running.load(Ordering::SeqCst) {
+                    if !signal.is_running() {
                         return Ok((current_file_size, false));
                     }
-                    let is_valid = verify_downloaded_file(part_path, expected_md5, running)?;
-                    if !running.load(Ordering::SeqCst) {
+                    let is_valid =
+                        verify_downloaded_file(part_path, expected_md5, signal.running_flag())?;
+                    if !signal.is_running() {
                         return Ok((current_file_size, false));
                     }
                     if is_valid {
@@ -507,8 +1117,11 @@ async fn download_file_content(
 
         // Attempt the download
         let download_result: Result<()> = async {
-            while let Some(chunk_result) = response.chunk().await.transpose() {
-                if !running.load(Ordering::SeqCst) {
+            while let Some(chunk_result) = await_interruptible(response.chunk(), signal)
+                .await?
+                .transpose()
+            {
+                if !signal.is_running() {
                     pb.finish_and_clear();
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
@@ -560,16 +1173,14 @@ async fn download_file_content(
             Err(e) => {
                 pb.finish_and_clear();
 
-                // Check if this is a user interruption
-                if !running.load(Ordering::SeqCst) || e.to_string().contains("interrupted") {
-                    file.flush()?;
+                // Fail immediately on user interruption or local filesystem errors
+                if !signal.is_running() || !matches!(e, IaGetError::Network(_)) {
+                    let _ = file.flush();
                     drop(file);
                     return Err(e);
                 }
 
-                retry_count += 1;
-
-                if retry_count > MAX_RETRIES {
+                if retry_count >= policy.max_retries {
                     let _ = file.flush();
                     drop(file);
                     println!(
@@ -577,33 +1188,34 @@ async fn download_file_content(
                         "├╼".cyan().dimmed(),
                         "Failed".red().bold(),
                         "✘".red().bold(),
-                        MAX_RETRIES
+                        policy.max_retries
                     );
                     return Err(e);
                 }
 
-                let delay = INITIAL_RETRY_DELAY_MS * 2u64.pow(retry_count - 1);
+                retry_count += 1;
+                let delay = compute_retry_delay(retry_count, None, SystemTime::now(), policy);
                 println!(
                     "{} {}      {} Download error (attempt {}/{}): {}",
                     "├╼".cyan().dimmed(),
                     "Retry".yellow().bold(),
                     "⟳".yellow().bold(),
                     retry_count,
-                    MAX_RETRIES,
+                    policy.max_retries,
                     e
                 );
                 println!(
                     "{} {}      Waiting {:.1}s before retry...",
                     "├╼".cyan().dimmed(),
                     "Wait".white(),
-                    delay as f64 / 1000.0
+                    delay.as_secs_f64()
                 );
 
                 // Ensure file is flushed and closed before sleeping and starting next attempt
                 file.flush()?;
                 drop(file);
 
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                sleep_interruptible(delay, signal).await?;
             }
         }
     }
@@ -647,16 +1259,18 @@ fn verify_downloaded_file(
     }
 }
 
-/// Download a single file via `.part` staging, MD5 verification, and atomic promotion.
-async fn download_single_file(
+/// Download a single file via `.part` staging, MD5 verification, and atomic promotion
+/// using an explicit `RetryPolicy`.
+async fn download_single_file_with_policy(
     client: &Client,
     url: &str,
     file_path: &str,
     expected_md5: Option<&str>,
-    running: &Arc<AtomicBool>,
+    signal: &ShutdownSignal,
     cookie_header: Option<&str>,
+    policy: &RetryPolicy,
 ) -> Result<()> {
-    if let Some(is_valid) = check_existing_file(file_path, expected_md5, running)? {
+    if let Some(is_valid) = check_existing_file(file_path, expected_md5, signal.running_flag())? {
         if is_valid {
             println!(
                 "{} {}   {}",
@@ -682,17 +1296,19 @@ async fn download_single_file(
         client,
         url,
         &part_path,
-        running,
+        signal,
         cookie_header,
         expected_md5,
+        policy,
     )
     .await?;
 
-    if !running.load(Ordering::SeqCst) {
+    if !signal.is_running() {
         return Ok(());
     }
 
-    if already_verified || verify_downloaded_file(&part_path, expected_md5, running)? {
+    if already_verified || verify_downloaded_file(&part_path, expected_md5, signal.running_flag())?
+    {
         promote_part_file(&part_path, Path::new(file_path))?;
         Ok(())
     } else {
@@ -701,6 +1317,27 @@ async fn download_single_file(
             file_path
         )))
     }
+}
+
+/// Download a single file via `.part` staging, MD5 verification, and atomic promotion.
+async fn download_single_file(
+    client: &Client,
+    url: &str,
+    file_path: &str,
+    expected_md5: Option<&str>,
+    signal: &ShutdownSignal,
+    cookie_header: Option<&str>,
+) -> Result<()> {
+    download_single_file_with_policy(
+        client,
+        url,
+        file_path,
+        expected_md5,
+        signal,
+        cookie_header,
+        &RetryPolicy::default(),
+    )
+    .await
 }
 
 /// Download multiple files with shared signal handling
@@ -716,12 +1353,12 @@ pub async fn download_files<I>(
 where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
 {
-    // Set up signal handling for the entire download session
-    let running = setup_signal_handler();
+    // Reuse the process-wide signal handler for the entire download session
+    let signal = install_signal_handler();
 
     for (index, (url, file_path, expected_md5)) in files.into_iter().enumerate() {
         // Check if we should stop due to signal
-        if !running.load(Ordering::SeqCst) {
+        if !signal.is_running() {
             println!(
                 "\n{} Download interrupted. Run the command again to resume remaining files.",
                 "✘".red().bold()
@@ -750,7 +1387,7 @@ where
             &url,
             &file_path,
             expected_md5.as_deref(),
-            &running,
+            &signal,
             cookie_header,
         )
         .await?;
@@ -1188,7 +1825,6 @@ mod tests {
     }
 
     use std::sync::atomic::AtomicU64;
-    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Mutex;
@@ -1255,7 +1891,7 @@ mod tests {
             second_chunk: Option<Vec<u8>>,
             watch_path: PathBuf,
             expected_part_len: u64,
-            running: Arc<AtomicBool>,
+            signal: ShutdownSignal,
         },
     }
 
@@ -1323,9 +1959,21 @@ mod tests {
             format!("http://{}{}", self.addr, path)
         }
 
+        fn requests_handle(&self) -> Arc<Mutex<Vec<CapturedRequest>>> {
+            Arc::clone(&self.requests)
+        }
+
         async fn finish(mut self) -> Vec<CapturedRequest> {
             if let Some(handle) = self.handle.take() {
                 let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            }
+            self.requests.lock().await.clone()
+        }
+
+        async fn abort_and_collect(mut self) -> Vec<CapturedRequest> {
+            if let Some(handle) = self.handle.take() {
+                handle.abort();
+                let _ = handle.await;
             }
             self.requests.lock().await.clone()
         }
@@ -1412,7 +2060,7 @@ mod tests {
                 second_chunk,
                 watch_path,
                 expected_part_len,
-                running,
+                signal,
             } => {
                 let mut wire = format_response_head(status_line, &headers);
                 wire.extend_from_slice(&first_chunk);
@@ -1430,7 +2078,7 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
 
-                running.store(false, Ordering::SeqCst);
+                signal.trigger();
 
                 if let Some(chunk) = second_chunk {
                     let _ = socket.write_all(&chunk).await;
@@ -1450,14 +2098,14 @@ mod tests {
         let file_path = dir.file_path("nested/item.bin");
         let part_path = part_file_path(&file_path);
         let client = Client::new();
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = ShutdownSignal::new();
 
         download_single_file(
             &client,
             &server.url("/item.bin"),
             &file_path,
             Some(&expected_md5),
-            &running,
+            &signal,
             None,
         )
         .await
@@ -1479,7 +2127,7 @@ mod tests {
         let dir = TempTestDir::new("interrupt");
         let file_path = dir.file_path("interrupted.bin");
         let part_path = part_file_path(&file_path);
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = ShutdownSignal::new();
 
         let server = MockServer::start(vec![MockResponse::MidStreamInterrupt {
             status_line: "200 OK",
@@ -1488,7 +2136,7 @@ mod tests {
             second_chunk: Some(second_chunk.to_vec()),
             watch_path: part_path.clone(),
             expected_part_len: first_chunk.len() as u64,
-            running: Arc::clone(&running),
+            signal: signal.clone(),
         }])
         .await;
 
@@ -1498,7 +2146,7 @@ mod tests {
             &server.url("/interrupted.bin"),
             &file_path,
             None,
-            &running,
+            &signal,
             None,
         )
         .await
@@ -1544,13 +2192,13 @@ mod tests {
         .await;
 
         let client = Client::new();
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = ShutdownSignal::new();
         download_single_file(
             &client,
             &server.url("/resumed.bin"),
             &file_path,
             Some(&expected_md5),
-            &running,
+            &signal,
             None,
         )
         .await
@@ -1579,14 +2227,14 @@ mod tests {
 
         let server = MockServer::start(vec![MockResponse::ok(full_payload)]).await;
         let client = Client::new();
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = ShutdownSignal::new();
 
         download_single_file(
             &client,
             &server.url("/restarted.bin"),
             &file_path,
             Some(&expected_md5),
-            &running,
+            &signal,
             None,
         )
         .await
@@ -1630,13 +2278,13 @@ mod tests {
         .await;
 
         let client = Client::new();
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = ShutdownSignal::new();
         download_single_file(
             &client,
             &server.url("/mismatched.bin"),
             &file_path,
             Some(&expected_md5),
-            &running,
+            &signal,
             None,
         )
         .await
@@ -1685,13 +2333,13 @@ mod tests {
             .await;
 
             let client = Client::new();
-            let running = Arc::new(AtomicBool::new(true));
+            let signal = ShutdownSignal::new();
             download_single_file(
                 &client,
                 &server.url("/bad206.bin"),
                 &file_path,
                 Some(&expected_md5),
-                &running,
+                &signal,
                 None,
             )
             .await
@@ -1736,13 +2384,13 @@ mod tests {
         .await;
 
         let client = Client::new();
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = ShutdownSignal::new();
         let err = download_single_file(
             &client,
             &server.url("/repeated206.bin"),
             &file_path,
             None,
-            &running,
+            &signal,
             None,
         )
         .await
@@ -1781,13 +2429,13 @@ mod tests {
         .await;
 
         let client = Client::new();
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = ShutdownSignal::new();
         download_single_file(
             &client,
             &server.url("/complete.bin"),
             &file_path,
             Some(&expected_md5),
-            &running,
+            &signal,
             None,
         )
         .await
@@ -1828,13 +2476,13 @@ mod tests {
         .await;
 
         let client = Client::new();
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = ShutdownSignal::new();
         download_single_file(
             &client,
             &server.url("/oversized.bin"),
             &file_path,
             Some(&expected_md5),
-            &running,
+            &signal,
             None,
         )
         .await
@@ -1878,13 +2526,13 @@ mod tests {
         .await;
 
         let client = Client::new();
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = ShutdownSignal::new();
         download_single_file(
             &client,
             &server.url("/corrupt-complete.bin"),
             &file_path,
             Some(&expected_md5),
-            &running,
+            &signal,
             None,
         )
         .await
@@ -1907,52 +2555,65 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_error_responses_never_write_body_to_part_or_final_file() {
-        let error_cases: [(&str, &str, &[u8]); 3] = [
+        let error_cases: [(&str, &str, &[u8], usize); 3] = [
             (
                 "404",
                 "404 Not Found",
                 b"<html><body><h1>404 Not Found</h1></body></html>",
+                1,
             ),
             (
                 "500",
                 "500 Internal Server Error",
                 b"<html><body>Internal Server Error</body></html>",
+                3,
             ),
-            ("403", "403 Forbidden", b"Access Denied"),
+            ("403", "403 Forbidden", b"Access Denied", 1),
         ];
 
         let client = Client::new();
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = ShutdownSignal::new();
+        let fast_policy = RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_retry_after: Duration::from_millis(1),
+        };
 
-        for (label, status_line, body) in error_cases {
+        for (label, status_line, body, expected_requests) in error_cases {
             // Case 1: no prior .part file
             let dir_fresh = TempTestDir::new(&format!("err-fresh-{label}"));
             let file_path_fresh = dir_fresh.file_path("target.bin");
             let part_path_fresh = part_file_path(&file_path_fresh);
 
-            let server_fresh = MockServer::start(vec![MockResponse::with_headers(
-                status_line,
-                vec![
-                    ("Content-Type", "text/html".to_string()),
-                    ("Content-Length", body.len().to_string()),
-                ],
-                body,
-            )])
-            .await;
+            let fresh_responses = (0..expected_requests)
+                .map(|_| {
+                    MockResponse::with_headers(
+                        status_line,
+                        vec![
+                            ("Content-Type", "text/html".to_string()),
+                            ("Content-Length", body.len().to_string()),
+                        ],
+                        body,
+                    )
+                })
+                .collect();
+            let server_fresh = MockServer::start(fresh_responses).await;
 
-            let err = download_single_file(
+            let err = download_single_file_with_policy(
                 &client,
                 &server_fresh.url("/target.bin"),
                 &file_path_fresh,
                 None,
-                &running,
+                &signal,
                 None,
+                &fast_policy,
             )
             .await
             .unwrap_err();
 
             let requests = server_fresh.finish().await;
-            assert_eq!(requests.len(), 1, "fresh {label}");
+            assert_eq!(requests.len(), expected_requests, "fresh {label}");
             assert!(matches!(err, IaGetError::Network(_)), "fresh {label}");
             assert!(
                 !part_path_fresh.exists(),
@@ -1970,34 +2631,41 @@ mod tests {
             let part_path_resume = part_file_path(&file_path_resume);
             fs::write(&part_path_resume, existing_prefix).unwrap();
 
-            let server_resume = MockServer::start(vec![MockResponse::with_headers(
-                status_line,
-                vec![
-                    ("Content-Type", "text/html".to_string()),
-                    ("Content-Length", body.len().to_string()),
-                ],
-                body,
-            )])
-            .await;
+            let resume_responses = (0..expected_requests)
+                .map(|_| {
+                    MockResponse::with_headers(
+                        status_line,
+                        vec![
+                            ("Content-Type", "text/html".to_string()),
+                            ("Content-Length", body.len().to_string()),
+                        ],
+                        body,
+                    )
+                })
+                .collect();
+            let server_resume = MockServer::start(resume_responses).await;
 
-            let err = download_single_file(
+            let err = download_single_file_with_policy(
                 &client,
                 &server_resume.url("/target.bin"),
                 &file_path_resume,
                 None,
-                &running,
+                &signal,
                 None,
+                &fast_policy,
             )
             .await
             .unwrap_err();
 
             let requests = server_resume.finish().await;
-            assert_eq!(requests.len(), 1, "resume {label}");
-            assert_eq!(
-                requests[0].header("range"),
-                Some(format!("bytes={}-", existing_prefix.len()).as_str()),
-                "resume {label}"
-            );
+            assert_eq!(requests.len(), expected_requests, "resume {label}");
+            for request in &requests {
+                assert_eq!(
+                    request.header("range"),
+                    Some(format!("bytes={}-", existing_prefix.len()).as_str()),
+                    "resume {label}"
+                );
+            }
             assert!(matches!(err, IaGetError::Network(_)), "resume {label}");
             assert_eq!(
                 fs::read(&part_path_resume).unwrap(),
@@ -2021,14 +2689,14 @@ mod tests {
         let file_path = dir.file_path("corrupt.bin");
         let part_path = part_file_path(&file_path);
         let client = Client::new();
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = ShutdownSignal::new();
 
         let err = download_single_file(
             &client,
             &server.url("/corrupt.bin"),
             &file_path,
             Some(wrong_md5),
-            &running,
+            &signal,
             None,
         )
         .await
@@ -2060,7 +2728,7 @@ mod tests {
         let huge_content_length = u64::MAX - 2;
         assert!(prefix.len() as u64 > u64::MAX - huge_content_length);
 
-        let running = Arc::new(AtomicBool::new(true));
+        let signal = ShutdownSignal::new();
         let server = MockServer::start(vec![MockResponse::MidStreamInterrupt {
             status_line: "206 Partial Content",
             headers: vec![
@@ -2074,7 +2742,7 @@ mod tests {
             second_chunk: None,
             watch_path: part_path.clone(),
             expected_part_len: (prefix.len() + chunk.len()) as u64,
-            running: Arc::clone(&running),
+            signal: signal.clone(),
         }])
         .await;
 
@@ -2084,7 +2752,7 @@ mod tests {
             &server.url("/huge-cl.bin"),
             &file_path,
             None,
-            &running,
+            &signal,
             None,
         )
         .await;
@@ -2101,5 +2769,1044 @@ mod tests {
         );
         assert!(!Path::new(&file_path).exists());
         assert_eq!(fs::read(&part_path).unwrap(), b"helloworld");
+    }
+
+    fn utc_time(year: i64, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> SystemTime {
+        let secs = days_from_civil(year, month, day) * 86_400
+            + i64::from(hour) * 3600
+            + i64::from(minute) * 60
+            + i64::from(second);
+        if secs >= 0 {
+            UNIX_EPOCH + Duration::from_secs(secs as u64)
+        } else {
+            UNIX_EPOCH - Duration::from_secs(secs.unsigned_abs())
+        }
+    }
+
+    #[test]
+    fn test_parse_retry_after_delta_seconds() {
+        let now = utc_time(2026, 5, 1, 12, 0, 0);
+        let cap = Duration::from_secs(60);
+
+        assert_eq!(parse_retry_after("0", now, cap), Some(Duration::ZERO));
+        assert_eq!(parse_retry_after("00", now, cap), Some(Duration::ZERO));
+        assert_eq!(
+            parse_retry_after("5", now, cap),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            parse_retry_after("  42  ", now, cap),
+            Some(Duration::from_secs(42))
+        );
+        assert_eq!(parse_retry_after("60", now, cap), Some(cap));
+        assert_eq!(parse_retry_after("120", now, cap), Some(cap));
+        assert_eq!(
+            parse_retry_after("999999999999999999999999999999999999", now, cap),
+            Some(cap)
+        );
+        assert_eq!(
+            parse_retry_after("10", now, Duration::ZERO),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn test_parse_retry_after_invalid_inputs() {
+        let now = utc_time(2026, 5, 1, 12, 0, 0);
+        let cap = Duration::from_secs(60);
+
+        for invalid in [
+            "",
+            "   ",
+            "-5",
+            "+5",
+            "1.5",
+            "10s",
+            "abc",
+            "1 2",
+            "5\u{00a0}",
+            // Non-GMT timezones
+            "Sun, 06 Nov 1994 08:49:37 UTC",
+            "Sun, 06 Nov 1994 08:49:37 EST",
+            "Sun, 06 Nov 1994 08:49:37 +0000",
+            "Sunday, 06-Nov-94 08:49:37 UTC",
+            "Sun Nov  6 08:49:37 1994 GMT",
+            // Invalid weekday / month
+            "Sux, 06 Nov 1994 08:49:37 GMT",
+            "Funday, 06-Nov-94 08:49:37 GMT",
+            "Sun, 06 Foo 1994 08:49:37 GMT",
+            "Sun Foo  6 08:49:37 1994",
+            // Invalid leap-year and calendar dates
+            "Wed, 29 Feb 2023 00:00:00 GMT",
+            "Thu, 29 Feb 1900 00:00:00 GMT",
+            "Mon, 29 Feb 2100 00:00:00 GMT",
+            "Sun, 00 Nov 1994 08:49:37 GMT",
+            "Sun, 31 Apr 1994 08:49:37 GMT",
+            "Sun, 32 Jan 1994 08:49:37 GMT",
+            "Sun Nov  0 08:49:37 1994",
+            // Invalid times
+            "Sun, 06 Nov 1994 24:00:00 GMT",
+            "Sun, 06 Nov 1994 08:60:00 GMT",
+            "Sun, 06 Nov 1994 08:49:60 GMT",
+            // Missing punctuation / wrong spacing
+            "Sun 06 Nov 1994 08:49:37 GMT",
+            "Sun Nov 6 08:49:37 1994",
+        ] {
+            assert_eq!(
+                parse_retry_after(invalid, now, cap),
+                None,
+                "expected None for {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_retry_after_http_dates_and_leap_years() {
+        let cap = Duration::from_secs(60);
+
+        // IMF-fixdate: future, equal, past, far-future clamp
+        let base_1994 = utc_time(1994, 11, 6, 8, 49, 0);
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", base_1994, cap),
+            Some(Duration::from_secs(37))
+        );
+        assert_eq!(
+            parse_retry_after(
+                "Sun, 06 Nov 1994 08:49:37 GMT",
+                utc_time(1994, 11, 6, 8, 49, 37),
+                cap,
+            ),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            parse_retry_after(
+                "Sun, 06 Nov 1994 08:49:37 GMT",
+                utc_time(1994, 11, 6, 9, 0, 0),
+                cap,
+            ),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 09:49:37 GMT", base_1994, cap),
+            Some(cap)
+        );
+
+        // Subsecond precision on `now`
+        let base_subsec = base_1994 + Duration::from_millis(250);
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:49:05 GMT", base_subsec, cap),
+            Some(Duration::from_millis(4_750))
+        );
+
+        // Valid leap years (divisible by 400 and divisible by 4 not 100)
+        assert_eq!(
+            parse_retry_after(
+                "Tue, 29 Feb 2000 00:00:30 GMT",
+                utc_time(2000, 2, 29, 0, 0, 0),
+                cap,
+            ),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_retry_after(
+                "Thu, 29 Feb 2024 00:00:15 GMT",
+                utc_time(2024, 2, 29, 0, 0, 0),
+                cap,
+            ),
+            Some(Duration::from_secs(15))
+        );
+
+        // RFC 850: current century, past century pivot, and century wrap
+        assert_eq!(
+            parse_retry_after("Sunday, 06-Nov-94 08:49:37 GMT", base_1994, cap),
+            Some(Duration::from_secs(37))
+        );
+        assert_eq!(
+            parse_retry_after(
+                "Sunday, 06-Nov-94 08:49:37 GMT",
+                utc_time(2026, 1, 1, 0, 0, 0),
+                cap,
+            ),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            parse_retry_after(
+                "Saturday, 01-Jan-00 00:00:30 GMT",
+                utc_time(1999, 12, 31, 23, 59, 50),
+                cap,
+            ),
+            Some(Duration::from_secs(40))
+        );
+
+        // asctime(): single-digit padded day and two-digit day
+        assert_eq!(
+            parse_retry_after("Sun Nov  6 08:49:37 1994", base_1994, cap),
+            Some(Duration::from_secs(37))
+        );
+        assert_eq!(
+            parse_retry_after(
+                "Wed Nov 16 08:49:37 1994",
+                utc_time(1994, 11, 16, 8, 49, 17),
+                cap,
+            ),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(
+            parse_retry_after("Wed Nov 16 08:49:37 1994", base_1994, cap),
+            Some(cap)
+        );
+    }
+
+    #[test]
+    fn test_compute_backoff_delay_with_sample_bounds_and_saturation() {
+        let policy = RetryPolicy {
+            max_retries: 5,
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(10),
+            max_retry_after: Duration::from_secs(60),
+        };
+
+        // Attempt 1: base = 1s -> [500ms, 1000ms]
+        assert_eq!(
+            compute_backoff_delay_with_sample(1, &policy, 0),
+            Duration::from_millis(500)
+        );
+        let mid = compute_backoff_delay_with_sample(1, &policy, u64::MAX / 2);
+        assert!(
+            mid >= Duration::from_millis(749) && mid <= Duration::from_millis(751),
+            "expected ~750ms midpoint, got {:?}",
+            mid
+        );
+        assert_eq!(
+            compute_backoff_delay_with_sample(1, &policy, u64::MAX),
+            Duration::from_secs(1)
+        );
+
+        // Doubling across attempts 2, 3, 4 (bases 2s, 4s, 8s) and cap at 10s on attempt 5
+        assert_eq!(
+            compute_backoff_delay_with_sample(2, &policy, 0),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            compute_backoff_delay_with_sample(2, &policy, u64::MAX),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            compute_backoff_delay_with_sample(3, &policy, 0),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            compute_backoff_delay_with_sample(3, &policy, u64::MAX),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            compute_backoff_delay_with_sample(4, &policy, 0),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            compute_backoff_delay_with_sample(4, &policy, u64::MAX),
+            Duration::from_secs(8)
+        );
+        assert_eq!(
+            compute_backoff_delay_with_sample(5, &policy, 0),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            compute_backoff_delay_with_sample(5, &policy, u64::MAX),
+            Duration::from_secs(10)
+        );
+
+        // Large attempts must saturate cleanly without overflow
+        for attempt in [64, 128, 1000, u32::MAX] {
+            assert_eq!(
+                compute_backoff_delay_with_sample(attempt, &policy, 0),
+                Duration::from_secs(5)
+            );
+            assert_eq!(
+                compute_backoff_delay_with_sample(attempt, &policy, u64::MAX),
+                Duration::from_secs(10)
+            );
+        }
+
+        // Attempt 0 saturates exponent to 0
+        assert_eq!(
+            compute_backoff_delay_with_sample(0, &policy, 0),
+            Duration::from_millis(500)
+        );
+
+        // Zero delays
+        let zero_policy = RetryPolicy {
+            initial_delay: Duration::ZERO,
+            ..policy
+        };
+        assert_eq!(
+            compute_backoff_delay_with_sample(1, &zero_policy, u64::MAX),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn test_compute_retry_delay_prefers_valid_retry_after_and_falls_back() {
+        let now = utc_time(2026, 5, 1, 12, 0, 0);
+        let policy = RetryPolicy {
+            max_retries: 3,
+            initial_delay: Duration::from_secs(2),
+            max_delay: Duration::from_secs(16),
+            max_retry_after: Duration::from_secs(30),
+        };
+
+        assert_eq!(
+            compute_retry_delay(1, Some("12"), now, &policy),
+            Duration::from_secs(12)
+        );
+        assert_eq!(
+            compute_retry_delay(1, Some("120"), now, &policy),
+            Duration::from_secs(30)
+        );
+
+        let fallback_none = compute_retry_delay(1, None, now, &policy);
+        assert!(
+            fallback_none >= Duration::from_secs(1) && fallback_none <= Duration::from_secs(2),
+            "expected fallback in [1s, 2s], got {:?}",
+            fallback_none
+        );
+
+        let fallback_invalid = compute_retry_delay(2, Some("not-a-date"), now, &policy);
+        assert!(
+            fallback_invalid >= Duration::from_secs(2)
+                && fallback_invalid <= Duration::from_secs(4),
+            "expected fallback in [2s, 4s], got {:?}",
+            fallback_invalid
+        );
+    }
+
+    #[test]
+    fn test_is_retryable_status_classification() {
+        for retryable in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert!(
+                is_retryable_status(retryable),
+                "expected {retryable} to be retryable"
+            );
+        }
+
+        for non_retryable in [
+            StatusCode::OK,
+            StatusCode::PARTIAL_CONTENT,
+            StatusCode::FOUND,
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::GONE,
+            StatusCode::RANGE_NOT_SATISFIABLE,
+        ] {
+            assert!(
+                !is_retryable_status(non_retryable),
+                "expected {non_retryable} not to be retryable"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_is_retryable_reqwest_error_classification() {
+        let client = Client::new();
+
+        // Builder error (invalid URL) is permanent and must not be retried
+        let builder_err = client.get("://not-a-url").send().await.unwrap_err();
+        assert!(builder_err.is_builder());
+        assert!(!is_retryable_reqwest_error(&builder_err));
+
+        // Connection refused is a transient transport error and must be retried
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_addr = listener.local_addr().unwrap();
+        drop(listener);
+        let connect_err = client
+            .get(format!("http://{}/", closed_addr))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(is_retryable_reqwest_error(&connect_err));
+    }
+
+    #[tokio::test]
+    async fn test_sleep_interruptible_already_triggered_returns_immediately() {
+        let signal = ShutdownSignal::new();
+        signal.trigger();
+        assert!(!signal.is_running());
+
+        let start = std::time::Instant::now();
+        let err = sleep_interruptible(Duration::from_secs(60), &signal)
+            .await
+            .unwrap_err();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "already-triggered signal should return immediately"
+        );
+        assert!(matches!(err, IaGetError::FileSystem(_)));
+        assert!(err.to_string().contains("Download interrupted by user"));
+    }
+
+    #[tokio::test]
+    async fn test_sleep_interruptible_cancels_long_wait_immediately() {
+        let signal = ShutdownSignal::new();
+        let trigger_signal = signal.clone();
+
+        let trigger_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            trigger_signal.trigger();
+        });
+
+        let start = std::time::Instant::now();
+        let err = sleep_interruptible(Duration::from_secs(60), &signal)
+            .await
+            .unwrap_err();
+        trigger_task.await.unwrap();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "sleep_interruptible should wake promptly on trigger, took {:?}",
+            start.elapsed()
+        );
+        assert!(err.to_string().contains("Download interrupted by user"));
+    }
+
+    #[tokio::test]
+    async fn test_sleep_interruptible_completes_when_running() {
+        let signal = ShutdownSignal::new();
+        assert!(signal.is_running());
+        assert!(signal.running_flag().load(Ordering::SeqCst));
+
+        sleep_interruptible(Duration::ZERO, &signal).await.unwrap();
+        sleep_interruptible(Duration::from_millis(10), &signal)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send_and_fetch_text_with_retry_behavior() {
+        let client = Client::new();
+        let policy = RetryPolicy {
+            max_retries: 3,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(20),
+            max_retry_after: Duration::from_secs(5),
+        };
+
+        // Transient 503 + 429 (with Retry-After: 0) then 200 succeeds
+        let server = MockServer::start(vec![
+            MockResponse::with_headers("503 Service Unavailable", vec![], b"busy"),
+            MockResponse::with_headers(
+                "429 Too Many Requests",
+                vec![("Retry-After", "0".to_string())],
+                b"slow down",
+            ),
+            MockResponse::ok(b"<files/>"),
+        ])
+        .await;
+
+        let signal = ShutdownSignal::new();
+        let mut events = Vec::new();
+        let body = fetch_text_with_retry(
+            &policy,
+            &signal,
+            || client.get(server.url("/meta.xml")),
+            |event| {
+                events.push((
+                    event.attempt,
+                    event.max_retries,
+                    event.delay,
+                    event.reason.to_string(),
+                ));
+            },
+        )
+        .await
+        .unwrap();
+
+        let requests = server.finish().await;
+        assert_eq!(body, "<files/>");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, 1);
+        assert_eq!(events[0].1, 3);
+        assert!(events[0].3.contains("503"));
+        assert_eq!(events[1].0, 2);
+        assert_eq!(events[1].2, Duration::ZERO);
+        assert!(events[1].3.contains("429"));
+
+        // Permanent 404 fails immediately without retrying
+        let server_404 = MockServer::start(vec![MockResponse::with_headers(
+            "404 Not Found",
+            vec![],
+            b"missing",
+        )])
+        .await;
+        let mut retry_calls = 0;
+        let err = send_with_retry(
+            &policy,
+            &signal,
+            || client.get(server_404.url("/missing")),
+            |_| retry_calls += 1,
+        )
+        .await
+        .unwrap_err();
+        let requests_404 = server_404.finish().await;
+        assert_eq!(requests_404.len(), 1);
+        assert_eq!(retry_calls, 0);
+        assert!(matches!(err, IaGetError::Network(_)));
+
+        // Exhausting max_retries on persistent 503 returns error
+        let small_policy = RetryPolicy {
+            max_retries: 2,
+            ..policy
+        };
+        let server_503 = MockServer::start(vec![
+            MockResponse::with_headers("503 Service Unavailable", vec![], b"1"),
+            MockResponse::with_headers("503 Service Unavailable", vec![], b"2"),
+            MockResponse::with_headers("503 Service Unavailable", vec![], b"3"),
+        ])
+        .await;
+        let mut attempts = Vec::new();
+        let err = send_with_retry(
+            &small_policy,
+            &signal,
+            || client.get(server_503.url("/down")),
+            |event| attempts.push(event.attempt),
+        )
+        .await
+        .unwrap_err();
+        let requests_503 = server_503.finish().await;
+        assert_eq!(requests_503.len(), 3);
+        assert_eq!(attempts, vec![1, 2]);
+        assert!(matches!(err, IaGetError::Network(_)));
+
+        // Triggering ShutdownSignal during retry sleep aborts immediately
+        let server_cancel = MockServer::start(vec![MockResponse::with_headers(
+            "429 Too Many Requests",
+            vec![("Retry-After", "60".to_string())],
+            b"rate limited",
+        )])
+        .await;
+        let cancel_signal = ShutdownSignal::new();
+        let trigger_signal = cancel_signal.clone();
+        let start = std::time::Instant::now();
+        let err = send_with_retry(
+            &RetryPolicy {
+                max_retries: 2,
+                max_retry_after: Duration::from_secs(60),
+                ..policy
+            },
+            &cancel_signal,
+            || client.get(server_cancel.url("/rate-limited")),
+            |_| trigger_signal.trigger(),
+        )
+        .await
+        .unwrap_err();
+        let requests_cancel = server_cancel.finish().await;
+        assert_eq!(requests_cancel.len(), 1);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(err.to_string().contains("Download interrupted by user"));
+    }
+
+    fn format_imf_fixdate(unix_secs: i64) -> String {
+        const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+
+        let days = unix_secs.div_euclid(86_400);
+        let sec_of_day = unix_secs.rem_euclid(86_400);
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = mp + if mp < 10 { 3 } else { -9 };
+        let year = y + i64::from(month <= 2);
+
+        let weekday = WEEKDAYS[(days + 4).rem_euclid(7) as usize];
+        let month_name = MONTHS[(month - 1) as usize];
+        let hour = sec_of_day / 3600;
+        let minute = (sec_of_day % 3600) / 60;
+        let second = sec_of_day % 60;
+
+        format!("{weekday}, {day:02} {month_name} {year:04} {hour:02}:{minute:02}:{second:02} GMT")
+    }
+
+    fn future_imf_fixdate_header() -> String {
+        let since_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after UNIX_EPOCH");
+        let offset_secs = if since_epoch.subsec_millis() >= 800 {
+            2
+        } else {
+            1
+        };
+        format_imf_fixdate(since_epoch.as_secs() as i64 + offset_secs)
+    }
+
+    #[tokio::test]
+    async fn test_download_429_retry_after_zero_retries_immediately_and_promotes() {
+        let payload = b"retry-after zero payload bytes";
+        let expected_md5 = md5_hex(payload);
+        let server = MockServer::start(vec![
+            MockResponse::with_headers(
+                "429 Too Many Requests",
+                vec![
+                    ("Retry-After", "0".to_string()),
+                    ("Content-Length", "9".to_string()),
+                ],
+                b"slow down",
+            ),
+            MockResponse::ok(payload),
+        ])
+        .await;
+
+        let dir = TempTestDir::new("429-retry-after-0");
+        let file_path = dir.file_path("item.bin");
+        let part_path = part_file_path(&file_path);
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+        let policy = RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_secs(10),
+            max_delay: Duration::from_secs(10),
+            max_retry_after: Duration::from_secs(5),
+        };
+
+        let start = std::time::Instant::now();
+        download_single_file_with_policy(
+            &client,
+            &server.url("/item.bin"),
+            &file_path,
+            Some(&expected_md5),
+            &signal,
+            None,
+            &policy,
+        )
+        .await
+        .expect("429 with Retry-After: 0 should retry and promote");
+        let elapsed = start.elapsed();
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "Retry-After: 0 should retry promptly instead of falling back to 10s backoff, took {:?}",
+            elapsed
+        );
+        assert_eq!(fs::read(&file_path).unwrap(), payload);
+        assert!(!part_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_download_429_retry_after_delta_seconds_honours_delay_and_promotes() {
+        let payload = b"retry-after delta-seconds payload";
+        let expected_md5 = md5_hex(payload);
+        let server = MockServer::start(vec![
+            MockResponse::with_headers(
+                "429 Too Many Requests",
+                vec![
+                    ("Retry-After", "1".to_string()),
+                    ("Content-Length", "9".to_string()),
+                ],
+                b"slow down",
+            ),
+            MockResponse::ok(payload),
+        ])
+        .await;
+
+        let dir = TempTestDir::new("429-retry-after-1");
+        let file_path = dir.file_path("item.bin");
+        let part_path = part_file_path(&file_path);
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+        let policy = RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(5),
+            max_retry_after: Duration::from_secs(5),
+        };
+
+        let start = std::time::Instant::now();
+        download_single_file_with_policy(
+            &client,
+            &server.url("/item.bin"),
+            &file_path,
+            Some(&expected_md5),
+            &signal,
+            None,
+            &policy,
+        )
+        .await
+        .expect("429 with Retry-After: 1 should wait, retry, and promote");
+        let elapsed = start.elapsed();
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert!(
+            elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(4),
+            "Retry-After: 1 should wait roughly 1s rather than 5ms backoff, took {:?}",
+            elapsed
+        );
+        assert_eq!(fs::read(&file_path).unwrap(), payload);
+        assert!(!part_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_download_503_retry_after_imf_fixdate_retries_and_promotes() {
+        let payload = b"retry-after imf-fixdate payload";
+        let expected_md5 = md5_hex(payload);
+        let retry_after_date = future_imf_fixdate_header();
+        let server = MockServer::start(vec![
+            MockResponse::with_headers(
+                "503 Service Unavailable",
+                vec![
+                    ("Retry-After", retry_after_date),
+                    ("Content-Length", "4".to_string()),
+                ],
+                b"busy",
+            ),
+            MockResponse::ok(payload),
+        ])
+        .await;
+
+        let dir = TempTestDir::new("503-retry-after-date");
+        let file_path = dir.file_path("item.bin");
+        let part_path = part_file_path(&file_path);
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+        let policy = RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_secs(10),
+            max_delay: Duration::from_secs(10),
+            max_retry_after: Duration::from_secs(5),
+        };
+
+        let start = std::time::Instant::now();
+        download_single_file_with_policy(
+            &client,
+            &server.url("/item.bin"),
+            &file_path,
+            Some(&expected_md5),
+            &signal,
+            None,
+            &policy,
+        )
+        .await
+        .expect("503 with future IMF-fixdate Retry-After should retry and promote");
+        let elapsed = start.elapsed();
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert!(
+            elapsed >= Duration::from_millis(100) && elapsed < Duration::from_secs(3),
+            "IMF-fixdate Retry-After should wait for future timestamp without falling back to 10s backoff, took {:?}",
+            elapsed
+        );
+        assert_eq!(fs::read(&file_path).unwrap(), payload);
+        assert!(!part_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_download_429_excessive_retry_after_clamps_to_max_retry_after() {
+        let payload = b"clamped retry-after payload";
+        let expected_md5 = md5_hex(payload);
+        let server = MockServer::start(vec![
+            MockResponse::with_headers(
+                "429 Too Many Requests",
+                vec![
+                    ("Retry-After", "999999".to_string()),
+                    ("Content-Length", "12".to_string()),
+                ],
+                b"rate limited",
+            ),
+            MockResponse::ok(payload),
+        ])
+        .await;
+
+        let dir = TempTestDir::new("429-retry-after-clamp");
+        let file_path = dir.file_path("item.bin");
+        let part_path = part_file_path(&file_path);
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+        let policy = RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_secs(30),
+            max_delay: Duration::from_secs(30),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let start = std::time::Instant::now();
+        download_single_file_with_policy(
+            &client,
+            &server.url("/item.bin"),
+            &file_path,
+            Some(&expected_md5),
+            &signal,
+            None,
+            &policy,
+        )
+        .await
+        .expect("excessive Retry-After should clamp to max_retry_after and succeed");
+        let elapsed = start.elapsed();
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert!(
+            elapsed >= Duration::from_millis(40) && elapsed < Duration::from_secs(1),
+            "Retry-After: 999999 should clamp to ~50ms max_retry_after, took {:?}",
+            elapsed
+        );
+        assert_eq!(fs::read(&file_path).unwrap(), payload);
+        assert!(!part_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_download_408_and_502_retry_and_recover_on_200() {
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+        let fast_policy = RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        for (label, status_line) in [("408", "408 Request Timeout"), ("502", "502 Bad Gateway")] {
+            let payload = format!("recovered payload after {label}");
+            let expected_md5 = md5_hex(payload.as_bytes());
+            let server = MockServer::start(vec![
+                MockResponse::with_headers(
+                    status_line,
+                    vec![("Content-Length", "9".to_string())],
+                    b"transient",
+                ),
+                MockResponse::ok(payload.as_bytes()),
+            ])
+            .await;
+
+            let dir = TempTestDir::new(&format!("recover-{label}"));
+            let file_path = dir.file_path("item.bin");
+            let part_path = part_file_path(&file_path);
+
+            download_single_file_with_policy(
+                &client,
+                &server.url("/item.bin"),
+                &file_path,
+                Some(&expected_md5),
+                &signal,
+                None,
+                &fast_policy,
+            )
+            .await
+            .unwrap_or_else(|err| panic!("expected HTTP {label} to recover on 200, got: {err}"));
+
+            let requests = server.finish().await;
+            assert_eq!(requests.len(), 2, "case {label}");
+            assert_eq!(
+                fs::read(&file_path).unwrap(),
+                payload.as_bytes(),
+                "case {label}"
+            );
+            assert!(!part_path.exists(), "case {label}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_persistent_503_stops_after_one_plus_max_retries() {
+        let fast_policy = RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+        let expected_requests = 1 + fast_policy.max_retries as usize;
+
+        let mut responses: Vec<MockResponse> = (0..expected_requests)
+            .map(|_| {
+                MockResponse::with_headers(
+                    "503 Service Unavailable",
+                    vec![("Content-Length", "4".to_string())],
+                    b"busy",
+                )
+            })
+            .collect();
+        responses.push(MockResponse::ok(b"should never be reached"));
+
+        let server = MockServer::start(responses).await;
+        let dir = TempTestDir::new("persistent-503");
+        let file_path = dir.file_path("item.bin");
+        let part_path = part_file_path(&file_path);
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+
+        let err = download_single_file_with_policy(
+            &client,
+            &server.url("/item.bin"),
+            &file_path,
+            None,
+            &signal,
+            None,
+            &fast_policy,
+        )
+        .await
+        .unwrap_err();
+
+        let requests = server.abort_and_collect().await;
+        assert_eq!(requests.len(), expected_requests);
+        assert!(matches!(err, IaGetError::Network(_)));
+        assert!(err.to_string().contains("503"));
+        assert!(!part_path.exists());
+        assert!(!Path::new(&file_path).exists());
+    }
+
+    #[tokio::test]
+    async fn test_download_403_and_404_fail_fast_without_retrying() {
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+        let slow_policy = RetryPolicy {
+            max_retries: 3,
+            initial_delay: Duration::from_secs(10),
+            max_delay: Duration::from_secs(10),
+            max_retry_after: Duration::from_secs(10),
+        };
+
+        for (code, status_line) in [("403", "403 Forbidden"), ("404", "404 Not Found")] {
+            let server = MockServer::start(vec![
+                MockResponse::with_headers(
+                    status_line,
+                    vec![("Content-Length", "4".to_string())],
+                    b"nope",
+                ),
+                MockResponse::ok(b"should never be fetched on permanent 4xx"),
+            ])
+            .await;
+
+            let dir = TempTestDir::new(&format!("fast-fail-{code}"));
+            let file_path = dir.file_path("item.bin");
+            let part_path = part_file_path(&file_path);
+
+            let start = std::time::Instant::now();
+            let err = download_single_file_with_policy(
+                &client,
+                &server.url("/item.bin"),
+                &file_path,
+                None,
+                &signal,
+                None,
+                &slow_policy,
+            )
+            .await
+            .unwrap_err();
+            let elapsed = start.elapsed();
+
+            let requests = server.abort_and_collect().await;
+            assert_eq!(requests.len(), 1, "HTTP {code} must not retry");
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "HTTP {code} should fail immediately, took {:?}",
+                elapsed
+            );
+            assert!(matches!(err, IaGetError::Network(_)), "case {code}");
+            assert!(err.to_string().contains(code), "case {code}: {err}");
+            assert!(!part_path.exists(), "case {code}");
+            assert!(!Path::new(&file_path).exists(), "case {code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_ctrl_c_during_retry_wait_exits_promptly() {
+        let server = MockServer::start(vec![
+            MockResponse::with_headers(
+                "429 Too Many Requests",
+                vec![
+                    ("Retry-After", "30".to_string()),
+                    ("Content-Length", "12".to_string()),
+                ],
+                b"rate limited",
+            ),
+            MockResponse::ok(b"should never be downloaded"),
+        ])
+        .await;
+
+        let dir = TempTestDir::new("ctrl-c-retry-wait");
+        let file_path = dir.file_path("item.bin");
+        let part_path = part_file_path(&file_path);
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+        let policy = RetryPolicy {
+            max_retries: 3,
+            initial_delay: Duration::from_secs(10),
+            max_delay: Duration::from_secs(30),
+            max_retry_after: Duration::from_secs(60),
+        };
+
+        let requests_handle = server.requests_handle();
+        let trigger_signal = signal.clone();
+        let trigger_task = tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while tokio::time::Instant::now() < deadline {
+                if !requests_handle.lock().await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            trigger_signal.trigger();
+        });
+
+        let start = std::time::Instant::now();
+        let err = download_single_file_with_policy(
+            &client,
+            &server.url("/item.bin"),
+            &file_path,
+            None,
+            &signal,
+            None,
+            &policy,
+        )
+        .await
+        .unwrap_err();
+        let elapsed = start.elapsed();
+        trigger_task.await.unwrap();
+
+        let requests = server.abort_and_collect().await;
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "Ctrl+C during 30s Retry-After wait should exit promptly, took {:?}",
+            elapsed
+        );
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(err, IaGetError::FileSystem(_)));
+        assert!(
+            err.to_string().contains("Download interrupted by user"),
+            "unexpected error: {err}"
+        );
+        assert!(!part_path.exists());
+        assert!(!Path::new(&file_path).exists());
+    }
+
+    #[test]
+    fn test_install_signal_handler_repeated_calls_share_atomic_bool() {
+        let first = install_signal_handler();
+        let second = install_signal_handler();
+        let third = install_signal_handler();
+
+        assert!(first.is_running());
+        assert!(second.is_running());
+        assert!(third.is_running());
+        assert!(Arc::ptr_eq(first.running_flag(), second.running_flag()));
+        assert!(Arc::ptr_eq(second.running_flag(), third.running_flag()));
+        assert!(Arc::ptr_eq(&first.notify, &second.notify));
     }
 }

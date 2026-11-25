@@ -47,6 +47,10 @@ When a `.part` file exists, `ia-get` sends a range request and validates HTTP `2
 If the server returns HTTP `200` or an invalid range response, `ia-get` restarts the download from byte 0.
 `ia-get` verifies the MD5 hash when archive.org provides one, and renames the `.part` file to the final path atomically only after verification succeeds.
 
+For both metadata fetches and file downloads, `ia-get` retries transient transport errors and HTTP `408`, `429`, and `5xx` responses up to 3 times.
+Retries use exponential backoff with jitter, or honour `Retry-After` headers (delta-seconds or HTTP-date) capped at 60 seconds.
+Other `4xx` errors fail immediately, and Ctrl+C interrupts retry waits promptly.
+
 Pass cookies for archive.org items that require a logged-in session.
 `--cookies`/`-b` accepts either a raw Cookie header string or a Netscape `cookies.txt` file exported from your browser.
 
@@ -74,7 +78,7 @@ So I co-authored `ia-get` to automate the download process.
 
 ### Features ✨
 
-- 🔽 Reliably download files from the Internet Archive
+- 🔽 Retries transient errors on metadata and file downloads with exponential backoff, jitter, `Retry-After` support, and prompt Ctrl+C interruption
 - 🌳 Preserves the original directory structure
 - 🔄 Stages downloads in `.part` files, resumes partial transfers, and validates HTTP range responses
 - 🔏 Verifies MD5 hashes and renames `.part` files atomically only after verification succeeds
