@@ -2166,6 +2166,24 @@ impl Drop for ProbeDirGuard {
     }
 }
 
+/// Guard that removes every temporary probe file created directly inside a directory when dropped.
+#[derive(Default)]
+struct ProbeFilesGuard(Vec<PathBuf>);
+
+impl ProbeFilesGuard {
+    fn push(&mut self, path: PathBuf) {
+        self.0.push(path);
+    }
+}
+
+impl Drop for ProbeFilesGuard {
+    fn drop(&mut self) {
+        for path in self.0.drain(..).rev() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 /// Resolved destination root state used for per-parent-directory filesystem lookup checks.
 #[derive(Debug, Clone)]
 struct ProbeRoot {
@@ -2185,6 +2203,10 @@ struct DirEquivalenceResult {
     groups: Vec<usize>,
     /// Reason suffix describing the lookup rule that detected a non-exact collision.
     reason_suffix: &'static str,
+    /// When `Some`, `groups` came from a partial read-only case-folding check that could not
+    /// verify every candidate name. If `check_level_groups` does not report a
+    /// [`IaGetError::PathCollision`], validation must fail closed with this error message.
+    unverified_error: Option<String>,
 }
 
 /// Abstraction over per-directory filesystem lookup rules so [`validate_download_paths_for_dir`]
@@ -2204,17 +2226,33 @@ trait DirectoryLookup {
     ) -> Option<PathBuf>;
 
     /// Partitions `names` (distinct component names at a single directory level) into equivalence
-    /// classes under `probe_dir`'s filesystem lookup rules.
+    /// classes under `probe_dir`'s filesystem lookup rules, failing closed when distinctness
+    /// cannot be verified.
     fn resolve_equivalences(
         &self,
         probe_dir: Option<&Path>,
         names: &[String],
         candidates: &[usize],
-    ) -> DirEquivalenceResult;
+    ) -> Result<DirEquivalenceResult>;
 }
 
 /// Production [`DirectoryLookup`] backed by the host OS filesystem.
-struct OsDirectoryLookup;
+struct OsDirectoryLookup {
+    allow_temp_subdir_probe: bool,
+}
+
+impl OsDirectoryLookup {
+    const PRODUCTION: Self = Self {
+        allow_temp_subdir_probe: true,
+    };
+
+    #[cfg(test)]
+    const fn without_temp_subdir_probe() -> Self {
+        Self {
+            allow_temp_subdir_probe: false,
+        }
+    }
+}
 
 /// Resolves `dir` into its existing probe directory and, when `dir` itself exists as a directory,
 /// its canonical on-disk path.
@@ -2343,31 +2381,88 @@ fn select_probe_candidates(names: &[String]) -> Vec<usize> {
         .collect()
 }
 
+/// Maximum bytes read from a prefixed probe file token (`"<pid>:<seq>:<idx>"`).
+const MAX_PROBE_TOKEN_BYTES: u64 = 128;
+
+/// Returns `true` when `name` is a single normal path component safe to probe on the host OS.
+fn is_probable_component_name(name: &str) -> bool {
+    let mut comps = Path::new(name).components();
+    if !matches!(
+        (comps.next(), comps.next()),
+        (Some(Component::Normal(_)), None)
+    ) {
+        return false;
+    }
+
+    #[cfg(windows)]
+    if is_windows_reserved_probe_name(name) {
+        return false;
+    }
+
+    true
+}
+
+/// Returns `true` when `name` is pure ASCII without trailing dots or spaces, so ASCII case
+/// sensitivity alone completely determines filename equivalence on standard filesystems.
+fn is_plain_ascii_probe_name(name: &str) -> bool {
+    name.is_ascii() && !name.ends_with(['.', ' '])
+}
+
+/// Builds a fail-closed filesystem error message when filename distinctness cannot be verified.
+fn unverified_probe_error(probe_dir: Option<&Path>) -> String {
+    match probe_dir {
+        Some(dir) => format!(
+            "Destination path collision check could not verify whether candidate paths are distinct in '{}'",
+            dir.display()
+        ),
+        None => "Destination path collision check could not verify whether candidate paths are distinct in the destination directory".to_string(),
+    }
+}
+
+/// Outcome of probing candidate names inside a private temporary subdirectory.
+#[derive(Debug, PartialEq, Eq)]
+enum TempDirProbeOutcome {
+    /// Successfully determined equivalence groups for all candidates.
+    Resolved(Vec<usize>),
+    /// Could not create the temporary subdirectory inside `probe_dir` (for example, directory
+    /// permissions allow file creation but deny `mkdir`, or the directory is read-only).
+    TempDirUnavailable,
+    /// Candidate names could not be probed even inside a temporary directory (for example,
+    /// overlong or host-invalid filenames).
+    Inconclusive,
+}
+
+/// Outcome of probing candidate names directly in `probe_dir` using uniquely prefixed files.
+#[derive(Debug, PartialEq, Eq)]
+enum PrefixedProbeOutcome {
+    /// Successfully determined equivalence groups for all candidates.
+    Resolved(Vec<usize>),
+    /// `probe_dir` denied file creation because it is unwritable or read-only.
+    DirUnwritable,
+    /// Candidate names could not be probed conclusively.
+    Inconclusive,
+}
+
 /// Probes actual filename equivalence inside a private temporary directory created in `probe_dir`.
-///
-/// Returns `None` if `probe_dir` cannot be probed (for example on a read-only directory or for
-/// host-invalid filenames) so the caller can fall back cleanly.
 fn probe_names_in_dir(
     probe_dir: &Path,
     names: &[String],
     candidates: &[usize],
-) -> Option<Vec<usize>> {
-    let temp_dir = create_temp_probe_dir(probe_dir).ok()?;
+) -> TempDirProbeOutcome {
+    if !candidates
+        .iter()
+        .all(|&idx| is_probable_component_name(&names[idx]))
+    {
+        return TempDirProbeOutcome::Inconclusive;
+    }
+
+    let Ok(temp_dir) = create_temp_probe_dir(probe_dir) else {
+        return TempDirProbeOutcome::TempDirUnavailable;
+    };
     let mut groups: Vec<usize> = (0..names.len()).collect();
 
     for &idx in candidates {
         let name = &names[idx];
-        let mut comps = Path::new(name).components();
-        match (comps.next(), comps.next()) {
-            (Some(Component::Normal(_)), None) => {}
-            _ => return None,
-        }
-
-        #[cfg(windows)]
-        if is_windows_reserved_probe_name(name) {
-            return None;
-        }
-
         let probe_path = temp_dir.0.join(name);
         let mut create_opts = fs::OpenOptions::new();
         create_opts.write(true).create_new(true);
@@ -2377,62 +2472,222 @@ fn probe_names_in_dir(
             Ok(mut file) => {
                 let write_res = file.write_all(idx.to_string().as_bytes());
                 drop(file);
-                write_res.ok()?;
+                if write_res.is_err() {
+                    return TempDirProbeOutcome::Inconclusive;
+                }
                 groups[idx] = idx;
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                 let mut read_opts = fs::OpenOptions::new();
                 read_opts.read(true);
                 configure_no_follow(&mut read_opts);
-                let mut file = read_opts.open(&probe_path).ok()?;
+                let Ok(mut file) = read_opts.open(&probe_path) else {
+                    return TempDirProbeOutcome::Inconclusive;
+                };
                 if !file.metadata().ok().map(|m| m.is_file()).unwrap_or(false) {
                     drop(file);
-                    return None;
+                    return TempDirProbeOutcome::Inconclusive;
                 }
                 let mut tag = String::new();
                 let read_res = file.read_to_string(&mut tag);
                 drop(file);
-                read_res.ok()?;
-                let earlier_idx = tag.trim().parse::<usize>().ok()?;
+                if read_res.is_err() {
+                    return TempDirProbeOutcome::Inconclusive;
+                }
+                let Ok(earlier_idx) = tag.trim().parse::<usize>() else {
+                    return TempDirProbeOutcome::Inconclusive;
+                };
                 if earlier_idx >= idx || earlier_idx >= names.len() {
-                    return None;
+                    return TempDirProbeOutcome::Inconclusive;
                 }
                 groups[idx] = groups[earlier_idx];
             }
-            Err(_) => return None,
+            Err(_) => return TempDirProbeOutcome::Inconclusive,
         }
     }
 
     drop(temp_dir);
-    Some(groups)
+    TempDirProbeOutcome::Resolved(groups)
 }
 
-/// Fallback filename equivalence check when a directory cannot be probed directly (for example on
-/// a read-only directory or for filenames rejected by the host OS).
-fn fallback_dir_equivalence(probe_dir: Option<&Path>, names: &[String]) -> DirEquivalenceResult {
-    let sensitivity = probe_dir
-        .map(detect_path_case_sensitivity)
-        .unwrap_or_else(default_platform_case_sensitivity);
+/// Probes actual filename equivalence directly inside `probe_dir` using uniquely prefixed
+/// temporary files (`.ia-get-fs-probe-<pid>-<seq>-<name>`) with RAII cleanup.
+fn probe_prefixed_names_in_dir(
+    probe_dir: &Path,
+    names: &[String],
+    candidates: &[usize],
+) -> PrefixedProbeOutcome {
+    probe_prefixed_names_in_dir_with_seq(probe_dir, names, candidates, || {
+        CASE_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    })
+}
 
-    if sensitivity == PathCaseSensitivity::CaseSensitive {
-        return DirEquivalenceResult {
-            groups: (0..names.len()).collect(),
-            reason_suffix: "",
-        };
+/// Internal implementation of [`probe_prefixed_names_in_dir`] accepting a sequence generator for
+/// deterministic collision-avoidance unit tests.
+fn probe_prefixed_names_in_dir_with_seq<F>(
+    probe_dir: &Path,
+    names: &[String],
+    candidates: &[usize],
+    mut next_seq: F,
+) -> PrefixedProbeOutcome
+where
+    F: FnMut() -> u64,
+{
+    if !candidates
+        .iter()
+        .all(|&idx| is_probable_component_name(&names[idx]))
+    {
+        return PrefixedProbeOutcome::Inconclusive;
     }
 
-    let mut seen: HashMap<String, usize> = HashMap::with_capacity(names.len());
-    let mut groups = Vec::with_capacity(names.len());
-    for (idx, name) in names.iter().enumerate() {
-        let folded = name.to_lowercase();
-        let group = *seen.entry(folded).or_insert(idx);
-        groups.push(group);
+    let pid = std::process::id();
+
+    for _ in 0..MAX_TEMP_CASE_PROBE_ATTEMPTS {
+        let seq = next_seq();
+        let prefix = format!(".ia-get-fs-probe-{pid}-{seq}-");
+        let token_prefix = format!("{pid}:{seq}:");
+        let mut created = ProbeFilesGuard::default();
+        let mut groups: Vec<usize> = (0..names.len()).collect();
+        let mut retry_with_new_seq = false;
+
+        for &idx in candidates {
+            let name = &names[idx];
+            let probe_path = probe_dir.join(format!("{prefix}{name}"));
+            let mut create_opts = fs::OpenOptions::new();
+            create_opts.write(true).create_new(true);
+            configure_no_follow(&mut create_opts);
+
+            match create_opts.open(&probe_path) {
+                Ok(mut file) => {
+                    created.push(probe_path);
+                    let write_res = file.write_all(format!("{token_prefix}{idx}").as_bytes());
+                    drop(file);
+                    if write_res.is_err() {
+                        return PrefixedProbeOutcome::Inconclusive;
+                    }
+                    groups[idx] = idx;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let mut read_opts = fs::OpenOptions::new();
+                    read_opts.read(true);
+                    configure_no_follow(&mut read_opts);
+                    let Ok(mut file) = read_opts.open(&probe_path) else {
+                        retry_with_new_seq = true;
+                        break;
+                    };
+                    if !file.metadata().ok().map(|m| m.is_file()).unwrap_or(false) {
+                        drop(file);
+                        retry_with_new_seq = true;
+                        break;
+                    }
+                    let mut bytes = Vec::new();
+                    let read_res = (&mut file)
+                        .take(MAX_PROBE_TOKEN_BYTES)
+                        .read_to_end(&mut bytes);
+                    drop(file);
+                    if read_res.is_err() || bytes.len() as u64 == MAX_PROBE_TOKEN_BYTES {
+                        retry_with_new_seq = true;
+                        break;
+                    }
+                    let Some(idx_str) = std::str::from_utf8(&bytes)
+                        .ok()
+                        .and_then(|tag| tag.trim().strip_prefix(&token_prefix))
+                    else {
+                        retry_with_new_seq = true;
+                        break;
+                    };
+                    let Ok(earlier_idx) = idx_str.parse::<usize>() else {
+                        return PrefixedProbeOutcome::Inconclusive;
+                    };
+                    if earlier_idx >= idx || earlier_idx >= names.len() {
+                        return PrefixedProbeOutcome::Inconclusive;
+                    }
+                    groups[idx] = groups[earlier_idx];
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::PermissionDenied
+                            | std::io::ErrorKind::ReadOnlyFilesystem
+                    ) =>
+                {
+                    return PrefixedProbeOutcome::DirUnwritable;
+                }
+                Err(_) => return PrefixedProbeOutcome::Inconclusive,
+            }
+        }
+
+        drop(created);
+        if !retry_with_new_seq {
+            return PrefixedProbeOutcome::Resolved(groups);
+        }
     }
 
-    DirEquivalenceResult {
-        groups,
-        reason_suffix: " on a case-insensitive filesystem",
+    PrefixedProbeOutcome::Inconclusive
+}
+
+/// Fail-closed fallback filename equivalence check when live probing cannot run.
+///
+/// Uses read-only existing-child probing only when it can definitively decide the candidates:
+/// - If read-only probing confirms `CaseInsensitive` and case-folding already detects a collision,
+///   returns those equivalence groups (while keeping `unverified_error` set whenever non-ASCII or
+///   unprobable names remain).
+/// - If `allow_read_only_distinct` is `true`, all candidate names are pure ASCII without trailing
+///   dots or spaces, and read-only probing confirms `CaseSensitive`, returns distinct groups.
+/// - Otherwise fails closed with [`IaGetError::FileSystem`].
+fn fallback_dir_equivalence(
+    probe_dir: Option<&Path>,
+    names: &[String],
+    candidates: &[usize],
+    allow_read_only_distinct: bool,
+) -> Result<DirEquivalenceResult> {
+    let all_plain_ascii = candidates
+        .iter()
+        .all(|&idx| is_plain_ascii_probe_name(&names[idx]));
+    let read_only_sensitivity = probe_dir.and_then(probe_existing_child_case_sensitivity);
+
+    match read_only_sensitivity {
+        Some(PathCaseSensitivity::CaseInsensitive) => {
+            let mut seen: HashMap<String, usize> = HashMap::with_capacity(candidates.len());
+            let mut groups: Vec<usize> = (0..names.len()).collect();
+            let mut has_equivalence = false;
+
+            for &idx in candidates {
+                let folded = names[idx].to_lowercase();
+                let group = *seen.entry(folded).or_insert(idx);
+                if group != idx {
+                    has_equivalence = true;
+                }
+                groups[idx] = group;
+            }
+
+            if allow_read_only_distinct && all_plain_ascii {
+                return Ok(DirEquivalenceResult {
+                    groups,
+                    reason_suffix: " on a case-insensitive filesystem",
+                    unverified_error: None,
+                });
+            }
+
+            if has_equivalence {
+                return Ok(DirEquivalenceResult {
+                    groups,
+                    reason_suffix: " on a case-insensitive filesystem",
+                    unverified_error: Some(unverified_probe_error(probe_dir)),
+                });
+            }
+        }
+        Some(PathCaseSensitivity::CaseSensitive) if allow_read_only_distinct && all_plain_ascii => {
+            return Ok(DirEquivalenceResult {
+                groups: (0..names.len()).collect(),
+                reason_suffix: "",
+                unverified_error: None,
+            });
+        }
+        _ => {}
     }
+
+    Err(IaGetError::FileSystem(unverified_probe_error(probe_dir)))
 }
 
 impl DirectoryLookup for OsDirectoryLookup {
@@ -2454,17 +2709,46 @@ impl DirectoryLookup for OsDirectoryLookup {
         probe_dir: Option<&Path>,
         names: &[String],
         candidates: &[usize],
-    ) -> DirEquivalenceResult {
+    ) -> Result<DirEquivalenceResult> {
+        let mut allow_read_only_distinct = false;
+
         if let Some(dir) = probe_dir {
-            if let Some(groups) = probe_names_in_dir(dir, names, candidates) {
-                return DirEquivalenceResult {
-                    groups,
-                    reason_suffix: " under the destination directory's filesystem lookup rules",
-                };
+            let try_prefixed = if self.allow_temp_subdir_probe {
+                match probe_names_in_dir(dir, names, candidates) {
+                    TempDirProbeOutcome::Resolved(groups) => {
+                        return Ok(DirEquivalenceResult {
+                            groups,
+                            reason_suffix:
+                                " under the destination directory's filesystem lookup rules",
+                            unverified_error: None,
+                        });
+                    }
+                    TempDirProbeOutcome::TempDirUnavailable => true,
+                    TempDirProbeOutcome::Inconclusive => false,
+                }
+            } else {
+                true
+            };
+
+            if try_prefixed {
+                match probe_prefixed_names_in_dir(dir, names, candidates) {
+                    PrefixedProbeOutcome::Resolved(groups) => {
+                        return Ok(DirEquivalenceResult {
+                            groups,
+                            reason_suffix:
+                                " under the destination directory's filesystem lookup rules",
+                            unverified_error: None,
+                        });
+                    }
+                    PrefixedProbeOutcome::DirUnwritable => {
+                        allow_read_only_distinct = true;
+                    }
+                    PrefixedProbeOutcome::Inconclusive => {}
+                }
             }
         }
 
-        fallback_dir_equivalence(probe_dir, names)
+        fallback_dir_equivalence(probe_dir, names, candidates, allow_read_only_distinct)
     }
 }
 
@@ -2824,7 +3108,8 @@ fn validate_download_paths_with_lookup(
 
         let candidates = select_probe_candidates(&names);
         if !candidates.is_empty() {
-            let eq = lookup.resolve_equivalences(level.probe_dir.as_deref(), &names, &candidates);
+            let eq =
+                lookup.resolve_equivalences(level.probe_dir.as_deref(), &names, &candidates)?;
             if eq
                 .groups
                 .iter()
@@ -2841,6 +3126,9 @@ fn validate_download_paths_with_lookup(
                     level.inherited_reason_suffix,
                 )?;
                 level_reason_suffix = eq.reason_suffix;
+            }
+            if let Some(err_msg) = eq.unverified_error {
+                return Err(IaGetError::FileSystem(err_msg));
             }
         }
 
@@ -2900,7 +3188,7 @@ where
     I: IntoIterator<Item = (&'a str, &'a str)>,
 {
     let entries: Vec<(&'a str, &'a str)> = entries.into_iter().collect();
-    validate_download_paths_with_lookup(dir, &entries, &OsDirectoryLookup)
+    validate_download_paths_with_lookup(dir, &entries, &OsDirectoryLookup::PRODUCTION)
 }
 
 /// Validates that no two planned entries collide on either a final destination path
@@ -11235,6 +11523,9 @@ mod tests {
         /// Both Unicode case-folding (including `ß` -> `ss`) and NFC/NFD normalisation-insensitive
         /// (for example default APFS or ext4 `+F`).
         CaseAndNormalizationInsensitive,
+        /// Simulates an inconclusive filesystem probe that cannot verify distinctness and must
+        /// fail closed.
+        InconclusiveProbe,
     }
 
     impl MockDirRule {
@@ -11247,7 +11538,7 @@ mod tests {
             };
 
             match self {
-                MockDirRule::Exact => name.to_string(),
+                MockDirRule::Exact | MockDirRule::InconclusiveProbe => name.to_string(),
                 MockDirRule::CaseInsensitiveAscii => name.to_ascii_lowercase(),
                 MockDirRule::NormalizationInsensitive => normalize_nfc(name),
                 MockDirRule::CaseAndNormalizationInsensitive => {
@@ -11336,10 +11627,13 @@ mod tests {
             probe_dir: Option<&Path>,
             names: &[String],
             candidates: &[usize],
-        ) -> DirEquivalenceResult {
+        ) -> Result<DirEquivalenceResult> {
             let dir = probe_dir.expect("mock lookup expects a resolved probe_dir");
             self.probed_dirs.borrow_mut().push(dir.to_path_buf());
             let rule = self.dirs.get(dir).copied().unwrap_or(MockDirRule::Exact);
+            if rule == MockDirRule::InconclusiveProbe {
+                return Err(IaGetError::FileSystem(unverified_probe_error(Some(dir))));
+            }
 
             let mut groups: Vec<usize> = (0..names.len()).collect();
             let mut seen: HashMap<String, usize> = HashMap::new();
@@ -11349,10 +11643,11 @@ mod tests {
                 groups[idx] = group;
             }
 
-            DirEquivalenceResult {
+            Ok(DirEquivalenceResult {
                 groups,
                 reason_suffix: " under the destination directory's filesystem lookup rules",
-            }
+                unverified_error: None,
+            })
         }
     }
 
@@ -11881,7 +12176,7 @@ mod tests {
         );
         assert_no_probe_dirs_remaining(&sandbox.path);
 
-        // 3. Overlong filenames trigger `create_new` error -> clean probe dir removal -> fallback.
+        // 3. Overlong filenames trigger `create_new` error -> clean probe dir removal -> fail closed.
         let long_lower = "a".repeat(300);
         let long_upper = "A".repeat(300);
         let long_res = validate_download_paths_for_dir(
@@ -11891,16 +12186,14 @@ mod tests {
                 (long_upper.as_str(), long_upper.as_str()),
             ],
         );
-        match host_case {
-            PathCaseSensitivity::CaseSensitive => assert!(long_res.is_ok()),
-            PathCaseSensitivity::CaseInsensitive => {
-                assert!(matches!(long_res, Err(IaGetError::PathCollision { .. })));
-            }
-        }
+        assert!(
+            matches!(long_res, Err(IaGetError::FileSystem(_))),
+            "overlong unprobable names in empty dir must fail closed, got {long_res:?}"
+        );
         assert_no_probe_dirs_remaining(&sandbox.path);
 
         // 4. Symlinks inside output_dir are never followed for probing, and read-only directories
-        // fall back cleanly on Unix.
+        // preserve the zero-I/O fast path while failing closed when candidates cannot be verified.
         #[cfg(unix)]
         {
             use std::os::unix::fs::{symlink, PermissionsExt};
@@ -11931,40 +12224,363 @@ mod tests {
             );
             assert_no_probe_dirs_remaining(&sandbox.path);
 
-            // Read-only directory (populated and empty) falls back cleanly.
+            // Populated read-only directory:
+            // - Non-colliding pure-ASCII entries succeed via zero-I/O fast path.
+            // - Plain-ASCII case-only pair resolves via read-only child probe.
+            // - Unicode NFC/NFD pair and trailing-dot ASCII pair fail closed.
             let ro_populated = TempTestDir::new("ro-probe-populated");
             fs::write(ro_populated.join("Sample.txt"), b"ro").unwrap();
             fs::set_permissions(&ro_populated.path, fs::Permissions::from_mode(0o555)).unwrap();
-            let ro_pop_res = validate_download_paths_for_dir(
+            let ro_pop_ascii_distinct = validate_download_paths_for_dir(
+                &ro_populated.path,
+                [("alpha.txt", "alpha.txt"), ("beta.txt", "beta.txt")],
+            );
+            let ro_pop_case_res = validate_download_paths_for_dir(
                 &ro_populated.path,
                 [("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
             );
+            let ro_pop_unicode_res = validate_download_paths_for_dir(
+                &ro_populated.path,
+                [
+                    ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                    ("Cafe\u{0301}.txt", "Cafe\u{0301}.txt"),
+                ],
+            );
+            let ro_pop_trailing_dot_res = validate_download_paths_for_dir(
+                &ro_populated.path,
+                [("foo.", "foo."), ("foo", "foo")],
+            );
             fs::set_permissions(&ro_populated.path, fs::Permissions::from_mode(0o755)).unwrap();
+
+            assert!(
+                ro_pop_ascii_distinct.is_ok(),
+                "non-colliding pure-ASCII entries must succeed with zero I/O in read-only dir: {ro_pop_ascii_distinct:?}"
+            );
             match host_case {
-                PathCaseSensitivity::CaseSensitive => assert!(ro_pop_res.is_ok()),
+                PathCaseSensitivity::CaseSensitive => assert!(
+                    ro_pop_case_res.is_ok(),
+                    "populated read-only CS dir should allow Foo.txt and foo.txt via child probe, got {ro_pop_case_res:?}"
+                ),
                 PathCaseSensitivity::CaseInsensitive => {
-                    assert!(matches!(ro_pop_res, Err(IaGetError::PathCollision { .. })));
+                    assert!(
+                        matches!(ro_pop_case_res, Err(IaGetError::PathCollision { .. })),
+                        "populated read-only CI dir should reject Foo.txt and foo.txt, got {ro_pop_case_res:?}"
+                    );
                 }
             }
+            assert!(
+                matches!(ro_pop_unicode_res, Err(IaGetError::FileSystem(_))),
+                "read-only populated dir with Unicode candidates must fail closed, got {ro_pop_unicode_res:?}"
+            );
+            assert!(
+                matches!(ro_pop_trailing_dot_res, Err(IaGetError::FileSystem(_))),
+                "read-only populated dir with trailing-dot ASCII candidates must fail closed, got {ro_pop_trailing_dot_res:?}"
+            );
             assert_no_probe_dirs_remaining(&ro_populated.path);
 
+            // Empty read-only directory:
+            // - Non-colliding pure-ASCII entries succeed via zero-I/O fast path.
+            // - ASCII case-only and Unicode candidates fail closed (no child probe possible).
             let ro_empty = TempTestDir::new("ro-probe-empty");
             fs::set_permissions(&ro_empty.path, fs::Permissions::from_mode(0o555)).unwrap();
-            let ro_empty_res = validate_download_paths_for_dir(
+            let ro_empty_ascii_distinct = validate_download_paths_for_dir(
+                &ro_empty.path,
+                [("alpha.txt", "alpha.txt"), ("beta.txt", "beta.txt")],
+            );
+            let ro_empty_case_res = validate_download_paths_for_dir(
                 &ro_empty.path,
                 [("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
             );
+            let ro_empty_unicode_res = validate_download_paths_for_dir(
+                &ro_empty.path,
+                [
+                    ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                    ("Cafe\u{0301}.txt", "Cafe\u{0301}.txt"),
+                ],
+            );
             fs::set_permissions(&ro_empty.path, fs::Permissions::from_mode(0o755)).unwrap();
-            match default_platform_case_sensitivity() {
-                PathCaseSensitivity::CaseSensitive => assert!(ro_empty_res.is_ok()),
-                PathCaseSensitivity::CaseInsensitive => {
-                    assert!(matches!(
-                        ro_empty_res,
-                        Err(IaGetError::PathCollision { .. })
-                    ));
-                }
-            }
+
+            assert!(
+                ro_empty_ascii_distinct.is_ok(),
+                "non-colliding pure-ASCII entries must succeed with zero I/O in empty read-only dir: {ro_empty_ascii_distinct:?}"
+            );
+            assert!(
+                matches!(ro_empty_case_res, Err(IaGetError::FileSystem(_))),
+                "empty read-only dir with ASCII case-only candidates must fail closed, got {ro_empty_case_res:?}"
+            );
+            assert!(
+                matches!(ro_empty_unicode_res, Err(IaGetError::FileSystem(_))),
+                "empty read-only dir with Unicode candidates must fail closed, got {ro_empty_unicode_res:?}"
+            );
             assert_no_probe_dirs_remaining(&ro_empty.path);
         }
+    }
+
+    #[test]
+    fn test_prefixed_file_probe_fallback_when_temp_subdir_unavailable() {
+        let sandbox = TempTestDir::new("prefixed-probe-fallback");
+        let host_case = measure_host_dir_case_sensitivity(&sandbox.path);
+        let host_nfc_nfd = measure_host_dir_nfc_nfd_equivalent(&sandbox.path);
+        let no_subdir_lookup = OsDirectoryLookup::without_temp_subdir_probe();
+
+        // 1. ASCII case-only pair matches host semantics when temp subdir creation is unavailable.
+        let case_res = validate_download_paths_with_lookup(
+            &sandbox.path,
+            &[("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
+            &no_subdir_lookup,
+        );
+        match host_case {
+            PathCaseSensitivity::CaseSensitive => assert!(
+                case_res.is_ok(),
+                "prefixed probe on CS host should allow Foo.txt and foo.txt, got {case_res:?}"
+            ),
+            PathCaseSensitivity::CaseInsensitive => assert!(
+                matches!(case_res, Err(IaGetError::PathCollision { .. })),
+                "prefixed probe on CI host should reject Foo.txt and foo.txt, got {case_res:?}"
+            ),
+        }
+        assert_no_probe_dirs_remaining(&sandbox.path);
+
+        // 2. Unicode NFC vs NFD final and `.part` pairs match host semantics via prefixed files.
+        let nfc_pairs = [
+            [
+                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                ("Cafe\u{0301}.txt", "Cafe\u{0301}.txt"),
+            ],
+            [
+                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                ("Cafe\u{0301}.txt.part", "Cafe\u{0301}.txt.part"),
+            ],
+        ];
+        for pair in nfc_pairs {
+            let result =
+                validate_download_paths_with_lookup(&sandbox.path, &pair, &no_subdir_lookup);
+            if host_nfc_nfd {
+                assert!(
+                    matches!(result, Err(IaGetError::PathCollision { .. })),
+                    "prefixed probe on normalisation-insensitive host should reject {pair:?}, got {result:?}"
+                );
+            } else {
+                assert!(
+                    result.is_ok(),
+                    "prefixed probe on normalisation-sensitive host should allow {pair:?}, got {result:?}"
+                );
+            }
+            assert_no_probe_dirs_remaining(&sandbox.path);
+        }
+
+        // 3. Direct prefixed probe verifies both collision detection and distinctness, leaving zero
+        // `.ia-get-fs-probe-*` entries behind.
+        let colliding_names = vec!["same.txt".to_string(), "same.txt".to_string()];
+        assert_eq!(
+            probe_prefixed_names_in_dir(&sandbox.path, &colliding_names, &[0, 1]),
+            PrefixedProbeOutcome::Resolved(vec![0, 0])
+        );
+        assert_no_probe_dirs_remaining(&sandbox.path);
+
+        let distinct_names = vec!["alpha.txt".to_string(), "beta.txt".to_string()];
+        assert_eq!(
+            probe_prefixed_names_in_dir(&sandbox.path, &distinct_names, &[0, 1]),
+            PrefixedProbeOutcome::Resolved(vec![0, 1])
+        );
+        assert_no_probe_dirs_remaining(&sandbox.path);
+
+        // 4. Pre-existing foreign file matching the first probe filename is never mistaken for a
+        // collision and is never removed; the probe retries cleanly with the next sequence number.
+        let pid = std::process::id();
+        let initial_seq: u64 = 900_000_000;
+        let foreign_path = sandbox.join(&format!(".ia-get-fs-probe-{pid}-{initial_seq}-beta.txt"));
+        fs::write(&foreign_path, b"pre-existing-foreign-file").unwrap();
+
+        let mut seq = initial_seq;
+        let foreign_res =
+            probe_prefixed_names_in_dir_with_seq(&sandbox.path, &distinct_names, &[0, 1], || {
+                let current = seq;
+                seq += 1;
+                current
+            });
+        assert_eq!(foreign_res, PrefixedProbeOutcome::Resolved(vec![0, 1]));
+        assert_eq!(
+            seq,
+            initial_seq + 2,
+            "probe should retry with next sequence after foreign collision"
+        );
+        assert_eq!(
+            fs::read(&foreign_path).unwrap(),
+            b"pre-existing-foreign-file",
+            "pre-existing foreign file must remain untouched"
+        );
+        fs::remove_file(&foreign_path).unwrap();
+        assert_no_probe_dirs_remaining(&sandbox.path);
+    }
+
+    #[test]
+    fn test_per_parent_lookup_inconclusive_probe_fails_closed() {
+        let lookup = MockDirectoryLookup::new([
+            ("/exact", MockDirRule::Exact),
+            ("/exact/unverifiable", MockDirRule::InconclusiveProbe),
+            ("/unverifiable", MockDirRule::InconclusiveProbe),
+        ]);
+
+        // Zero-I/O fast path still succeeds on an unverifiable directory for non-colliding ASCII.
+        assert!(validate_download_paths_with_lookup(
+            Path::new("/unverifiable"),
+            &[("alpha.txt", "alpha.txt"), ("beta.txt", "beta.txt")],
+            &lookup,
+        )
+        .is_ok());
+        assert!(lookup.probed().is_empty());
+
+        // Unicode and case-only candidates fail closed when the probe is inconclusive.
+        for entries in [
+            [
+                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                ("Cafe\u{0301}.txt", "Cafe\u{0301}.txt"),
+            ],
+            [("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
+        ] {
+            lookup.clear_probed();
+            let err =
+                validate_download_paths_with_lookup(Path::new("/unverifiable"), &entries, &lookup)
+                    .unwrap_err();
+            assert!(
+                matches!(err, IaGetError::FileSystem(ref msg) if msg.contains("could not verify")),
+                "inconclusive probe must fail closed with IaGetError::FileSystem, got {err:?}"
+            );
+            assert_eq!(lookup.probed(), vec![PathBuf::from("/unverifiable")]);
+        }
+
+        // Inconclusive subdirectory under an exact root fails closed for candidates in that subdir.
+        lookup.clear_probed();
+        let subdir_err = validate_download_paths_with_lookup(
+            Path::new("/exact"),
+            &[
+                (
+                    "unverifiable/Caf\u{00e9}.txt",
+                    "unverifiable/Caf\u{00e9}.txt",
+                ),
+                (
+                    "unverifiable/Cafe\u{0301}.txt",
+                    "unverifiable/Cafe\u{0301}.txt",
+                ),
+            ],
+            &lookup,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(subdir_err, IaGetError::FileSystem(ref msg) if msg.contains("/exact/unverifiable")),
+            "inconclusive child directory probe must fail closed, got {subdir_err:?}"
+        );
+        assert_eq!(lookup.probed(), vec![PathBuf::from("/exact/unverifiable")]);
+    }
+
+    #[test]
+    fn test_overlong_and_unprobable_names_fail_closed_even_in_populated_dir() {
+        let populated = TempTestDir::new("overlong-populated-failclosed");
+        fs::write(populated.join("Sample.txt"), b"existing").unwrap();
+        let host_case = measure_host_dir_case_sensitivity(&populated.path);
+
+        // Overlong ASCII names cannot be probed and must never silently pass even when read-only
+        // child probing can observe host case sensitivity.
+        let long_lower = "a".repeat(300);
+        let long_upper = "A".repeat(300);
+        let ascii_res = validate_download_paths_for_dir(
+            &populated.path,
+            [
+                (long_lower.as_str(), long_lower.as_str()),
+                (long_upper.as_str(), long_upper.as_str()),
+            ],
+        );
+        match host_case {
+            PathCaseSensitivity::CaseSensitive => assert!(
+                matches!(ascii_res, Err(IaGetError::FileSystem(_))),
+                "overlong ASCII pair on CS host must fail closed with FileSystem error, got {ascii_res:?}"
+            ),
+            PathCaseSensitivity::CaseInsensitive => assert!(
+                matches!(
+                    ascii_res,
+                    Err(IaGetError::PathCollision { .. } | IaGetError::FileSystem(_))
+                ),
+                "overlong ASCII pair on CI host must not silently pass, got {ascii_res:?}"
+            ),
+        }
+        assert_no_probe_dirs_remaining(&populated.path);
+
+        // Overlong Unicode names always fail closed with FileSystem error.
+        let long_nfc = format!("Caf\u{00e9}-{}", "a".repeat(300));
+        let long_nfd = format!("Cafe\u{0301}-{}", "a".repeat(300));
+        let unicode_res = validate_download_paths_for_dir(
+            &populated.path,
+            [
+                (long_nfc.as_str(), long_nfc.as_str()),
+                (long_nfd.as_str(), long_nfd.as_str()),
+            ],
+        );
+        assert!(
+            matches!(unicode_res, Err(IaGetError::FileSystem(_))),
+            "overlong Unicode pair must fail closed, got {unicode_res:?}"
+        );
+        assert_no_probe_dirs_remaining(&populated.path);
+
+        // Prefixed-file probe also fails closed for overlong names and leaves zero files behind.
+        let no_subdir_lookup = OsDirectoryLookup::without_temp_subdir_probe();
+        let prefixed_res = validate_download_paths_with_lookup(
+            &populated.path,
+            &[
+                (long_nfc.as_str(), long_nfc.as_str()),
+                (long_nfd.as_str(), long_nfd.as_str()),
+            ],
+            &no_subdir_lookup,
+        );
+        assert!(
+            matches!(prefixed_res, Err(IaGetError::FileSystem(_))),
+            "prefixed probe for overlong Unicode pair must fail closed, got {prefixed_res:?}"
+        );
+        assert_no_probe_dirs_remaining(&populated.path);
+    }
+
+    #[tokio::test]
+    async fn test_download_files_in_dir_fail_closed_probe_aborts_before_http_requests() {
+        let sandbox = TempTestDir::new("failclosed-aborts-transfers");
+        let server = MockServer::start(vec![
+            MockResponse::ok(b"must never be requested"),
+            MockResponse::ok(b"must never be requested"),
+        ])
+        .await;
+
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        // Overlong Unicode candidates cannot be verified by live probing and must abort before
+        // any HTTP transfer starts on every platform.
+        let long_nfc = format!("Caf\u{00e9}-{}", "a".repeat(300));
+        let long_nfd = format!("Cafe\u{0301}-{}", "a".repeat(300));
+        let files = vec![
+            (server.url("/nfc"), long_nfc, None),
+            (server.url("/nfd"), long_nfd, None),
+        ];
+
+        let err = download_files_in_dir(
+            &client,
+            &sandbox.path,
+            files,
+            2,
+            None,
+            &RetryPolicy::default(),
+            &signal,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, IaGetError::FileSystem(ref msg) if msg.contains("could not verify")),
+            "expected fail-closed FileSystem error, got {err:?}"
+        );
+
+        let requests = server.abort_and_collect().await;
+        assert!(
+            requests.is_empty(),
+            "fail-closed validation error must abort before any HTTP transfer requests: {requests:?}"
+        );
+        assert_no_probe_dirs_remaining(&sandbox.path);
     }
 }
