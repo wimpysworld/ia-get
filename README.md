@@ -133,6 +133,18 @@ ia-get --check -o ./downloads -f '*.pdf' https://archive.org/details/<identifier
 ia-get --check https://archive.org/download/<identifier>/<path>
 ```
 
+Limit download bandwidth with `--limit-rate <RATE>`.
+`<RATE>` accepts a positive whole number in bytes per second, or a case-insensitive binary (1024-based) suffix: `B`, `K`, `KB`, `M`, `MB`, `G`, or `GB`.
+`ia-get` rejects `0`, negative or signed values, decimals, whitespace, unknown suffixes, and overflowing values before any transfer starts.
+Downloads run unthrottled when you omit this option.
+Ctrl+C interrupts throttle waits promptly and leaves the `.part` file ready to resume.
+
+```shell
+ia-get --limit-rate 500K https://archive.org/details/<identifier>
+ia-get --limit-rate 2M https://archive.org/details/<identifier>
+ia-get --limit-rate 1024 https://archive.org/download/<identifier>/<path>
+```
+
 ## Options
 
 | Option | Description |
@@ -142,6 +154,7 @@ ia-get --check https://archive.org/download/<identifier>/<path>
 | `-l`, `--list` | List files and sizes from archive metadata XML and exit. |
 | `--check` | Verify local files against archive metadata without downloading or modifying files (conflicts with `--list`). |
 | `-f`, `--filter <GLOB>` | Filter files by glob pattern (repeatable, prefix with `!` to exclude). |
+| `--limit-rate <RATE>` | Limit download bandwidth (raw bytes per second or `B`, `K`/`KB`, `M`/`MB`, `G`/`GB` in 1024-byte units). |
 
 ## Why? 🤔💭
 
@@ -156,6 +169,7 @@ So I co-authored `ia-get` to automate the download process.
 - 🎯 Downloads full items from `/details/<identifier>` URLs or single files from `/download/<identifier>/<path>` URLs
 - 🔍 Filters downloads, `--list` output, and `--check` runs with repeatable `-f`/`--filter <GLOB>` patterns, including `!` exclusions
 - 🔽 Retries transient errors on metadata and file downloads with exponential backoff, jitter, `Retry-After` support, and prompt Ctrl+C interruption
+- 🚦 Limits download bandwidth with `--limit-rate <RATE>` (bytes per second or 1024-based `B`, `K`/`KB`, `M`/`MB`, `G`/`GB` suffixes) with prompt Ctrl+C interruption
 - 🌳 Preserves the original directory structure
 - 📁 Saves downloads to a chosen directory with `-o`/`--output-dir <DIR>` and creates missing directories automatically
 - 💾 Checks free disk space on the destination volume before downloads start, deducts verified files and resumable `.part` files, and ignores unknown sizes

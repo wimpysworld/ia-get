@@ -408,13 +408,14 @@ fn print_sanitization_warnings(sanitized: &[(String, String)]) {
     );
 }
 
-/// Runs the pre-download disk-space check and, when it succeeds, downloads all planned files.
-async fn run_planned_downloads_with_space_check<F>(
+/// Runs the pre-download disk-space check and, when it succeeds, downloads all planned files
+/// using explicit [`downloader::DownloadOptions`].
+async fn run_planned_downloads_with_options<F>(
     client: &Client,
     output_dir: &Path,
     plan: DownloadPlan,
     cookie_source: Option<&CookieSource>,
-    policy: &downloader::RetryPolicy,
+    options: &downloader::DownloadOptions,
     signal: &downloader::ShutdownSignal,
     check_space: F,
 ) -> Result<downloader::BatchSummary>
@@ -431,14 +432,44 @@ where
         .into_iter()
         .map(|item| (item.url, item.file_path, item.expected_md5));
 
-    downloader::download_files_in_dir(
+    downloader::download_files_in_dir_with_options(
         client,
         output_dir,
         download_data,
         total_files,
         cookie_source,
-        policy,
+        options,
         signal,
+    )
+    .await
+}
+
+/// Runs the pre-download disk-space check and, when it succeeds, downloads all planned files.
+#[cfg(test)]
+async fn run_planned_downloads_with_space_check<F>(
+    client: &Client,
+    output_dir: &Path,
+    plan: DownloadPlan,
+    cookie_source: Option<&CookieSource>,
+    policy: &downloader::RetryPolicy,
+    signal: &downloader::ShutdownSignal,
+    check_space: F,
+) -> Result<downloader::BatchSummary>
+where
+    F: FnOnce(&Path, &[disk_space::PlannedDownload], &downloader::ShutdownSignal) -> Result<()>,
+{
+    let options = downloader::DownloadOptions {
+        retry_policy: *policy,
+        limit_rate: None,
+    };
+    run_planned_downloads_with_options(
+        client,
+        output_dir,
+        plan,
+        cookie_source,
+        &options,
+        signal,
+        check_space,
     )
     .await
 }
@@ -489,7 +520,8 @@ Examples:
   ia-get --check -o ./downloads https://archive.org/details/deftributetozzap64
   ia-get -f '*.pdf' https://archive.org/details/deftributetozzap64
   ia-get -f '!*.torrent' https://archive.org/details/deftributetozzap64
-  ia-get -b cookies.txt https://archive.org/details/deftributetozzap64")]
+  ia-get -b cookies.txt https://archive.org/details/deftributetozzap64
+  ia-get --limit-rate 500K https://archive.org/details/deftributetozzap64")]
 struct Cli {
     /// Archive.org item details URL (/details/<item>) or direct file URL (/download/<item>/<path>)
     url: String,
@@ -508,6 +540,13 @@ struct Cli {
     /// Filter files by glob pattern (repeatable; prefix with '!' to exclude)
     #[arg(short = 'f', long = "filter", value_name = "GLOB")]
     filters: Vec<String>,
+    /// Limit download bandwidth (e.g. 500K, 2M, 1G, or raw bytes/sec; 1024-byte units)
+    #[arg(
+        long = "limit-rate",
+        value_name = "RATE",
+        value_parser = downloader::parse_rate_limit
+    )]
+    limit_rate: Option<u64>,
 }
 
 /// Main application entry point
@@ -619,14 +658,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let plan = plan_downloads(files, &base_url);
     let total_files = plan.items.len();
-    let policy = downloader::RetryPolicy::default();
+    let options = downloader::DownloadOptions {
+        retry_policy: downloader::RetryPolicy::default(),
+        limit_rate: cli.limit_rate,
+    };
 
-    let summary = run_planned_downloads_with_space_check(
+    let summary = run_planned_downloads_with_options(
         &client,
         &output_dir,
         plan,
         cookie_source.as_ref(),
-        &policy,
+        &options,
         &shutdown,
         |dir, items, signal| {
             spinner.set_message(format!(
@@ -2479,6 +2521,7 @@ mod tests {
                 (Some('b'), Some("cookies")),
                 (Some('o'), Some("output-dir")),
                 (Some('f'), Some("filter")),
+                (None, Some("limit-rate")),
             ]
         );
 
@@ -2544,6 +2587,16 @@ mod tests {
         assert!(
             help.contains("-f, --filter"),
             "help should expose -f/--filter:\n{help}"
+        );
+        assert!(
+            help.contains("--limit-rate <RATE>"),
+            "help should expose --limit-rate <RATE>:\n{help}"
+        );
+        assert!(
+            help.contains(
+                "ia-get --limit-rate 500K https://archive.org/details/deftributetozzap64"
+            ),
+            "help should include --limit-rate example:\n{help}"
         );
     }
 
@@ -4466,5 +4519,250 @@ mod tests {
             assert_eq!(requests.len(), 2);
             assert_eq!(before, snapshot_check_dir(&output_dir.0));
         }
+    }
+
+    #[test]
+    fn cli_parses_limit_rate_variants_positions_and_flag_combinations() {
+        const KIB: u64 = 1024;
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let url = "https://archive.org/details/deftributetozzap64";
+
+        let omitted = Cli::try_parse_from(["ia-get", url]).unwrap();
+        assert_eq!(omitted.limit_rate, None);
+
+        let spaced_k = Cli::try_parse_from(["ia-get", "--limit-rate", "500K", url]).unwrap();
+        assert_eq!(spaced_k.limit_rate, Some(500 * KIB));
+
+        let equals_m = Cli::try_parse_from(["ia-get", "--limit-rate=2M", url]).unwrap();
+        assert_eq!(equals_m.limit_rate, Some(2 * MIB));
+
+        let gig = Cli::try_parse_from(["ia-get", "--limit-rate", "1G", url]).unwrap();
+        assert_eq!(gig.limit_rate, Some(GIB));
+
+        let raw = Cli::try_parse_from(["ia-get", "--limit-rate", "1024", url]).unwrap();
+        assert_eq!(raw.limit_rate, Some(1024));
+
+        let trailing = Cli::try_parse_from(["ia-get", url, "--limit-rate", "500K"]).unwrap();
+        assert_eq!(trailing.limit_rate, Some(500 * KIB));
+
+        let with_list_combo = Cli::try_parse_from([
+            "ia-get",
+            "--list",
+            "-o",
+            "./downloads",
+            "-f",
+            "*.pdf",
+            "-b",
+            "cookies.txt",
+            "--limit-rate",
+            "500K",
+            url,
+        ])
+        .unwrap();
+        assert!(with_list_combo.list);
+        assert_eq!(
+            with_list_combo.output_dir,
+            Some(PathBuf::from("./downloads"))
+        );
+        assert_eq!(with_list_combo.filters, vec!["*.pdf"]);
+        assert_eq!(with_list_combo.cookies.as_deref(), Some("cookies.txt"));
+        assert_eq!(with_list_combo.limit_rate, Some(500 * KIB));
+
+        let with_check_combo = Cli::try_parse_from([
+            "ia-get",
+            url,
+            "--check",
+            "-o",
+            "./downloads",
+            "-f",
+            "!*.torrent",
+            "-b",
+            "auth=1",
+            "--limit-rate=2M",
+        ])
+        .unwrap();
+        assert!(with_check_combo.check);
+        assert_eq!(
+            with_check_combo.output_dir,
+            Some(PathBuf::from("./downloads"))
+        );
+        assert_eq!(with_check_combo.filters, vec!["!*.torrent"]);
+        assert_eq!(with_check_combo.cookies.as_deref(), Some("auth=1"));
+        assert_eq!(with_check_combo.limit_rate, Some(2 * MIB));
+    }
+
+    #[test]
+    fn cli_rejects_invalid_limit_rate_values_with_clear_error() {
+        use clap::error::ErrorKind;
+
+        let url = "https://archive.org/details/deftributetozzap64";
+
+        let separate_cases = [
+            ("0", "greater than zero"),
+            ("0K", "greater than zero"),
+            ("abc", "positive integer"),
+            ("1.5M", "decimal"),
+            ("", "empty"),
+            ("18446744073709551616", "exceeds maximum"),
+            ("18446744073709551615K", "exceeds maximum"),
+        ];
+
+        for (bad_rate, expected_reason) in separate_cases {
+            let err = Cli::try_parse_from(["ia-get", "--limit-rate", bad_rate, url])
+                .err()
+                .unwrap_or_else(|| panic!("expected --limit-rate '{bad_rate}' to fail"));
+            assert_eq!(
+                err.kind(),
+                ErrorKind::ValueValidation,
+                "unexpected clap error kind for '{bad_rate}': {err}"
+            );
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains(&format!("Invalid rate limit '{bad_rate}':")),
+                "error output for '{bad_rate}' missing Invalid rate limit header:\n{rendered}"
+            );
+            assert!(
+                rendered.contains(expected_reason),
+                "error output for '{bad_rate}' missing '{expected_reason}':\n{rendered}"
+            );
+        }
+
+        let negative_err = Cli::try_parse_from(["ia-get", "--limit-rate=-500K", url])
+            .err()
+            .expect("expected --limit-rate=-500K to fail");
+        assert_eq!(negative_err.kind(), ErrorKind::ValueValidation);
+        let rendered = negative_err.to_string();
+        assert!(
+            rendered.contains("Invalid rate limit '-500K':"),
+            "error output for negative rate missing header:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("without a sign"),
+            "error output for negative rate missing reason:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn cli_help_documents_limit_rate_flag_units_and_example() {
+        use clap::CommandFactory;
+
+        Cli::command().debug_assert();
+
+        let help = Cli::command().render_help().to_string();
+        assert!(
+            help.contains("--limit-rate"),
+            "help should mention --limit-rate:\n{help}"
+        );
+        assert!(
+            help.contains("<RATE>"),
+            "help should mention <RATE> value name:\n{help}"
+        );
+        assert!(
+            help.contains("1024-byte"),
+            "help should note 1024-byte/binary units:\n{help}"
+        );
+        assert!(
+            help.contains("--limit-rate 500K"),
+            "help should include --limit-rate 500K example:\n{help}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_planned_downloads_with_options_wires_limit_rate_throttling_e2e() {
+        let payload: Vec<u8> = (0..(40 * 1024)).map(|i| ((i * 5) % 251) as u8).collect();
+        let expected_md5 = format!("{:x}", md5::compute(&payload));
+        let xml_body =
+            build_xml_metadata(&[("throttled.bin", payload.len(), expected_md5.clone())]);
+
+        let server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+            MockResponse::ok(&payload),
+        ])
+        .await;
+
+        let output_dir = TempTestDir::new("limit-rate-e2e");
+        let cli = Cli::try_parse_from([
+            "ia-get",
+            "--limit-rate",
+            "100K",
+            "https://archive.org/details/item",
+        ])
+        .unwrap();
+        assert_eq!(cli.limit_rate, Some(100 * 1024));
+
+        let target = parse_archive_url(&cli.url).unwrap();
+        let filter = FileFilter::compile(&cli.filters).unwrap();
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 0,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let xml_url = server.url("/download/item/item_files.xml");
+        let (all_files, base_url) =
+            fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                .await
+                .unwrap();
+
+        let selected = select_and_filter_files(all_files, &target, &filter).unwrap();
+        let plan = plan_downloads(selected, &base_url);
+        let options = downloader::DownloadOptions {
+            retry_policy: policy,
+            limit_rate: cli.limit_rate,
+        };
+
+        let started = Instant::now();
+        let summary = run_planned_downloads_with_options(
+            &client,
+            &output_dir.0,
+            plan,
+            None,
+            &options,
+            &signal,
+            |dir, items, sig| {
+                disk_space::check_disk_space_with_available_and_signal(
+                    dir,
+                    items,
+                    payload.len() as u64,
+                    sig,
+                )
+            },
+        )
+        .await
+        .expect("e2e rate-limited download should succeed");
+        let elapsed = started.elapsed();
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert!(!summary.interrupted);
+        assert!(batch_exit_result(&summary, 1).is_ok());
+        assert!(
+            elapsed >= Duration::from_millis(320),
+            "e2e 40 KiB download at 100 KiB/s (~400ms expected) completed too quickly: {elapsed:?}"
+        );
+
+        let saved = std::fs::read(output_dir.join("throttled.bin")).unwrap();
+        assert_eq!(saved, payload);
+        assert_eq!(format!("{:x}", md5::compute(&saved)), expected_md5);
+        assert!(!output_dir.join("throttled.bin.part").exists());
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0]
+            .request_line
+            .starts_with("HEAD /download/item/item_files.xml "));
+        assert!(requests[1]
+            .request_line
+            .starts_with("GET /download/item/item_files.xml "));
+        assert!(requests[2]
+            .request_line
+            .starts_with("GET /download/item/throttled.bin "));
     }
 }

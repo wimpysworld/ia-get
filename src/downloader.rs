@@ -10,7 +10,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use colored::*;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -48,6 +48,157 @@ impl Default for RetryPolicy {
             max_delay: Duration::from_secs(MAX_RETRY_DELAY_SECS),
             max_retry_after: Duration::from_secs(MAX_RETRY_AFTER_SECS),
         }
+    }
+}
+
+/// Idle stall threshold beyond which [`RateLimiter`] resets its pacing window
+/// so network stalls cannot accumulate multi-second unthrottled bursts.
+const RATE_LIMIT_STALL_RESET_WINDOW: Duration = Duration::from_millis(100);
+
+/// Configuration controlling download retries and optional bandwidth throttling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DownloadOptions {
+    pub retry_policy: RetryPolicy,
+    pub limit_rate: Option<u64>,
+}
+
+/// Parses a bandwidth limit string into bytes per second.
+///
+/// Accepts positive ASCII integers with an optional case-insensitive binary (1024-based)
+/// unit suffix: none or `B` (`1`), `K`/`KB` (`1024`), `M`/`MB` (`1024^2`), `G`/`GB` (`1024^3`).
+pub fn parse_rate_limit(input: &str) -> Result<u64> {
+    if input.is_empty() {
+        return Err(IaGetError::InvalidRateLimit {
+            input: input.to_string(),
+            reason: "rate must not be empty".to_string(),
+        });
+    }
+
+    if input.chars().any(char::is_whitespace) {
+        return Err(IaGetError::InvalidRateLimit {
+            input: input.to_string(),
+            reason: "rate must not contain whitespace".to_string(),
+        });
+    }
+
+    let digit_end = input.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digit_end == 0 {
+        let reason = if input.starts_with('+') || input.starts_with('-') {
+            "rate must be a positive integer without a sign"
+        } else if input.starts_with('.') {
+            "decimal values are not supported; use a whole number"
+        } else {
+            "expected a positive integer with an optional unit suffix (B, K, KB, M, MB, G, GB)"
+        };
+        return Err(IaGetError::InvalidRateLimit {
+            input: input.to_string(),
+            reason: reason.to_string(),
+        });
+    }
+
+    let (num_str, suffix) = input.split_at(digit_end);
+    let multiplier: u64 = if suffix.is_empty() || suffix.eq_ignore_ascii_case("B") {
+        1
+    } else if suffix.eq_ignore_ascii_case("K") || suffix.eq_ignore_ascii_case("KB") {
+        1024
+    } else if suffix.eq_ignore_ascii_case("M") || suffix.eq_ignore_ascii_case("MB") {
+        1024 * 1024
+    } else if suffix.eq_ignore_ascii_case("G") || suffix.eq_ignore_ascii_case("GB") {
+        1024 * 1024 * 1024
+    } else if suffix.starts_with('.') {
+        return Err(IaGetError::InvalidRateLimit {
+            input: input.to_string(),
+            reason: "decimal values are not supported; use a whole number".to_string(),
+        });
+    } else {
+        return Err(IaGetError::InvalidRateLimit {
+            input: input.to_string(),
+            reason: format!("unknown unit suffix '{suffix}'; expected B, K, KB, M, MB, G, or GB"),
+        });
+    };
+
+    let value = num_str
+        .parse::<u64>()
+        .map_err(|_| IaGetError::InvalidRateLimit {
+            input: input.to_string(),
+            reason: "rate exceeds maximum supported value".to_string(),
+        })?;
+
+    if value == 0 {
+        return Err(IaGetError::InvalidRateLimit {
+            input: input.to_string(),
+            reason: "rate must be greater than zero".to_string(),
+        });
+    }
+
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| IaGetError::InvalidRateLimit {
+            input: input.to_string(),
+            reason: "rate exceeds maximum supported value".to_string(),
+        })
+}
+
+/// Paces chunked transfers to an average byte-per-second ceiling.
+#[derive(Debug, Clone)]
+pub struct RateLimiter {
+    bytes_per_sec: u64,
+    started_at: Instant,
+    bytes_transferred: u64,
+}
+
+impl RateLimiter {
+    /// Creates a rate limiter targeting `bytes_per_sec`, starting at the current instant.
+    pub fn new(bytes_per_sec: u64) -> Self {
+        Self::with_start(bytes_per_sec, Instant::now())
+    }
+
+    /// Creates a rate limiter targeting `bytes_per_sec` with an explicit window start instant.
+    pub fn with_start(bytes_per_sec: u64, started_at: Instant) -> Self {
+        Self {
+            bytes_per_sec,
+            started_at,
+            bytes_transferred: 0,
+        }
+    }
+
+    fn expected_duration_for_bytes(bytes: u64, bytes_per_sec: u64) -> Duration {
+        let nanos = (u128::from(bytes) * 1_000_000_000) / u128::from(bytes_per_sec);
+        let secs = (nanos / 1_000_000_000) as u64;
+        let subsec_nanos = (nanos % 1_000_000_000) as u32;
+        Duration::new(secs, subsec_nanos)
+    }
+
+    /// Records `chunk_bytes` transferred at `now` and returns the delay required to stay
+    /// within the configured rate ceiling.
+    pub fn delay_for_chunk(&mut self, chunk_bytes: u64, now: Instant) -> Duration {
+        if chunk_bytes == 0 || self.bytes_per_sec == 0 {
+            return Duration::ZERO;
+        }
+
+        let mut elapsed = now.saturating_duration_since(self.started_at);
+        let prev_expected =
+            Self::expected_duration_for_bytes(self.bytes_transferred, self.bytes_per_sec);
+        if elapsed > prev_expected.saturating_add(RATE_LIMIT_STALL_RESET_WINDOW) {
+            self.started_at = now;
+            self.bytes_transferred = 0;
+            elapsed = Duration::ZERO;
+        }
+
+        self.bytes_transferred = self.bytes_transferred.saturating_add(chunk_bytes);
+        let expected =
+            Self::expected_duration_for_bytes(self.bytes_transferred, self.bytes_per_sec);
+        expected.saturating_sub(elapsed)
+    }
+
+    /// Sleeps as needed to honour the configured rate limit for `chunk_bytes`,
+    /// waking immediately if `signal` triggers.
+    pub async fn throttle(&mut self, chunk_bytes: u64, signal: &ShutdownSignal) -> Result<()> {
+        let delay = self.delay_for_chunk(chunk_bytes, Instant::now());
+        if delay > Duration::ZERO {
+            sleep_interruptible(delay, signal).await?;
+        }
+        Ok(())
     }
 }
 
@@ -1435,8 +1586,9 @@ async fn download_file_content(
     signal: &ShutdownSignal,
     cookie_source: Option<&CookieSource>,
     expected_md5: Option<&str>,
-    policy: &RetryPolicy,
+    options: &DownloadOptions,
 ) -> Result<(u64, bool)> {
+    let policy = &options.retry_policy;
     let initial_url = Url::parse(url)
         .map_err(|e| IaGetError::Network(format!("Invalid download URL '{}': {}", url, e)))?;
     let mut retry_count: u32 = 0;
@@ -1661,7 +1813,8 @@ async fn download_file_content(
         // Set initial progress to starting offset for resumed downloads
         pb.set_position(start_offset);
 
-        let start_time = std::time::Instant::now();
+        let start_time = Instant::now();
+        let mut rate_limiter = options.limit_rate.map(RateLimiter::new);
         let mut total_bytes: u64 = start_offset;
         let mut downloaded_bytes: u64 = 0;
 
@@ -1682,9 +1835,14 @@ async fn download_file_content(
 
                 let chunk = chunk_result?;
                 file.write_all(&chunk)?;
-                downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
-                total_bytes = total_bytes.saturating_add(chunk.len() as u64);
+                let chunk_len = chunk.len() as u64;
+                downloaded_bytes = downloaded_bytes.saturating_add(chunk_len);
+                total_bytes = total_bytes.saturating_add(chunk_len);
                 pb.set_position(total_bytes);
+
+                if let Some(limiter) = rate_limiter.as_mut() {
+                    limiter.throttle(chunk_len, signal).await?;
+                }
             }
             Ok(())
         }
@@ -1904,9 +2062,9 @@ fn print_batch_summary(summary: &BatchSummary) {
 }
 
 /// Download a single file inside `root` via `.part` staging, MD5 verification, and atomic promotion
-/// using an explicit `RetryPolicy`.
+/// using explicit `DownloadOptions`.
 #[allow(clippy::too_many_arguments)]
-async fn download_single_file_with_policy(
+async fn download_single_file_with_options(
     client: &Client,
     root: &Path,
     url: &str,
@@ -1914,7 +2072,7 @@ async fn download_single_file_with_policy(
     expected_md5: Option<&str>,
     signal: &ShutdownSignal,
     cookie_source: Option<&CookieSource>,
-    policy: &RetryPolicy,
+    options: &DownloadOptions,
 ) -> Result<FileOutcome> {
     if !signal.is_running() {
         return Err(interrupted_error());
@@ -1956,7 +2114,7 @@ async fn download_single_file_with_policy(
         signal,
         cookie_source,
         expected_md5,
-        policy,
+        options,
     )
     .await?;
 
@@ -1978,6 +2136,37 @@ async fn download_single_file_with_policy(
             file_path
         )))
     }
+}
+
+/// Download a single file inside `root` via `.part` staging, MD5 verification, and atomic promotion
+/// using an explicit `RetryPolicy`.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+async fn download_single_file_with_policy(
+    client: &Client,
+    root: &Path,
+    url: &str,
+    file_path: &str,
+    expected_md5: Option<&str>,
+    signal: &ShutdownSignal,
+    cookie_source: Option<&CookieSource>,
+    policy: &RetryPolicy,
+) -> Result<FileOutcome> {
+    let options = DownloadOptions {
+        retry_policy: *policy,
+        limit_rate: None,
+    };
+    download_single_file_with_options(
+        client,
+        root,
+        url,
+        file_path,
+        expected_md5,
+        signal,
+        cookie_source,
+        &options,
+    )
+    .await
 }
 
 /// Download a single file inside `root` via `.part` staging, MD5 verification, and atomic promotion.
@@ -2004,18 +2193,19 @@ async fn download_single_file(
     .await
 }
 
-/// Downloads multiple files into destination `root` with an explicit retry policy and shutdown signal.
+/// Downloads multiple files into destination `root` with explicit [`DownloadOptions`] and
+/// shutdown signal.
 ///
 /// Validates and prepares `root` before downloading, continues past per-file failures
 /// after printing a warning, stops promptly on shutdown signal interruption, prints an
 /// end-of-batch summary, and returns the collected [`BatchSummary`].
-pub async fn download_files_in_dir<I>(
+pub async fn download_files_in_dir_with_options<I>(
     client: &Client,
     root: &Path,
     files: I,
     total_files: usize,
     cookie_source: Option<&CookieSource>,
-    policy: &RetryPolicy,
+    options: &DownloadOptions,
     signal: &ShutdownSignal,
 ) -> Result<BatchSummary>
 where
@@ -2050,7 +2240,7 @@ where
             total_files.to_string().bold()
         );
 
-        match download_single_file_with_policy(
+        match download_single_file_with_options(
             client,
             &canonical_root,
             &url,
@@ -2058,7 +2248,7 @@ where
             expected_md5.as_deref(),
             signal,
             cookie_source,
-            policy,
+            options,
         )
         .await
         {
@@ -2094,6 +2284,39 @@ where
     Ok(summary)
 }
 
+/// Downloads multiple files into destination `root` with an explicit retry policy and shutdown signal.
+///
+/// Validates and prepares `root` before downloading, continues past per-file failures
+/// after printing a warning, stops promptly on shutdown signal interruption, prints an
+/// end-of-batch summary, and returns the collected [`BatchSummary`].
+pub async fn download_files_in_dir<I>(
+    client: &Client,
+    root: &Path,
+    files: I,
+    total_files: usize,
+    cookie_source: Option<&CookieSource>,
+    policy: &RetryPolicy,
+    signal: &ShutdownSignal,
+) -> Result<BatchSummary>
+where
+    I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
+{
+    let options = DownloadOptions {
+        retry_policy: *policy,
+        limit_rate: None,
+    };
+    download_files_in_dir_with_options(
+        client,
+        root,
+        files,
+        total_files,
+        cookie_source,
+        &options,
+        signal,
+    )
+    .await
+}
+
 /// Downloads multiple files with an explicit retry policy and shutdown signal.
 ///
 /// Continues past per-file failures after printing a warning, stops promptly on
@@ -2110,13 +2333,17 @@ pub async fn download_files_with_policy_and_signal<I>(
 where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
 {
-    download_files_in_dir(
+    let options = DownloadOptions {
+        retry_policy: *policy,
+        limit_rate: None,
+    };
+    download_files_in_dir_with_options(
         client,
         Path::new("."),
         files,
         total_files,
         cookie_source,
-        policy,
+        &options,
         signal,
     )
     .await
@@ -2140,13 +2367,13 @@ where
 {
     let root = output_dir.unwrap_or_else(|| Path::new("."));
     let signal = install_signal_handler();
-    download_files_in_dir(
+    download_files_in_dir_with_options(
         client,
         root,
         files,
         total_files,
         cookie_source,
-        &RetryPolicy::default(),
+        &DownloadOptions::default(),
         &signal,
     )
     .await
@@ -6885,5 +7112,491 @@ mod tests {
                 unsafe_path.display()
             );
         }
+    }
+
+    #[test]
+    fn test_parse_rate_limit_valid_raw_and_suffixes() {
+        const KIB: u64 = 1024;
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        let cases = [
+            ("1", 1u64),
+            ("512", 512),
+            ("1024", 1024),
+            ("1048576", 1_048_576),
+            ("10B", 10),
+            ("10b", 10),
+            ("500K", 500 * KIB),
+            ("500k", 500 * KIB),
+            ("500KB", 500 * KIB),
+            ("500kb", 500 * KIB),
+            ("500Kb", 500 * KIB),
+            ("500kB", 500 * KIB),
+            ("2M", 2 * MIB),
+            ("2m", 2 * MIB),
+            ("2MB", 2 * MIB),
+            ("2mb", 2 * MIB),
+            ("1G", GIB),
+            ("1g", GIB),
+            ("1GB", GIB),
+            ("1gb", GIB),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_rate_limit(input).unwrap_or_else(|e| panic!("input '{input}' failed: {e}")),
+                expected,
+                "unexpected parsed rate for '{input}'"
+            );
+        }
+
+        // Maximum non-overflowing u64 boundaries for raw bytes, B, K, M, and G.
+        let max_raw = u64::MAX.to_string();
+        assert_eq!(parse_rate_limit(&max_raw).unwrap(), u64::MAX);
+        assert_eq!(parse_rate_limit(&format!("{max_raw}B")).unwrap(), u64::MAX);
+
+        let max_k = u64::MAX / KIB;
+        assert_eq!(parse_rate_limit(&format!("{max_k}K")).unwrap(), max_k * KIB);
+
+        let max_m = u64::MAX / MIB;
+        assert_eq!(parse_rate_limit(&format!("{max_m}M")).unwrap(), max_m * MIB);
+
+        let max_g = u64::MAX / GIB;
+        assert_eq!(parse_rate_limit(&format!("{max_g}G")).unwrap(), max_g * GIB);
+    }
+
+    #[test]
+    fn test_parse_rate_limit_rejects_invalid_zero_negative_malformed_and_overflow() {
+        const KIB: u64 = 1024;
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        let overflow_k = format!("{}K", (u64::MAX / KIB) + 1);
+        let overflow_m = format!("{}M", (u64::MAX / MIB) + 1);
+        let overflow_g = format!("{}G", (u64::MAX / GIB) + 1);
+
+        let invalid_cases: Vec<(&str, &str)> = vec![
+            ("", "empty"),
+            (" ", "whitespace"),
+            ("\t", "whitespace"),
+            ("\n", "whitespace"),
+            (" 500K", "whitespace"),
+            ("500K ", "whitespace"),
+            ("500 K", "whitespace"),
+            ("5 00K", "whitespace"),
+            ("0", "greater than zero"),
+            ("00", "greater than zero"),
+            ("0B", "greater than zero"),
+            ("0K", "greater than zero"),
+            ("0M", "greater than zero"),
+            ("0G", "greater than zero"),
+            ("-1", "without a sign"),
+            ("-500K", "without a sign"),
+            ("+100", "without a sign"),
+            ("1.5M", "decimal"),
+            ("0.5K", "decimal"),
+            (".5M", "decimal"),
+            ("K", "positive integer"),
+            ("KB", "positive integer"),
+            ("B", "positive integer"),
+            ("500T", "unknown unit suffix"),
+            ("500KiB", "unknown unit suffix"),
+            ("500MB/s", "unknown unit suffix"),
+            ("500xyz", "unknown unit suffix"),
+            ("18446744073709551616", "exceeds maximum"),
+            ("99999999999999999999999999999", "exceeds maximum"),
+            (&overflow_k, "exceeds maximum"),
+            (&overflow_m, "exceeds maximum"),
+            (&overflow_g, "exceeds maximum"),
+        ];
+
+        for (case, expected_reason) in invalid_cases {
+            let err = parse_rate_limit(case)
+                .expect_err(&format!("expected '{case}' to fail rate limit parsing"));
+            match &err {
+                IaGetError::InvalidRateLimit { input, reason } => {
+                    assert_eq!(input, case);
+                    assert!(
+                        reason.contains(expected_reason),
+                        "expected reason for '{case}' to contain '{expected_reason}', got '{reason}'"
+                    );
+                }
+                other => panic!("expected InvalidRateLimit for '{case}', got {other:?}"),
+            }
+            assert!(
+                err.to_string()
+                    .contains(&format!("Invalid rate limit '{case}':")),
+                "unexpected Display for '{case}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rate_limiter_zero_chunk_and_zero_rate() {
+        let t0 = Instant::now();
+        let mut limiter = RateLimiter::with_start(1024, t0);
+
+        assert_eq!(limiter.delay_for_chunk(0, t0), Duration::ZERO);
+        assert_eq!(limiter.delay_for_chunk(512, t0), Duration::from_millis(500));
+
+        // Zero-byte chunks do not disturb accumulated state or trigger a stall reset.
+        let t1 = t0 + Duration::from_millis(500);
+        assert_eq!(limiter.delay_for_chunk(0, t1), Duration::ZERO);
+        assert_eq!(
+            limiter.delay_for_chunk(0, t0 + Duration::from_secs(10)),
+            Duration::ZERO
+        );
+        assert_eq!(limiter.delay_for_chunk(512, t1), Duration::from_millis(500));
+
+        // Zero rate returns Duration::ZERO without dividing by zero or panicking.
+        let mut zero_rate = RateLimiter::with_start(0, t0);
+        assert_eq!(zero_rate.delay_for_chunk(0, t0), Duration::ZERO);
+        assert_eq!(zero_rate.delay_for_chunk(1024, t0), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_rate_limiter_single_chunk_exact_duration() {
+        let t0 = Instant::now();
+        let mut limiter = RateLimiter::with_start(1024, t0);
+        assert_eq!(limiter.delay_for_chunk(512, t0), Duration::from_millis(500));
+
+        let mut limiter_100k = RateLimiter::with_start(100_000, t0);
+        assert_eq!(
+            limiter_100k.delay_for_chunk(25_000, t0),
+            Duration::from_millis(250)
+        );
+    }
+
+    #[test]
+    fn test_rate_limiter_multi_chunk_compensates_overshoot_without_drift() {
+        let t0 = Instant::now();
+        let mut limiter = RateLimiter::with_start(1000, t0);
+
+        // Chunk 1: 500 bytes expects 500ms.
+        assert_eq!(limiter.delay_for_chunk(500, t0), Duration::from_millis(500));
+
+        // Sleep overshoots by 30ms (within the 100ms stall window): next delay shrinks to 470ms.
+        let t1 = t0 + Duration::from_millis(530);
+        assert_eq!(limiter.delay_for_chunk(500, t1), Duration::from_millis(470));
+
+        // Sleep overshoots by another 20ms from the 1000ms target: next delay shrinks to 480ms.
+        let t2 = t0 + Duration::from_millis(1020);
+        assert_eq!(limiter.delay_for_chunk(500, t2), Duration::from_millis(480));
+
+        // Back on schedule at 1500ms: chunk 4 requires the exact nominal 500ms.
+        let t3 = t0 + Duration::from_millis(1500);
+        assert_eq!(limiter.delay_for_chunk(500, t3), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_rate_limiter_tiny_chunks_accumulate_without_truncation() {
+        let t0 = Instant::now();
+        let rate_2g = 2 * 1024 * 1024 * 1024u64;
+        let mut limiter = RateLimiter::with_start(rate_2g, t0);
+
+        // Individual 1-byte chunks at 2 GiB/s are < 1ns, yet cumulative bytes must not lose credit.
+        assert_eq!(limiter.delay_for_chunk(1, t0), Duration::ZERO);
+        assert_eq!(limiter.delay_for_chunk(1, t0), Duration::ZERO);
+        assert_eq!(limiter.delay_for_chunk(1, t0), Duration::from_nanos(1));
+
+        let mut last_delay = Duration::ZERO;
+        for _ in 3..2_148 {
+            last_delay = limiter.delay_for_chunk(1, t0);
+        }
+        assert_eq!(last_delay, Duration::from_nanos(1_000));
+    }
+
+    #[test]
+    fn test_rate_limiter_long_stall_resets_window_preventing_burst() {
+        let t0 = Instant::now();
+        let mut limiter = RateLimiter::with_start(1024, t0);
+
+        // Chunk 1: 512 bytes at t0 -> 500ms expected.
+        assert_eq!(limiter.delay_for_chunk(512, t0), Duration::from_millis(500));
+
+        // Exactly at the 100ms stall boundary (elapsed == prev_expected + 100ms): no reset yet.
+        let t_boundary = t0 + Duration::from_millis(600);
+        assert_eq!(
+            limiter.delay_for_chunk(512, t_boundary),
+            Duration::from_millis(400)
+        );
+
+        // Exceed the 100ms stall window past prev_expected (1000ms + 101ms): window resets.
+        let t_stalled = t0 + Duration::from_millis(1101);
+        assert_eq!(
+            limiter.delay_for_chunk(512, t_stalled),
+            Duration::from_millis(500)
+        );
+
+        // A longer 500ms idle stall also resets cleanly rather than allowing a catch-up burst.
+        let t_long_stall = t_stalled + Duration::from_secs(1);
+        assert_eq!(
+            limiter.delay_for_chunk(512, t_long_stall),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn test_rate_limiter_large_cumulative_bytes_do_not_overflow() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        const TIB: u64 = 1024 * GIB;
+
+        let t0 = Instant::now();
+        let mut limiter = RateLimiter::with_start(GIB, t0);
+        let mut last = Duration::ZERO;
+        for _ in 0..10 {
+            last = limiter.delay_for_chunk(TIB, t0);
+        }
+        assert_eq!(last, Duration::from_secs(10 * 1024));
+
+        // Saturating accumulation past u64::MAX must not panic or overflow u128 arithmetic.
+        let mut extreme = RateLimiter::with_start(GIB, t0);
+        let _ = extreme.delay_for_chunk(u64::MAX / 2, t0);
+        let _ = extreme.delay_for_chunk(u64::MAX / 2, t0);
+        let saturated_delay = extreme.delay_for_chunk(1024, t0);
+        assert_eq!(
+            saturated_delay,
+            RateLimiter::expected_duration_for_bytes(u64::MAX, GIB)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_download_files_with_rate_limit_throttles_transfer_and_verifies_md5() {
+        let payload: Vec<u8> = (0..(40 * 1024)).map(|i| (i % 251) as u8).collect();
+        let expected_md5 = md5_hex(&payload);
+        let server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
+        let client = http_client_builder().build().unwrap();
+        let temp_dir = TempTestDir::new("rate-limit-throttled");
+        let signal = ShutdownSignal::new();
+        let options = DownloadOptions {
+            retry_policy: RetryPolicy::default(),
+            limit_rate: Some(parse_rate_limit("100K").unwrap()),
+        };
+
+        let files = vec![(
+            server.url("/throttled.bin"),
+            "throttled.bin".to_string(),
+            Some(expected_md5.clone()),
+        )];
+
+        let started = Instant::now();
+        let summary = download_files_in_dir_with_options(
+            &client,
+            &temp_dir.path,
+            files,
+            1,
+            None,
+            &options,
+            &signal,
+        )
+        .await
+        .expect("throttled download should succeed");
+        let elapsed = started.elapsed();
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert!(!summary.interrupted);
+        assert!(
+            elapsed >= Duration::from_millis(320),
+            "40 KiB at 100 KiB/s (~400ms expected) completed too quickly: {elapsed:?}"
+        );
+
+        let saved = fs::read(temp_dir.join("throttled.bin")).unwrap();
+        assert_eq!(saved, payload);
+        assert_eq!(md5_hex(&saved), expected_md5);
+        assert!(!temp_dir.part_path("throttled.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn test_download_files_unthrottled_completes_with_intact_content_and_md5() {
+        let payload: Vec<u8> = (0..(40 * 1024)).map(|i| ((i * 7) % 251) as u8).collect();
+        let expected_md5 = md5_hex(&payload);
+        let server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
+        let client = http_client_builder().build().unwrap();
+        let temp_dir = TempTestDir::new("rate-limit-unthrottled");
+        let signal = ShutdownSignal::new();
+        let options = DownloadOptions {
+            retry_policy: RetryPolicy::default(),
+            limit_rate: None,
+        };
+
+        let files = vec![(
+            server.url("/unthrottled.bin"),
+            "unthrottled.bin".to_string(),
+            Some(expected_md5.clone()),
+        )];
+
+        let summary = download_files_in_dir_with_options(
+            &client,
+            &temp_dir.path,
+            files,
+            1,
+            None,
+            &options,
+            &signal,
+        )
+        .await
+        .expect("unthrottled download should succeed");
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert!(!summary.interrupted);
+
+        let saved = fs::read(temp_dir.join("unthrottled.bin")).unwrap();
+        assert_eq!(saved, payload);
+        assert_eq!(md5_hex(&saved), expected_md5);
+        assert!(!temp_dir.part_path("unthrottled.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn test_download_files_with_rate_limit_interrupts_immediately_on_shutdown_signal() {
+        let payload: Vec<u8> = (0..(16 * 1024)).map(|i| (i % 239) as u8).collect();
+        let expected_md5 = md5_hex(&payload);
+        let server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
+        let client = http_client_builder().build().unwrap();
+        let temp_dir = TempTestDir::new("rate-limit-interrupt");
+        let signal = ShutdownSignal::new();
+        let options = DownloadOptions {
+            retry_policy: RetryPolicy::default(),
+            limit_rate: Some(parse_rate_limit("1K").unwrap()),
+        };
+
+        let part_path = temp_dir.part_path("interrupted.bin");
+        let trigger_signal = signal.clone();
+        let watch_part = part_path.clone();
+        let trigger_task = tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+            while tokio::time::Instant::now() < deadline {
+                if fs::metadata(&watch_part)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            trigger_signal.trigger();
+        });
+
+        let files = vec![(
+            server.url("/interrupted.bin"),
+            "interrupted.bin".to_string(),
+            Some(expected_md5),
+        )];
+
+        let started = Instant::now();
+        let summary = download_files_in_dir_with_options(
+            &client,
+            &temp_dir.path,
+            files,
+            1,
+            None,
+            &options,
+            &signal,
+        )
+        .await
+        .expect("interrupted throttled batch should return summary");
+        let elapsed = started.elapsed();
+
+        let _ = trigger_task.await;
+        let _requests = server.abort_and_collect().await;
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "Ctrl+C must interrupt ~16s throttled sleep promptly, took {elapsed:?}"
+        );
+        assert!(summary.interrupted);
+        assert_eq!(summary.ok, 0);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert!(!temp_dir.join("interrupted.bin").exists());
+
+        let retained = fs::read(&part_path).expect(".part file must remain on disk");
+        assert!(!retained.is_empty(), ".part file must retain written bytes");
+        assert!(retained.len() <= payload.len());
+        assert_eq!(retained.as_slice(), &payload[..retained.len()]);
+    }
+
+    #[tokio::test]
+    async fn test_download_files_resumed_with_rate_limit_paces_only_remaining_bytes() {
+        let prefix_len = 120 * 1024usize;
+        let remainder_len = 20 * 1024usize;
+        let total_len = prefix_len + remainder_len;
+        let payload: Vec<u8> = (0..total_len).map(|i| ((i * 13) % 251) as u8).collect();
+        let expected_md5 = md5_hex(&payload);
+
+        let content_range = format!("bytes {prefix_len}-{}/{total_len}", total_len - 1);
+        let server = MockServer::start(vec![MockResponse::with_headers(
+            "206 Partial Content",
+            vec![
+                ("Content-Range", content_range),
+                ("Content-Length", remainder_len.to_string()),
+            ],
+            &payload[prefix_len..],
+        )])
+        .await;
+
+        let client = http_client_builder().build().unwrap();
+        let temp_dir = TempTestDir::new("rate-limit-resume");
+        fs::write(temp_dir.part_path("resumed.bin"), &payload[..prefix_len]).unwrap();
+
+        let signal = ShutdownSignal::new();
+        let options = DownloadOptions {
+            retry_policy: RetryPolicy::default(),
+            limit_rate: Some(parse_rate_limit("100K").unwrap()),
+        };
+
+        let files = vec![(
+            server.url("/resumed.bin"),
+            "resumed.bin".to_string(),
+            Some(expected_md5.clone()),
+        )];
+
+        let started = Instant::now();
+        let summary = download_files_in_dir_with_options(
+            &client,
+            &temp_dir.path,
+            files,
+            1,
+            None,
+            &options,
+            &signal,
+        )
+        .await
+        .expect("resumed throttled download should succeed");
+        let elapsed = started.elapsed();
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].header("Range"),
+            Some(format!("bytes={prefix_len}-").as_str())
+        );
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert!(!summary.interrupted);
+        assert!(
+            elapsed >= Duration::from_millis(140),
+            "20 KiB remainder at 100 KiB/s (~200ms expected) completed too quickly: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1000),
+            "pacing must apply only to the 20 KiB remainder (~200ms), not the 140 KiB full file (~1400ms): {elapsed:?}"
+        );
+
+        let saved = fs::read(temp_dir.join("resumed.bin")).unwrap();
+        assert_eq!(saved, payload);
+        assert_eq!(md5_hex(&saved), expected_md5);
+        assert!(!temp_dir.part_path("resumed.bin").exists());
     }
 }

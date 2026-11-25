@@ -89,6 +89,15 @@ pub enum IaGetError {
         path: PathBuf,
     },
 
+    /// User-supplied bandwidth rate limit is invalid
+    #[error("Invalid rate limit '{input}': {reason}")]
+    InvalidRateLimit {
+        /// Original rate limit string supplied by the user
+        input: String,
+        /// Reason the rate limit could not be parsed
+        reason: String,
+    },
+
     /// Download was interrupted by the user
     #[error("Download interrupted by user")]
     Interrupted,
