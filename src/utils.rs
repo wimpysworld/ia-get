@@ -165,18 +165,65 @@ pub fn format_transfer_rate(bytes_per_sec: f64) -> (f64, &'static str) {
     }
 }
 
+/// Checks whether a filename stem matches a Windows reserved device name.
+fn is_windows_reserved_name(name: &str) -> bool {
+    const RESERVED_NAMES: &[&str] = &[
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "CONIN$",
+        "CONOUT$",
+        "CLOCK$",
+        "COM0",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "COM\u{00B9}",
+        "COM\u{00B2}",
+        "COM\u{00B3}",
+        "LPT0",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+        "LPT\u{00B9}",
+        "LPT\u{00B2}",
+        "LPT\u{00B3}",
+    ];
+
+    RESERVED_NAMES
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
+
 /// Sanitizes a filename for cross-platform filesystem compatibility
 ///
 /// Replaces characters that are invalid on Windows or Unix filesystems
-/// with underscores, while preserving path separators.
+/// with underscores, while preserving path separators and ensuring the
+/// output is always a non-empty relative path of normal components.
 ///
-/// Invalid characters replaced with underscores:
-/// - Windows: `< > : " | ? *` and control characters (0-31)
+/// Invalid characters and path hazards handled:
+/// - Windows: `< > : " | ? * \` and control characters (0-31, 127)
 /// - Unix: null character (\0)
-/// - Both: leading/trailing spaces, trailing dots in path components
+/// - Both: leading whitespace, trailing whitespace/dots in path components,
+///   dot-segment components (`.` and `..`), empty components, and empty paths
 ///
-/// Also handles Windows reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
-/// by appending an underscore.
+/// Also handles Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`,
+/// `CONIN$`, `CONOUT$`, `CLOCK$`, `COM0`-`COM9`, `COM¹`-`COM³`, `LPT0`-`LPT9`,
+/// `LPT¹`-`LPT³`), matched case-insensitively against the trimmed base name
+/// before the first `.`, by appending an underscore before any extension.
 ///
 /// # Arguments
 /// * `filename` - The original filename (may include path components separated by `/`)
@@ -201,12 +248,6 @@ pub fn format_transfer_rate(bytes_per_sec: f64) -> (f64, &'static str) {
 /// assert!(modified);
 /// ```
 pub fn sanitize_filename(filename: &str) -> (String, bool) {
-    // Windows reserved names (case-insensitive)
-    const RESERVED_NAMES: &[&str] = &[
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    ];
-
     let mut was_modified = false;
     let mut result = String::with_capacity(filename.len());
 
@@ -254,55 +295,48 @@ pub fn sanitize_filename(filename: &str) -> (String, bool) {
             }
         }
 
-        // Trim leading/trailing spaces
-        let trimmed = sanitized_component.trim();
+        // Trim leading whitespace and any trailing whitespace or dots in one pass
+        let trimmed = sanitized_component
+            .trim_start()
+            .trim_end_matches(|c: char| c.is_whitespace() || c == '.');
         if trimmed.len() != sanitized_component.len() {
             was_modified = true;
             sanitized_component = trimmed.to_string();
         }
 
-        // Trim trailing dots (Windows doesn't allow filenames ending with dots)
-        let trimmed_dots = sanitized_component.trim_end_matches('.');
-        if trimmed_dots.len() != sanitized_component.len() {
-            was_modified = true;
-            sanitized_component = trimmed_dots.to_string();
-        }
-
-        // Handle empty components after sanitization
-        if sanitized_component.is_empty() {
+        // Rewrite dot-segment and empty post-trim components so no path traversal survives
+        if sanitized_component.is_empty()
+            || sanitized_component == "."
+            || sanitized_component == ".."
+        {
             sanitized_component = "_".to_string();
             was_modified = true;
         }
 
-        // Check for Windows reserved names
-        // Split by '.' to check the base name (before extension)
+        // Check for Windows reserved names against the base name before the first '.'
+        // after stripping trailing whitespace and dots from that base name
         let dot_pos = sanitized_component.find('.');
         let base_name = if let Some(pos) = dot_pos {
             &sanitized_component[..pos]
         } else {
             &sanitized_component
         };
+        let trimmed_stem = base_name.trim_end_matches(|c: char| c.is_whitespace() || c == '.');
 
-        if RESERVED_NAMES
-            .iter()
-            .any(|&reserved| base_name.eq_ignore_ascii_case(reserved))
-        {
-            // Insert underscore after base name, before extension
-            if let Some(pos) = dot_pos {
-                sanitized_component.insert(pos, '_');
+        if is_windows_reserved_name(trimmed_stem) {
+            sanitized_component = if let Some(pos) = dot_pos {
+                format!("{trimmed_stem}_{}", &sanitized_component[pos..])
             } else {
-                sanitized_component.push('_');
-            }
+                format!("{trimmed_stem}_")
+            };
             was_modified = true;
         }
 
         result.push_str(&sanitized_component);
     }
 
-    // Remove trailing slash if present (unless it's just "/")
-    if result.len() > 1 && result.ends_with('/') {
-        result.pop();
-        was_modified = true;
+    if result.is_empty() {
+        return ("_".to_string(), true);
     }
 
     (result, was_modified)
@@ -481,5 +515,110 @@ mod tests {
         let (result, modified) = sanitize_filename("file:name.tar.gz");
         assert_eq!(result, "file_name.tar.gz");
         assert!(modified);
+    }
+
+    fn assert_only_normal_components(path: &str) {
+        let components: Vec<_> = std::path::Path::new(path).components().collect();
+        assert!(
+            !components.is_empty(),
+            "expected non-empty path, got {:?}",
+            path
+        );
+        assert!(
+            components
+                .iter()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+            "expected only Component::Normal in {:?}, got {:?}",
+            path,
+            components
+        );
+    }
+
+    #[test]
+    fn test_sanitize_windows_reserved_names_extended() {
+        let cases = [
+            ("CON .txt", "CON_.txt"),
+            ("con  .tar.gz", "con_.tar.gz"),
+            ("CON. ", "CON_"),
+            ("COM0", "COM0_"),
+            ("LPT0", "LPT0_"),
+            ("COM\u{00B9}", "COM\u{00B9}_"),
+            ("com\u{00B9} .bin", "com\u{00B9}_.bin"),
+            ("COM\u{00B2}.txt", "COM\u{00B2}_.txt"),
+            ("COM\u{00B3}.txt", "COM\u{00B3}_.txt"),
+            ("LPT\u{00B9}", "LPT\u{00B9}_"),
+            ("LPT\u{00B2}.dat", "LPT\u{00B2}_.dat"),
+            ("lpt\u{00B3} .log", "lpt\u{00B3}_.log"),
+            ("CONIN$", "CONIN$_"),
+            ("CONIN$.log", "CONIN$_.log"),
+            ("CONOUT$", "CONOUT$_"),
+            ("conout$ .txt", "conout$_.txt"),
+            ("CLOCK$", "CLOCK$_"),
+            ("clock$.sys", "clock$_.sys"),
+        ];
+
+        for (input, expected) in cases {
+            let (result, modified) = sanitize_filename(input);
+            assert_eq!(result, expected, "input: {:?}", input);
+            assert!(modified, "expected modified=true for {:?}", input);
+            assert_only_normal_components(&result);
+        }
+    }
+
+    #[test]
+    fn test_sanitize_trailing_spaces_and_dots() {
+        let cases = [
+            ("file . .", "file"),
+            ("CON. ", "CON_"),
+            ("folder . /file . .", "folder/file"),
+        ];
+
+        for (input, expected) in cases {
+            let (result, modified) = sanitize_filename(input);
+            assert_eq!(result, expected, "input: {:?}", input);
+            assert!(modified, "expected modified=true for {:?}", input);
+            assert_only_normal_components(&result);
+        }
+
+        // Non-reserved names with spaces before '.' remain intact
+        let (result, modified) = sanitize_filename("file .txt");
+        assert_eq!(result, "file .txt");
+        assert!(!modified);
+        assert_only_normal_components(&result);
+    }
+
+    #[test]
+    fn test_sanitize_dot_segments_and_empty_paths() {
+        let cases = [
+            (".", "_"),
+            ("..", "_"),
+            ("../evil.txt", "_/evil.txt"),
+            ("a/../b.txt", "a/_/b.txt"),
+            ("a/./b.txt", "a/_/b.txt"),
+            ("a/.. /b.txt", "a/_/b.txt"),
+            ("a/. ./b.txt", "a/_/b.txt"),
+            ("/", "_"),
+            ("///", "_"),
+            ("", "_"),
+        ];
+
+        for (input, expected) in cases {
+            let (result, modified) = sanitize_filename(input);
+            assert_eq!(result, expected, "input: {:?}", input);
+            assert!(modified, "expected modified=true for {:?}", input);
+            assert_only_normal_components(&result);
+        }
+    }
+
+    #[test]
+    fn test_sanitize_reserved_lookalikes_unmodified() {
+        let cases = ["COM10.txt", "LPT10.txt", "CONSOLE.txt", "CLOCK.txt"];
+
+        for input in cases {
+            let (result, modified) = sanitize_filename(input);
+            assert_eq!(result, input, "input: {:?}", input);
+            assert!(!modified, "expected modified=false for {:?}", input);
+            assert_only_normal_components(&result);
+        }
     }
 }
