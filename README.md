@@ -100,6 +100,20 @@ ia-get -l https://archive.org/details/<identifier>
 ia-get --list https://archive.org/download/<identifier>/<path>
 ```
 
+Filter files by glob pattern with `-f` or `--filter <GLOB>`.
+Repeat this option to combine patterns.
+Prefix a pattern with `!` to exclude files, or use `\!` for a literal leading `!`.
+Positive patterns select files that match any positive pattern, and `!` patterns always exclude files that match them.
+Patterns match original names from archive metadata without leading `/`, and `*` crosses `/` so `-f '*.pdf'` matches nested files too.
+This option works with both downloads and `--list`, and `ia-get` exits with an error if a pattern is invalid or matches zero files.
+
+```shell
+ia-get -f '*.pdf' https://archive.org/details/<identifier>
+ia-get -f '!*.torrent' https://archive.org/details/<identifier>
+ia-get -f '*.cbz' -f '!*thumb*' https://archive.org/details/<identifier>
+ia-get --list -f '*.pdf' https://archive.org/details/<identifier>
+```
+
 ## Options
 
 | Option | Description |
@@ -107,6 +121,7 @@ ia-get --list https://archive.org/download/<identifier>/<path>
 | `-o`, `--output-dir <DIR>` | Save downloaded files to `<DIR>` (defaults to the current working directory). |
 | `-b`, `--cookies <COOKIES>` | Send a raw `Cookie` header or load cookies from a Netscape `cookies.txt` file. |
 | `-l`, `--list` | List files and sizes from archive metadata XML and exit. |
+| `-f`, `--filter <GLOB>` | Filter files by glob pattern (repeatable, prefix with `!` to exclude). |
 
 ## Why? 🤔💭
 
@@ -119,6 +134,7 @@ So I co-authored `ia-get` to automate the download process.
 ### Features ✨
 
 - 🎯 Downloads full items from `/details/<identifier>` URLs or single files from `/download/<identifier>/<path>` URLs
+- 🔍 Filters downloads and `--list` output with repeatable `-f`/`--filter <GLOB>` patterns, including `!` exclusions
 - 🔽 Retries transient errors on metadata and file downloads with exponential backoff, jitter, `Retry-After` support, and prompt Ctrl+C interruption
 - 🌳 Preserves the original directory structure
 - 📁 Saves downloads to a chosen directory with `-o`/`--output-dir <DIR>` and creates missing directories automatically

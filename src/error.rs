@@ -46,6 +46,22 @@ pub enum IaGetError {
         total: usize,
     },
 
+    /// User-supplied filter glob pattern is invalid
+    #[error("Invalid filter pattern '{pattern}': {reason}")]
+    InvalidFilter {
+        /// Original pattern supplied by the user
+        pattern: String,
+        /// Reason the pattern could not be compiled
+        reason: String,
+    },
+
+    /// Filter patterns matched no files in the archive item
+    #[error("No files matched filter(s): {patterns}")]
+    NoMatchingFiles {
+        /// Comma-separated filter patterns supplied by the user
+        patterns: String,
+    },
+
     /// Download was interrupted by the user
     #[error("Download interrupted by user")]
     Interrupted,

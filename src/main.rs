@@ -16,7 +16,7 @@ use ia_get::utils::{
     create_spinner, format_size, parse_archive_url, percent_decode_utf8, sanitize_filename,
     ArchiveUrl,
 };
-use ia_get::{CookieSource, IaGetError, Result};
+use ia_get::{CookieSource, FileFilter, IaGetError, Result};
 use indicatif::ProgressStyle;
 use reqwest::header::{HeaderMap, COOKIE};
 use reqwest::{Client, Url};
@@ -223,6 +223,16 @@ fn select_target_files(files: XmlFiles, target: &ArchiveUrl) -> Result<XmlFiles>
     }
 }
 
+/// Selects files matching the target URL and applies any compiled user filters.
+fn select_and_filter_files(
+    files: XmlFiles,
+    target: &ArchiveUrl,
+    filter: &FileFilter,
+) -> Result<XmlFiles> {
+    let selected = select_target_files(files, target)?;
+    filter.apply(selected)
+}
+
 /// Builds the download URL for a file relative to the item's XML metadata URL.
 fn build_file_download_url(base_url: &Url, file_name: &str) -> Url {
     let mut file_url = base_url.clone();
@@ -360,6 +370,8 @@ Examples:
   ia-get --output-dir /tmp/zzap64 https://archive.org/details/deftributetozzap64
   ia-get --list https://archive.org/details/deftributetozzap64
   ia-get --list https://archive.org/download/deftributetozzap64/deftributetozzap64.pdf
+  ia-get -f '*.pdf' https://archive.org/details/deftributetozzap64
+  ia-get -f '!*.torrent' https://archive.org/details/deftributetozzap64
   ia-get -b cookies.txt https://archive.org/details/deftributetozzap64")]
 struct Cli {
     /// Archive.org item details URL (/details/<item>) or direct file URL (/download/<item>/<path>)
@@ -373,6 +385,9 @@ struct Cli {
     /// Directory to save downloaded files (defaults to current working directory)
     #[arg(short = 'o', long = "output-dir", value_name = "DIR")]
     output_dir: Option<PathBuf>,
+    /// Filter files by glob pattern (repeatable; prefix with '!' to exclude)
+    #[arg(short = 'f', long = "filter", value_name = "GLOB")]
+    filters: Vec<String>,
 }
 
 /// Main application entry point
@@ -388,6 +403,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .as_deref()
         .map(CookieSource::from_input)
         .transpose()?;
+
+    let file_filter = FileFilter::compile(&cli.filters)?;
 
     // Create a client with extended timeouts for large file downloads
     // Connection timeout is set high, but no read timeout since large files
@@ -438,8 +455,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    // Narrow metadata to the requested file when given a direct download URL
-    let files = match select_target_files(files, &target) {
+    // Narrow metadata to the requested target and apply any user-supplied glob filters
+    let files = match select_and_filter_files(files, &target, &file_filter) {
         Ok(files) => files,
         Err(e) => {
             spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
@@ -2340,6 +2357,7 @@ mod tests {
                 (Some('l'), Some("list")),
                 (Some('b'), Some("cookies")),
                 (Some('o'), Some("output-dir")),
+                (Some('f'), Some("filter")),
             ]
         );
 
@@ -2369,6 +2387,14 @@ mod tests {
             "help should include --list /download/ example:\n{help}"
         );
         assert!(
+            help.contains("ia-get -f '*.pdf' https://archive.org/details/deftributetozzap64"),
+            "help should include -f include example:\n{help}"
+        );
+        assert!(
+            help.contains("ia-get -f '!*.torrent' https://archive.org/details/deftributetozzap64"),
+            "help should include -f exclude example:\n{help}"
+        );
+        assert!(
             help.contains("-l, --list"),
             "help should expose -l/--list:\n{help}"
         );
@@ -2380,5 +2406,563 @@ mod tests {
             help.contains("-o, --output-dir"),
             "help should expose -o/--output-dir:\n{help}"
         );
+        assert!(
+            help.contains("-f, --filter"),
+            "help should expose -f/--filter:\n{help}"
+        );
+    }
+
+    #[test]
+    fn cli_parses_repeatable_filters_without_splitting_brace_commas() {
+        let cli = Cli::try_parse_from([
+            "ia-get",
+            "-f",
+            "*.{pdf,cbz}",
+            "--filter",
+            "!*draft*",
+            "https://archive.org/details/deftributetozzap64",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.filters, vec!["*.{pdf,cbz}", "!*draft*"]);
+    }
+
+    #[test]
+    fn select_and_filter_files_applies_target_selection_then_filters() {
+        let make_files = || XmlFiles {
+            files: vec![
+                xml_file("issue01.pdf", Some(1024)),
+                xml_file("issue01-draft.pdf", Some(512)),
+                xml_file("cover.jpg", Some(256)),
+            ],
+        };
+        let details = ArchiveUrl::Details {
+            identifier: "item".to_string(),
+        };
+        let filter = FileFilter::compile(["*.pdf", "!*draft*"]).unwrap();
+
+        let filtered = select_and_filter_files(make_files(), &details, &filter).unwrap();
+        assert_eq!(filtered.files.len(), 1);
+        assert_eq!(filtered.files[0].name, "issue01.pdf");
+
+        let direct = ArchiveUrl::Download {
+            identifier: "item".to_string(),
+            file_path: "cover.jpg".to_string(),
+        };
+        let err = select_and_filter_files(make_files(), &direct, &filter).unwrap_err();
+        assert!(matches!(err, IaGetError::NoMatchingFiles { .. }));
+    }
+
+    #[test]
+    fn cli_parses_filter_variants_combinations_trailing_flags_and_rejects_include_exclude() {
+        use clap::error::ErrorKind;
+
+        let url = "https://archive.org/details/deftributetozzap64";
+
+        let omitted = Cli::try_parse_from(["ia-get", url]).unwrap();
+        assert!(omitted.filters.is_empty());
+
+        let short = Cli::try_parse_from(["ia-get", "-f", "*.pdf", url]).unwrap();
+        assert_eq!(short.filters, vec!["*.pdf"]);
+
+        let long = Cli::try_parse_from(["ia-get", "--filter", "!*.torrent", url]).unwrap();
+        assert_eq!(long.filters, vec!["!*.torrent"]);
+
+        let repeated =
+            Cli::try_parse_from(["ia-get", "-f", "*.cbz", "-f", "!*thumb*", url]).unwrap();
+        assert_eq!(repeated.filters, vec!["*.cbz", "!*thumb*"]);
+
+        let brace_glob = Cli::try_parse_from(["ia-get", "-f", "*.{pdf,cbz}", url]).unwrap();
+        assert_eq!(brace_glob.filters, vec!["*.{pdf,cbz}"]);
+
+        let combined_leading = Cli::try_parse_from([
+            "ia-get",
+            "-l",
+            "-b",
+            "cookies.txt",
+            "-o",
+            "./downloads",
+            "-f",
+            "*.cbz",
+            "--filter",
+            "!*thumb*",
+            url,
+        ])
+        .unwrap();
+        assert!(combined_leading.list);
+        assert_eq!(combined_leading.cookies.as_deref(), Some("cookies.txt"));
+        assert_eq!(
+            combined_leading.output_dir,
+            Some(PathBuf::from("./downloads"))
+        );
+        assert_eq!(combined_leading.filters, vec!["*.cbz", "!*thumb*"]);
+
+        let combined_trailing = Cli::try_parse_from([
+            "ia-get",
+            url,
+            "-l",
+            "-b",
+            "auth=1",
+            "-o",
+            "./out",
+            "-f",
+            "*.{pdf,cbz}",
+            "--filter",
+            "!*thumb*",
+        ])
+        .unwrap();
+        assert!(combined_trailing.list);
+        assert_eq!(combined_trailing.cookies.as_deref(), Some("auth=1"));
+        assert_eq!(combined_trailing.output_dir, Some(PathBuf::from("./out")));
+        assert_eq!(combined_trailing.filters, vec!["*.{pdf,cbz}", "!*thumb*"]);
+
+        let include_err = Cli::try_parse_from(["ia-get", "--include", "*.pdf", url])
+            .err()
+            .expect("--include should be rejected");
+        assert_eq!(include_err.kind(), ErrorKind::UnknownArgument);
+
+        let exclude_err = Cli::try_parse_from(["ia-get", "--exclude", "*.torrent", url])
+            .err()
+            .expect("--exclude should be rejected");
+        assert_eq!(exclude_err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn cli_help_documents_filter_flag_value_name_and_examples() {
+        use clap::CommandFactory;
+
+        Cli::command().debug_assert();
+
+        let help = Cli::command().render_help().to_string();
+        assert!(help.contains("-f"), "help should mention -f:\n{help}");
+        assert!(
+            help.contains("--filter"),
+            "help should mention --filter:\n{help}"
+        );
+        assert!(
+            help.contains("<GLOB>"),
+            "help should mention <GLOB> value name:\n{help}"
+        );
+        assert!(
+            help.contains("-f '*.pdf'"),
+            "help should include -f '*.pdf' example:\n{help}"
+        );
+        assert!(
+            help.contains("-f '!*.torrent'"),
+            "help should include -f '!*.torrent' example:\n{help}"
+        );
+    }
+
+    #[test]
+    fn invalid_cli_filter_fails_early_before_network_or_output_dir_creation() {
+        let sandbox = TempTestDir::new("invalid-filter-early");
+        let missing_dir = sandbox.join("never/created");
+        assert!(!missing_dir.exists());
+
+        for bad_pattern in ["", "!", "[unclosed", "![unclosed"] {
+            let cli = Cli::try_parse_from([
+                "ia-get",
+                "-o",
+                missing_dir.to_str().unwrap(),
+                "-f",
+                "*.pdf",
+                "-f",
+                bad_pattern,
+                "not-even-a-valid-url",
+            ])
+            .unwrap();
+
+            let err = FileFilter::compile(&cli.filters).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    IaGetError::InvalidFilter { ref pattern, .. } if pattern == bad_pattern
+                ),
+                "bad_pattern {bad_pattern:?}: unexpected error {err:?}"
+            );
+            assert!(
+                err.to_string()
+                    .contains(&format!("Invalid filter pattern '{bad_pattern}':")),
+                "bad_pattern {bad_pattern:?}: unexpected message {err}"
+            );
+            assert!(!missing_dir.exists());
+            assert!(!sandbox.join("never").exists());
+        }
+    }
+
+    #[test]
+    fn select_and_filter_files_handles_details_download_excluded_and_leading_slash() {
+        let make_files = || XmlFiles {
+            files: vec![
+                xml_file_with_md5(
+                    "issue01.pdf",
+                    Some(2048),
+                    Some("11111111111111111111111111111111"),
+                ),
+                xml_file_with_md5(
+                    "/sub/issue02.pdf",
+                    Some(4096),
+                    Some("22222222222222222222222222222222"),
+                ),
+                xml_file_with_md5(
+                    "item.torrent",
+                    Some(512),
+                    Some("33333333333333333333333333333333"),
+                ),
+            ],
+        };
+
+        let details = ArchiveUrl::Details {
+            identifier: "item".to_string(),
+        };
+        let inactive = FileFilter::compile::<[&str; 0], _>([]).unwrap();
+        let all = select_and_filter_files(make_files(), &details, &inactive).unwrap();
+        assert_eq!(all.files.len(), 3);
+
+        let no_torrents = FileFilter::compile(["!*.torrent"]).unwrap();
+        let details_filtered =
+            select_and_filter_files(make_files(), &details, &no_torrents).unwrap();
+        assert_eq!(
+            details_filtered
+                .files
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["issue01.pdf", "/sub/issue02.pdf"]
+        );
+        assert_eq!(
+            details_filtered.files[0].md5.as_deref(),
+            Some("11111111111111111111111111111111")
+        );
+
+        let matching_download = ArchiveUrl::Download {
+            identifier: "item".to_string(),
+            file_path: "issue01.pdf".to_string(),
+        };
+        let pdf_filter = FileFilter::compile(["*.pdf"]).unwrap();
+        let single =
+            select_and_filter_files(make_files(), &matching_download, &pdf_filter).unwrap();
+        assert_eq!(single.files.len(), 1);
+        assert_eq!(single.files[0].name, "issue01.pdf");
+
+        let excluded_download = ArchiveUrl::Download {
+            identifier: "item".to_string(),
+            file_path: "item.torrent".to_string(),
+        };
+        let err =
+            select_and_filter_files(make_files(), &excluded_download, &no_torrents).unwrap_err();
+        assert!(matches!(
+            err,
+            IaGetError::NoMatchingFiles { ref patterns } if patterns == "!*.torrent"
+        ));
+
+        let leading_slash_download = ArchiveUrl::Download {
+            identifier: "item".to_string(),
+            file_path: "sub/issue02.pdf".to_string(),
+        };
+        let sub_pdf_filter = FileFilter::compile(["sub/*.pdf"]).unwrap();
+        let matched_leading_slash =
+            select_and_filter_files(make_files(), &leading_slash_download, &sub_pdf_filter)
+                .unwrap();
+        assert_eq!(matched_leading_slash.files.len(), 1);
+        assert_eq!(matched_leading_slash.files[0].name, "/sub/issue02.pdf");
+
+        let exclude_sub_pdf = FileFilter::compile(["!sub/*.pdf"]).unwrap();
+        let err = select_and_filter_files(make_files(), &leading_slash_download, &exclude_sub_pdf)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            IaGetError::NoMatchingFiles { ref patterns } if patterns == "!sub/*.pdf"
+        ));
+
+        let missing_download = ArchiveUrl::Download {
+            identifier: "item".to_string(),
+            file_path: "does-not-exist.pdf".to_string(),
+        };
+        let err =
+            select_and_filter_files(make_files(), &missing_download, &pdf_filter).unwrap_err();
+        assert!(matches!(
+            err,
+            IaGetError::FileNotFound { ref file, ref item }
+                if file == "does-not-exist.pdf" && item == "item"
+        ));
+    }
+
+    #[test]
+    fn list_mode_with_filters_reflects_filtered_subset_and_leaves_missing_output_dir_untouched() {
+        let make_files = || XmlFiles {
+            files: vec![
+                xml_file("issue01.pdf", Some(1024)),
+                xml_file("docs/issue02.pdf", Some(2048)),
+                xml_file("comics/issue01.cbz", Some(4096)),
+                xml_file("comics/issue01_thumb.cbz", Some(512)),
+                xml_file("item.torrent", Some(256)),
+                xml_file("notes.txt", None),
+            ],
+        };
+
+        let cases: &[(&str, &[&str], &[&str], &str)] = &[
+            (
+                "positive-pdf",
+                &["-f", "*.pdf"],
+                &["   1.00KB issue01.pdf", "   2.00KB docs/issue02.pdf"],
+                "2 files, 3.00KB total",
+            ),
+            (
+                "negative-torrent",
+                &["-f", "!*.torrent"],
+                &[
+                    "   1.00KB issue01.pdf",
+                    "   2.00KB docs/issue02.pdf",
+                    "   4.00KB comics/issue01.cbz",
+                    "     512B comics/issue01_thumb.cbz",
+                    "  unknown notes.txt",
+                ],
+                "5 files, 7.50KB total known size, 1 unknown size",
+            ),
+            (
+                "combined-cbz-no-thumb",
+                &["-f", "*.cbz", "-f", "!*thumb*"],
+                &["   4.00KB comics/issue01.cbz"],
+                "1 file, 4.00KB total",
+            ),
+        ];
+
+        for (label, filter_args, expected_rows, expected_summary) in cases {
+            let sandbox = TempTestDir::new(&format!("list-filter-{label}"));
+            let missing_dir = sandbox.join("missing/nested/output");
+            assert!(!missing_dir.exists());
+
+            let mut args = vec!["ia-get", "--list", "-o", missing_dir.to_str().unwrap()];
+            args.extend_from_slice(filter_args);
+            args.push("https://archive.org/details/item");
+
+            let cli = Cli::try_parse_from(args).unwrap();
+            let filter = FileFilter::compile(&cli.filters).unwrap();
+            let target = parse_archive_url(&cli.url).unwrap();
+            let filtered = select_and_filter_files(make_files(), &target, &filter).unwrap();
+
+            let expected_rows_vec: Vec<String> =
+                expected_rows.iter().map(|row| (*row).to_string()).collect();
+            assert_eq!(list_file_rows(&filtered), expected_rows_vec, "case {label}");
+            assert_eq!(list_summary(&filtered), *expected_summary, "case {label}");
+
+            let spinner = indicatif::ProgressBar::hidden();
+            let output_dir = finalize_metadata_phase(&cli, &filtered, &spinner)
+                .expect("--list should succeed without touching output directory");
+            assert_eq!(output_dir, None, "case {label}");
+            assert!(!missing_dir.exists(), "case {label}");
+            assert!(!sandbox.join("missing").exists(), "case {label}");
+        }
+    }
+
+    async fn assert_filtered_download_end_to_end(
+        label: &str,
+        filter_args: &[&str],
+        expected_files: &[&str],
+        absent_paths: &[&str],
+    ) {
+        let fixture_files: &[(&str, &[u8])] = &[
+            ("issue01.pdf", b"pdf-one-payload"),
+            ("docs/nested/issue02.pdf", b"pdf-two-nested-payload"),
+            ("comics/issue01.cbz", b"cbz-one-payload"),
+            ("comics/sub/issue02.cbz", b"cbz-two-nested-payload"),
+            ("comics/issue01_thumb.cbz", b"cbz-thumb-excluded-payload"),
+            ("thumbs/preview.cbz", b"cbz-thumbs-dir-excluded-payload"),
+            ("item_archive.torrent", b"torrent-top-excluded-payload"),
+            ("meta/extra.torrent", b"torrent-nested-excluded-payload"),
+        ];
+
+        let mut xml_body = String::from("<files>\n");
+        for (name, payload) in fixture_files {
+            let digest = format!("{:x}", md5::compute(payload));
+            xml_body.push_str(&format!(
+                "  <file name=\"{name}\" source=\"original\">\n    <size>{}</size>\n    <md5>{digest}</md5>\n  </file>\n",
+                payload.len()
+            ));
+        }
+        xml_body.push_str("</files>");
+
+        let mut responses = vec![MockResponse::ok(b""), MockResponse::ok(xml_body.as_bytes())];
+        for expected_name in expected_files {
+            let (_, payload) = fixture_files
+                .iter()
+                .find(|(name, _)| name == expected_name)
+                .expect("expected file should exist in fixture");
+            responses.push(MockResponse::ok(payload));
+        }
+
+        let server = MockHttpServer::start(responses).await;
+        let output_dir = TempTestDir::new(&format!("filtered-download-{label}"));
+
+        let mut args = vec!["ia-get", "-o", output_dir.0.to_str().unwrap()];
+        args.extend_from_slice(filter_args);
+        args.push("https://archive.org/details/item");
+
+        let cli = Cli::try_parse_from(args).unwrap();
+        let file_filter = FileFilter::compile(&cli.filters).unwrap();
+        let target = parse_archive_url(&cli.url).unwrap();
+
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let xml_url = server.url("/download/item/item_files.xml");
+        let (all_files, base_url) =
+            fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                .await
+                .expect("XML metadata fetch should succeed");
+
+        let filtered = select_and_filter_files(all_files, &target, &file_filter)
+            .expect("filter should match expected files");
+        assert_eq!(filtered.files.len(), expected_files.len(), "case {label}");
+
+        let prepared_dir = finalize_metadata_phase(&cli, &filtered, &spinner)
+            .expect("output directory preparation should succeed")
+            .expect("non-list mode should return output directory");
+
+        let download_data: Vec<_> = filtered
+            .files
+            .into_iter()
+            .map(|file| {
+                let absolute_url = build_file_download_url(&base_url, &file.name);
+                let (sanitized_name, _) = sanitize_filename(&file.name);
+                (absolute_url.to_string(), sanitized_name, file.md5)
+            })
+            .collect();
+
+        let total = download_data.len();
+        let summary = downloader::download_files_in_dir(
+            &client,
+            &prepared_dir,
+            download_data,
+            total,
+            None,
+            &policy,
+            &signal,
+        )
+        .await
+        .expect("filtered batch download should complete");
+
+        assert_eq!(summary.ok, expected_files.len(), "case {label}");
+        assert_eq!(summary.skipped, 0, "case {label}");
+        assert!(
+            summary.failed.is_empty(),
+            "case {label}: {:?}",
+            summary.failed
+        );
+        assert!(!summary.interrupted, "case {label}");
+        assert!(batch_exit_result(&summary, total).is_ok(), "case {label}");
+
+        let requests = server.finish().await;
+        assert_eq!(
+            requests.len(),
+            2 + expected_files.len(),
+            "case {label}: unexpected HTTP request count: {requests:?}"
+        );
+        assert!(requests[0]
+            .request_line
+            .starts_with("HEAD /download/item/item_files.xml "));
+        assert!(requests[1]
+            .request_line
+            .starts_with("GET /download/item/item_files.xml "));
+        for (idx, expected_name) in expected_files.iter().enumerate() {
+            let expected_prefix = format!("GET /download/item/{expected_name} ");
+            assert!(
+                requests[idx + 2].request_line.starts_with(&expected_prefix),
+                "case {label}: request {} was {:?}, expected prefix {:?}",
+                idx + 2,
+                requests[idx + 2].request_line,
+                expected_prefix
+            );
+        }
+
+        for expected_name in expected_files {
+            let (_, payload) = fixture_files
+                .iter()
+                .find(|(name, _)| name == expected_name)
+                .unwrap();
+            let saved = output_dir.join(expected_name);
+            assert_eq!(
+                std::fs::read(&saved)
+                    .unwrap_or_else(|e| panic!("case {label}: expected saved file {saved:?}: {e}")),
+                *payload,
+                "case {label}: content mismatch for {expected_name}"
+            );
+        }
+
+        for absent in absent_paths {
+            let path = output_dir.join(absent);
+            assert!(
+                !path.exists(),
+                "case {label}: excluded path {path:?} must not exist on disk"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn filtered_download_positive_pdf_only_requests_and_saves_matching_files() {
+        assert_filtered_download_end_to_end(
+            "pdf-only",
+            &["-f", "*.pdf"],
+            &["issue01.pdf", "docs/nested/issue02.pdf"],
+            &[
+                "comics/issue01.cbz",
+                "comics/sub/issue02.cbz",
+                "comics/issue01_thumb.cbz",
+                "thumbs/preview.cbz",
+                "item_archive.torrent",
+                "meta/extra.torrent",
+                "comics",
+                "thumbs",
+                "meta",
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn filtered_download_negative_excludes_torrents_and_saves_remaining_files() {
+        assert_filtered_download_end_to_end(
+            "exclude-torrents",
+            &["-f", "!*.torrent"],
+            &[
+                "issue01.pdf",
+                "docs/nested/issue02.pdf",
+                "comics/issue01.cbz",
+                "comics/sub/issue02.cbz",
+                "comics/issue01_thumb.cbz",
+                "thumbs/preview.cbz",
+            ],
+            &["item_archive.torrent", "meta/extra.torrent", "meta"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn filtered_download_combined_cbz_excluding_thumbs_saves_only_non_thumb_cbz() {
+        assert_filtered_download_end_to_end(
+            "cbz-no-thumbs",
+            &["-f", "*.cbz", "-f", "!*thumb*"],
+            &["comics/issue01.cbz", "comics/sub/issue02.cbz"],
+            &[
+                "issue01.pdf",
+                "docs/nested/issue02.pdf",
+                "comics/issue01_thumb.cbz",
+                "thumbs/preview.cbz",
+                "item_archive.torrent",
+                "meta/extra.torrent",
+                "docs",
+                "thumbs",
+                "meta",
+            ],
+        )
+        .await;
     }
 }

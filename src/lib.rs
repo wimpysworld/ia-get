@@ -10,8 +10,10 @@ pub mod constants;
 pub mod cookie;
 pub mod downloader;
 pub mod error;
+pub mod filter;
 pub mod utils;
 
 // Re-export common types for convenience
 pub use cookie::CookieSource;
 pub use error::{IaGetError, Result};
+pub use filter::FileFilter;
