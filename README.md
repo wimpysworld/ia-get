@@ -51,6 +51,10 @@ For both metadata fetches and file downloads, `ia-get` retries transient transpo
 Retries use exponential backoff with jitter, or honour `Retry-After` headers (delta-seconds or HTTP-date) capped at 60 seconds.
 Other `4xx` errors fail immediately, and Ctrl+C interrupts retry waits promptly.
 
+When a file fails to download or fails MD5 verification, `ia-get` prints a warning and continues with the remaining files.
+At the end of a run, `ia-get` prints a summary with `ok`, `skipped`, and `failed` counts and lists any failed files.
+If any file fails or Ctrl+C interrupts the run, `ia-get` exits with a non-zero status.
+
 Pass cookies for archive.org items that require a logged-in session.
 `--cookies`/`-b` accepts either a raw Cookie header string or a Netscape `cookies.txt` file exported from your browser.
 
@@ -82,6 +86,7 @@ So I co-authored `ia-get` to automate the download process.
 - 🌳 Preserves the original directory structure
 - 🔄 Stages downloads in `.part` files, resumes partial transfers, and validates HTTP range responses
 - 🔏 Verifies MD5 hashes and renames `.part` files atomically only after verification succeeds
+- 📋 Continues past individual file failures, prints a batch summary, and exits with a non-zero status on failed or interrupted runs
 - 🌱 Can be run multiple times to update existing downloads
 - 📊 Gets all the metadata for the archive
 - 📦️ Available for **Linux** 🐧 **macOS** 🍏 and **Windows** 🪟

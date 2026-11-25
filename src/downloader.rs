@@ -1052,12 +1052,12 @@ async fn download_file_content(
             ResponseAction::VerifyCompletePart => {
                 if expected_md5.is_some() {
                     if !signal.is_running() {
-                        return Ok((current_file_size, false));
+                        return Err(interrupted_error());
                     }
                     let is_valid =
                         verify_downloaded_file(part_path, expected_md5, signal.running_flag())?;
                     if !signal.is_running() {
-                        return Ok((current_file_size, false));
+                        return Err(interrupted_error());
                     }
                     if is_valid {
                         return Ok((current_file_size, true));
@@ -1075,6 +1075,9 @@ async fn download_file_content(
                         Err(e) => return Err(e.into()),
                     }
                     continue;
+                }
+                if !signal.is_running() {
+                    return Err(interrupted_error());
                 }
                 return Ok((current_file_size, false));
             }
@@ -1259,6 +1262,100 @@ fn verify_downloaded_file(
     }
 }
 
+/// Outcome of processing a single file in a download session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileOutcome {
+    Downloaded,
+    Skipped,
+}
+
+/// Details of a single file that failed during a batch download.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct FailedFile {
+    /// Local destination path of the file that failed.
+    pub file_path: String,
+    /// Error message explaining why the file failed.
+    pub error: String,
+}
+
+/// Outcome summary of a batch download session.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct BatchSummary {
+    /// Number of files downloaded and verified successfully.
+    pub ok: usize,
+    /// Number of existing files skipped because they were already complete.
+    pub skipped: usize,
+    /// Files that failed to download or failed verification.
+    pub failed: Vec<FailedFile>,
+    /// Whether the batch stopped early due to a user interrupt signal.
+    pub interrupted: bool,
+}
+
+/// Formats a plain-text summary of a batch download session, including any failed files.
+pub fn format_batch_summary(summary: &BatchSummary) -> String {
+    let mut text = format!(
+        "Summary: {} ok, {} skipped, {} failed",
+        summary.ok,
+        summary.skipped,
+        summary.failed.len()
+    );
+    if summary.interrupted {
+        text.push_str(", interrupted");
+    }
+
+    if !summary.failed.is_empty() {
+        text.push_str("\nFailed files:");
+        for failed in &summary.failed {
+            text.push_str(&format!("\n  - {}: {}", failed.file_path, failed.error));
+        }
+    }
+
+    text
+}
+
+/// Prints a coloured end-of-batch summary to stdout.
+fn print_batch_summary(summary: &BatchSummary) {
+    let status_icon = if summary.interrupted || !summary.failed.is_empty() {
+        "✘".red().bold()
+    } else {
+        "✔".green().bold()
+    };
+
+    let failed_count = if summary.failed.is_empty() {
+        summary.failed.len().to_string().bold()
+    } else {
+        summary.failed.len().to_string().red().bold()
+    };
+
+    let interrupted_suffix = if summary.interrupted {
+        format!(", {}", "interrupted".yellow().bold())
+    } else {
+        String::new()
+    };
+
+    println!(
+        "\n{} {} {} ok, {} skipped, {} failed{}",
+        status_icon,
+        "Summary:".bold(),
+        summary.ok.to_string().green().bold(),
+        summary.skipped.to_string().cyan().bold(),
+        failed_count,
+        interrupted_suffix
+    );
+
+    if !summary.failed.is_empty() {
+        println!("{}", "Failed files:".red().bold());
+        for failed in &summary.failed {
+            println!(
+                "  {} {}: {}",
+                "✘".red().bold(),
+                failed.file_path.bold(),
+                failed.error
+            );
+        }
+    }
+}
+
 /// Download a single file via `.part` staging, MD5 verification, and atomic promotion
 /// using an explicit `RetryPolicy`.
 async fn download_single_file_with_policy(
@@ -1269,7 +1366,11 @@ async fn download_single_file_with_policy(
     signal: &ShutdownSignal,
     cookie_header: Option<&str>,
     policy: &RetryPolicy,
-) -> Result<()> {
+) -> Result<FileOutcome> {
+    if !signal.is_running() {
+        return Err(interrupted_error());
+    }
+
     if let Some(is_valid) = check_existing_file(file_path, expected_md5, signal.running_flag())? {
         if is_valid {
             println!(
@@ -1278,7 +1379,7 @@ async fn download_single_file_with_policy(
                 "Downloaded".white(),
                 "✔".green().bold()
             );
-            return Ok(());
+            return Ok(FileOutcome::Skipped);
         } else {
             println!(
                 "{} {}      {}",
@@ -1287,6 +1388,10 @@ async fn download_single_file_with_policy(
                 "▲".yellow().bold()
             );
         }
+    }
+
+    if !signal.is_running() {
+        return Err(interrupted_error());
     }
 
     ensure_parent_directories(file_path)?;
@@ -1304,13 +1409,16 @@ async fn download_single_file_with_policy(
     .await?;
 
     if !signal.is_running() {
-        return Ok(());
+        return Err(interrupted_error());
     }
 
     if already_verified || verify_downloaded_file(&part_path, expected_md5, signal.running_flag())?
     {
+        if !signal.is_running() {
+            return Err(interrupted_error());
+        }
         promote_part_file(&part_path, Path::new(file_path))?;
-        Ok(())
+        Ok(FileOutcome::Downloaded)
     } else {
         Err(IaGetError::Integrity(format!(
             "MD5 mismatch for {}",
@@ -1320,6 +1428,7 @@ async fn download_single_file_with_policy(
 }
 
 /// Download a single file via `.part` staging, MD5 verification, and atomic promotion.
+#[cfg(test)]
 async fn download_single_file(
     client: &Client,
     url: &str,
@@ -1327,7 +1436,7 @@ async fn download_single_file(
     expected_md5: Option<&str>,
     signal: &ShutdownSignal,
     cookie_header: Option<&str>,
-) -> Result<()> {
+) -> Result<FileOutcome> {
     download_single_file_with_policy(
         client,
         url,
@@ -1340,25 +1449,27 @@ async fn download_single_file(
     .await
 }
 
-/// Download multiple files with shared signal handling
+/// Downloads multiple files with an explicit retry policy and shutdown signal.
 ///
-/// This function sets up signal handling once for the entire download session
-/// and allows for graceful interruption between files.
-pub async fn download_files<I>(
+/// Continues past per-file failures after printing a warning, stops promptly on
+/// shutdown signal interruption, prints an end-of-batch summary, and returns the
+/// collected [`BatchSummary`].
+pub async fn download_files_with_policy_and_signal<I>(
     client: &Client,
     files: I,
     total_files: usize,
     cookie_header: Option<&str>,
-) -> Result<()>
+    policy: &RetryPolicy,
+    signal: &ShutdownSignal,
+) -> BatchSummary
 where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
 {
-    // Reuse the process-wide signal handler for the entire download session
-    let signal = install_signal_handler();
+    let mut summary = BatchSummary::default();
 
     for (index, (url, file_path, expected_md5)) in files.into_iter().enumerate() {
-        // Check if we should stop due to signal
         if !signal.is_running() {
+            summary.interrupted = true;
             println!(
                 "\n{} Download interrupted. Run the command again to resume remaining files.",
                 "✘".red().bold()
@@ -1382,18 +1493,73 @@ where
             total_files.to_string().bold()
         );
 
-        download_single_file(
+        match download_single_file_with_policy(
             client,
             &url,
             &file_path,
             expected_md5.as_deref(),
-            &signal,
+            signal,
             cookie_header,
+            policy,
         )
-        .await?;
+        .await
+        {
+            Ok(FileOutcome::Downloaded) => summary.ok += 1,
+            Ok(FileOutcome::Skipped) => summary.skipped += 1,
+            Err(err) => {
+                if !signal.is_running() {
+                    summary.interrupted = true;
+                    println!(
+                        "\n{} Download interrupted. Run the command again to resume remaining files.",
+                        "✘".red().bold()
+                    );
+                    break;
+                }
+
+                println!(
+                    "{} {}      {} {}: {}",
+                    "╰╼".cyan().dimmed(),
+                    "Warning".yellow().bold(),
+                    "⚠".yellow().bold(),
+                    file_path.bold(),
+                    err
+                );
+                summary.failed.push(FailedFile {
+                    file_path,
+                    error: err.to_string(),
+                });
+            }
+        }
     }
 
-    Ok(())
+    print_batch_summary(&summary);
+    summary
+}
+
+/// Download multiple files with shared signal handling.
+///
+/// Sets up signal handling once for the entire download session, continues past
+/// individual file failures, prints an end-of-batch summary, and returns the
+/// collected [`BatchSummary`].
+pub async fn download_files<I>(
+    client: &Client,
+    files: I,
+    total_files: usize,
+    cookie_header: Option<&str>,
+) -> BatchSummary
+where
+    I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
+{
+    let signal = install_signal_handler();
+    download_files_with_policy_and_signal(
+        client,
+        files,
+        total_files,
+        cookie_header,
+        &RetryPolicy::default(),
+        &signal,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -3808,5 +3974,459 @@ mod tests {
         assert!(Arc::ptr_eq(first.running_flag(), second.running_flag()));
         assert!(Arc::ptr_eq(second.running_flag(), third.running_flag()));
         assert!(Arc::ptr_eq(&first.notify, &second.notify));
+    }
+
+    #[tokio::test]
+    async fn test_batch_continues_after_http_404_and_downloads_remaining_files() {
+        let payload2 = b"second file archive payload";
+        let payload3 = b"third file archive payload!";
+        let md5_2 = md5_hex(payload2);
+        let md5_3 = md5_hex(payload3);
+
+        let server = MockServer::start(vec![
+            MockResponse::with_headers(
+                "404 Not Found",
+                vec![("Content-Length", "9".to_string())],
+                b"not found",
+            ),
+            MockResponse::ok(payload2),
+            MockResponse::ok(payload3),
+        ])
+        .await;
+
+        let dir = TempTestDir::new("batch-404-continue");
+        let file1 = dir.file_path("file1.bin");
+        let file2 = dir.file_path("file2.bin");
+        let file3 = dir.file_path("nested/file3.bin");
+
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+        let policy = RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            max_retry_after: Duration::from_millis(5),
+        };
+
+        let files = vec![
+            (server.url("/file1.bin"), file1.clone(), None),
+            (server.url("/file2.bin"), file2.clone(), Some(md5_2)),
+            (server.url("/file3.bin"), file3.clone(), Some(md5_3)),
+        ];
+
+        let summary =
+            download_files_with_policy_and_signal(&client, files, 3, None, &policy, &signal).await;
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].request_line.starts_with("GET /file1.bin "));
+        assert!(requests[1].request_line.starts_with("GET /file2.bin "));
+        assert!(requests[2].request_line.starts_with("GET /file3.bin "));
+
+        assert_eq!(summary.ok, 2);
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.failed.len(), 1);
+        assert!(!summary.interrupted);
+        assert_eq!(summary.failed[0].file_path, file1);
+        assert!(
+            summary.failed[0].error.contains("404"),
+            "expected 404 in failure error, got: {}",
+            summary.failed[0].error
+        );
+
+        assert!(!Path::new(&file1).exists());
+        assert!(!part_file_path(&file1).exists());
+        assert_eq!(fs::read(&file2).unwrap(), payload2);
+        assert!(!part_file_path(&file2).exists());
+        assert_eq!(fs::read(&file3).unwrap(), payload3);
+        assert!(!part_file_path(&file3).exists());
+
+        let formatted = format_batch_summary(&summary);
+        assert!(formatted.contains("2 ok"), "summary was: {formatted}");
+        assert!(formatted.contains("1 failed"), "summary was: {formatted}");
+        assert!(formatted.contains(&file1), "summary was: {formatted}");
+    }
+
+    #[tokio::test]
+    async fn test_batch_continues_after_exhausted_retries() {
+        let payload2 = b"file two downloads after file one exhausts retries";
+        let md5_2 = md5_hex(payload2);
+
+        let server = MockServer::start(vec![
+            MockResponse::with_headers(
+                "503 Service Unavailable",
+                vec![("Content-Length", "4".to_string())],
+                b"busy",
+            ),
+            MockResponse::with_headers(
+                "503 Service Unavailable",
+                vec![("Content-Length", "4".to_string())],
+                b"busy",
+            ),
+            MockResponse::ok(payload2),
+        ])
+        .await;
+
+        let dir = TempTestDir::new("batch-exhausted-retries");
+        let file1 = dir.file_path("file1.bin");
+        let file2 = dir.file_path("file2.bin");
+
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+        let fast_policy = RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_retry_after: Duration::from_millis(1),
+        };
+
+        let files = vec![
+            (server.url("/file1.bin"), file1.clone(), None),
+            (server.url("/file2.bin"), file2.clone(), Some(md5_2)),
+        ];
+
+        let summary =
+            download_files_with_policy_and_signal(&client, files, 2, None, &fast_policy, &signal)
+                .await;
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].request_line.starts_with("GET /file1.bin "));
+        assert!(requests[1].request_line.starts_with("GET /file1.bin "));
+        assert!(requests[2].request_line.starts_with("GET /file2.bin "));
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.failed.len(), 1);
+        assert!(!summary.interrupted);
+        assert_eq!(summary.failed[0].file_path, file1);
+        assert!(
+            summary.failed[0].error.contains("503"),
+            "expected 503 in failure error, got: {}",
+            summary.failed[0].error
+        );
+
+        assert!(!Path::new(&file1).exists());
+        assert!(!part_file_path(&file1).exists());
+        assert_eq!(fs::read(&file2).unwrap(), payload2);
+        assert!(!part_file_path(&file2).exists());
+    }
+
+    #[tokio::test]
+    async fn test_batch_md5_mismatch_counts_as_failed_and_continues() {
+        let payload1 = b"corrupted first file payload";
+        let payload2 = b"verified second file payload";
+        let wrong_md5 = "00000000000000000000000000000000".to_string();
+        let md5_2 = md5_hex(payload2);
+
+        let server =
+            MockServer::start(vec![MockResponse::ok(payload1), MockResponse::ok(payload2)]).await;
+
+        let dir = TempTestDir::new("batch-md5-mismatch");
+        let file1 = dir.file_path("corrupt.bin");
+        let file2 = dir.file_path("good.bin");
+
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+        let policy = RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_retry_after: Duration::from_millis(1),
+        };
+
+        let files = vec![
+            (server.url("/corrupt.bin"), file1.clone(), Some(wrong_md5)),
+            (server.url("/good.bin"), file2.clone(), Some(md5_2)),
+        ];
+
+        let summary =
+            download_files_with_policy_and_signal(&client, files, 2, None, &policy, &signal).await;
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.failed.len(), 1);
+        assert!(!summary.interrupted);
+        assert_eq!(summary.failed[0].file_path, file1);
+        assert!(
+            summary.failed[0].error.contains("MD5 mismatch"),
+            "expected MD5 mismatch in failure error, got: {}",
+            summary.failed[0].error
+        );
+
+        assert!(
+            !Path::new(&file1).exists(),
+            "MD5 mismatch must not promote file 1 to final path"
+        );
+        assert_eq!(fs::read(part_file_path(&file1)).unwrap(), payload1);
+        assert_eq!(fs::read(&file2).unwrap(), payload2);
+        assert!(!part_file_path(&file2).exists());
+    }
+
+    #[tokio::test]
+    async fn test_batch_counts_skipped_existing_files_alongside_ok_and_failed() {
+        let verified_payload = b"already downloaded and verified";
+        let verified_md5 = md5_hex(verified_payload);
+        let unhashed_payload = b"already present without md5";
+        let fresh_payload = b"freshly downloaded file payload";
+        let fresh_md5 = md5_hex(fresh_payload);
+
+        let dir = TempTestDir::new("batch-skipped-mixed");
+        let existing_verified = dir.file_path("existing_verified.bin");
+        let existing_unhashed = dir.file_path("existing_unhashed.bin");
+        let fresh_ok = dir.file_path("fresh_ok.bin");
+        let missing_fail = dir.file_path("missing_fail.bin");
+
+        fs::write(&existing_verified, verified_payload).unwrap();
+        fs::write(&existing_unhashed, unhashed_payload).unwrap();
+
+        let server = MockServer::start(vec![
+            MockResponse::ok(fresh_payload),
+            MockResponse::with_headers(
+                "404 Not Found",
+                vec![("Content-Length", "7".to_string())],
+                b"missing",
+            ),
+        ])
+        .await;
+
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+        let policy = RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_retry_after: Duration::from_millis(1),
+        };
+
+        let files = vec![
+            (
+                server.url("/existing_verified.bin"),
+                existing_verified.clone(),
+                Some(verified_md5),
+            ),
+            (
+                server.url("/existing_unhashed.bin"),
+                existing_unhashed.clone(),
+                None,
+            ),
+            (
+                server.url("/fresh_ok.bin"),
+                fresh_ok.clone(),
+                Some(fresh_md5),
+            ),
+            (server.url("/missing_fail.bin"), missing_fail.clone(), None),
+        ];
+
+        let summary =
+            download_files_with_policy_and_signal(&client, files, 4, None, &policy, &signal).await;
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].request_line.starts_with("GET /fresh_ok.bin "));
+        assert!(requests[1]
+            .request_line
+            .starts_with("GET /missing_fail.bin "));
+
+        assert_eq!(summary.skipped, 2);
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.failed.len(), 1);
+        assert!(!summary.interrupted);
+        assert_eq!(summary.failed[0].file_path, missing_fail);
+        assert!(summary.failed[0].error.contains("404"));
+
+        assert_eq!(fs::read(&existing_verified).unwrap(), verified_payload);
+        assert_eq!(fs::read(&existing_unhashed).unwrap(), unhashed_payload);
+        assert_eq!(fs::read(&fresh_ok).unwrap(), fresh_payload);
+        assert!(!part_file_path(&fresh_ok).exists());
+        assert!(!Path::new(&missing_fail).exists());
+    }
+
+    #[tokio::test]
+    async fn test_batch_ctrl_c_mid_stream_stops_cleanly_without_recording_failure() {
+        let payload1 = b"completed first file";
+        let md5_1 = md5_hex(payload1);
+        let first_chunk = b"partial-before-ctrl-c";
+        let second_chunk = b"-never-completed";
+        let total_len = first_chunk.len() + second_chunk.len();
+
+        let dir = TempTestDir::new("batch-ctrl-c-mid");
+        let file1 = dir.file_path("file1.bin");
+        let file2 = dir.file_path("file2.bin");
+        let file3 = dir.file_path("file3.bin");
+        let part2 = part_file_path(&file2);
+
+        let signal = ShutdownSignal::new();
+        let server = MockServer::start(vec![
+            MockResponse::ok(payload1),
+            MockResponse::MidStreamInterrupt {
+                status_line: "200 OK",
+                headers: vec![("Content-Length".to_string(), total_len.to_string())],
+                first_chunk: first_chunk.to_vec(),
+                second_chunk: Some(second_chunk.to_vec()),
+                watch_path: part2.clone(),
+                expected_part_len: first_chunk.len() as u64,
+                signal: signal.clone(),
+            },
+            MockResponse::ok(b"file3 must not be requested"),
+        ])
+        .await;
+
+        let client = Client::new();
+        let policy = RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_retry_after: Duration::from_millis(1),
+        };
+
+        let files = vec![
+            (server.url("/file1.bin"), file1.clone(), Some(md5_1)),
+            (server.url("/file2.bin"), file2.clone(), None),
+            (server.url("/file3.bin"), file3.clone(), None),
+        ];
+
+        let summary =
+            download_files_with_policy_and_signal(&client, files, 3, None, &policy, &signal).await;
+
+        let requests = server.abort_and_collect().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].request_line.starts_with("GET /file1.bin "));
+        assert!(requests[1].request_line.starts_with("GET /file2.bin "));
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 0);
+        assert!(
+            summary.failed.is_empty(),
+            "interrupted file must not be recorded as failed: {:?}",
+            summary.failed
+        );
+        assert!(summary.interrupted);
+
+        assert_eq!(fs::read(&file1).unwrap(), payload1);
+        assert!(!part_file_path(&file1).exists());
+        assert!(!Path::new(&file2).exists());
+        assert_eq!(fs::read(&part2).unwrap(), first_chunk);
+        assert!(!Path::new(&file3).exists());
+        assert!(!part_file_path(&file3).exists());
+    }
+
+    #[tokio::test]
+    async fn test_batch_ctrl_c_before_start_records_interrupted_with_zero_requests() {
+        let server = MockServer::start(vec![
+            MockResponse::ok(b"should not be requested 1"),
+            MockResponse::ok(b"should not be requested 2"),
+        ])
+        .await;
+
+        let dir = TempTestDir::new("batch-ctrl-c-before-start");
+        let file1 = dir.file_path("file1.bin");
+        let file2 = dir.file_path("file2.bin");
+
+        let client = Client::new();
+        let signal = ShutdownSignal::new();
+        signal.trigger();
+
+        let policy = RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_retry_after: Duration::from_millis(1),
+        };
+
+        let files = vec![
+            (server.url("/file1.bin"), file1.clone(), None),
+            (server.url("/file2.bin"), file2.clone(), None),
+        ];
+
+        let summary =
+            download_files_with_policy_and_signal(&client, files, 2, None, &policy, &signal).await;
+
+        let requests = server.abort_and_collect().await;
+        assert!(
+            requests.is_empty(),
+            "expected 0 requests, got {:?}",
+            requests
+        );
+
+        assert_eq!(summary.ok, 0);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert!(summary.interrupted);
+        assert!(!Path::new(&file1).exists());
+        assert!(!part_file_path(&file1).exists());
+        assert!(!Path::new(&file2).exists());
+        assert!(!part_file_path(&file2).exists());
+    }
+
+    #[test]
+    fn test_format_batch_summary_outputs_counts_failed_files_and_interrupted_state() {
+        let all_ok = BatchSummary {
+            ok: 3,
+            skipped: 0,
+            failed: Vec::new(),
+            interrupted: false,
+        };
+        assert_eq!(
+            format_batch_summary(&all_ok),
+            "Summary: 3 ok, 0 skipped, 0 failed"
+        );
+
+        let mixed = BatchSummary {
+            ok: 2,
+            skipped: 1,
+            failed: vec![
+                FailedFile {
+                    file_path: "first.bin".to_string(),
+                    error: "Network error: HTTP error 404 Not Found".to_string(),
+                },
+                FailedFile {
+                    file_path: "second.bin".to_string(),
+                    error: "Integrity check failed: MD5 mismatch for second.bin".to_string(),
+                },
+            ],
+            interrupted: false,
+        };
+        assert_eq!(
+            format_batch_summary(&mixed),
+            concat!(
+                "Summary: 2 ok, 1 skipped, 2 failed\n",
+                "Failed files:\n",
+                "  - first.bin: Network error: HTTP error 404 Not Found\n",
+                "  - second.bin: Integrity check failed: MD5 mismatch for second.bin"
+            )
+        );
+
+        let interrupted_clean = BatchSummary {
+            ok: 1,
+            skipped: 2,
+            failed: Vec::new(),
+            interrupted: true,
+        };
+        assert_eq!(
+            format_batch_summary(&interrupted_clean),
+            "Summary: 1 ok, 2 skipped, 0 failed, interrupted"
+        );
+
+        let interrupted_with_failure = BatchSummary {
+            ok: 1,
+            skipped: 0,
+            failed: vec![FailedFile {
+                file_path: "broken.bin".to_string(),
+                error: "Network error: HTTP error 503 Service Unavailable".to_string(),
+            }],
+            interrupted: true,
+        };
+        assert_eq!(
+            format_batch_summary(&interrupted_with_failure),
+            concat!(
+                "Summary: 1 ok, 0 skipped, 1 failed, interrupted\n",
+                "Failed files:\n",
+                "  - broken.bin: Network error: HTTP error 503 Service Unavailable"
+            )
+        );
     }
 }

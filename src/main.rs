@@ -11,7 +11,7 @@ use ia_get::archive_metadata::{parse_xml_files, XmlFiles};
 use ia_get::constants::USER_AGENT;
 use ia_get::downloader;
 use ia_get::utils::{create_spinner, format_size, sanitize_filename, validate_archive_url};
-use ia_get::Result;
+use ia_get::{IaGetError, Result};
 use indicatif::ProgressStyle;
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
 use reqwest::{Client, Url};
@@ -399,6 +399,20 @@ fn list_files(files: &XmlFiles, spinner: &indicatif::ProgressBar) {
     }
 }
 
+/// Maps a completed batch download summary to the CLI exit result.
+fn batch_exit_result(summary: &downloader::BatchSummary, total_files: usize) -> Result<()> {
+    if summary.interrupted {
+        Err(IaGetError::Interrupted)
+    } else if !summary.failed.is_empty() {
+        Err(IaGetError::BatchFailed {
+            failed: summary.failed.len(),
+            total: total_files,
+        })
+    } else {
+        Ok(())
+    }
+}
+
 /// Command-line interface for ia-get
 #[derive(Parser)]
 #[command(name = "ia-get")]
@@ -532,13 +546,16 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
 
     // Download all files with integrated signal handling
-    downloader::download_files(
+    let total_files = download_data.len();
+    let summary = downloader::download_files(
         &client,
-        download_data.clone(),
-        download_data.len(),
+        download_data,
+        total_files,
         download_cookie_header.as_deref(),
     )
-    .await?;
+    .await;
+
+    batch_exit_result(&summary, total_files)?;
 
     Ok(())
 }
@@ -1302,5 +1319,88 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
             .starts_with("GET /download/item/item_files.xml "));
         assert!(matches!(err, ia_get::IaGetError::FileSystem(_)));
         assert!(err.to_string().contains("Download interrupted by user"));
+    }
+
+    #[test]
+    fn batch_exit_result_returns_ok_for_successful_and_empty_batches() {
+        let all_downloaded = downloader::BatchSummary {
+            ok: 3,
+            skipped: 0,
+            failed: Vec::new(),
+            interrupted: false,
+        };
+        assert!(batch_exit_result(&all_downloaded, 3).is_ok());
+
+        let mixed_ok_and_skipped = downloader::BatchSummary {
+            ok: 1,
+            skipped: 2,
+            failed: Vec::new(),
+            interrupted: false,
+        };
+        assert!(batch_exit_result(&mixed_ok_and_skipped, 3).is_ok());
+
+        let all_skipped = downloader::BatchSummary {
+            ok: 0,
+            skipped: 4,
+            failed: Vec::new(),
+            interrupted: false,
+        };
+        assert!(batch_exit_result(&all_skipped, 4).is_ok());
+
+        let empty = downloader::BatchSummary::default();
+        assert!(batch_exit_result(&empty, 0).is_ok());
+    }
+
+    #[test]
+    fn batch_exit_result_returns_batch_failed_when_files_fail() {
+        let summary = downloader::BatchSummary {
+            ok: 2,
+            skipped: 0,
+            failed: vec![downloader::FailedFile {
+                file_path: "missing.bin".to_string(),
+                error: "Network error: HTTP error 404 Not Found".to_string(),
+            }],
+            interrupted: false,
+        };
+
+        let err = batch_exit_result(&summary, 3).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IaGetError::BatchFailed {
+                    failed: 1,
+                    total: 3
+                }
+            ),
+            "expected BatchFailed {{ failed: 1, total: 3 }}, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn batch_exit_result_returns_interrupted_with_or_without_earlier_failures() {
+        let interrupted_clean = downloader::BatchSummary {
+            ok: 1,
+            skipped: 0,
+            failed: Vec::new(),
+            interrupted: true,
+        };
+        assert!(matches!(
+            batch_exit_result(&interrupted_clean, 3).unwrap_err(),
+            IaGetError::Interrupted
+        ));
+
+        let interrupted_after_failure = downloader::BatchSummary {
+            ok: 1,
+            skipped: 0,
+            failed: vec![downloader::FailedFile {
+                file_path: "broken.bin".to_string(),
+                error: "Network error: HTTP error 503 Service Unavailable".to_string(),
+            }],
+            interrupted: true,
+        };
+        assert!(matches!(
+            batch_exit_result(&interrupted_after_failure, 3).unwrap_err(),
+            IaGetError::Interrupted
+        ));
     }
 }

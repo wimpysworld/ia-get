@@ -27,6 +27,19 @@ pub enum IaGetError {
     /// Integrity verification errors (such as MD5 hash mismatches)
     #[error("Integrity check failed: {0}")]
     Integrity(String),
+
+    /// One or more files in a batch download failed
+    #[error("{failed} of {total} file(s) failed to download")]
+    BatchFailed {
+        /// Number of files that failed to download
+        failed: usize,
+        /// Total number of files in the batch
+        total: usize,
+    },
+
+    /// Download was interrupted by the user
+    #[error("Download interrupted by user")]
+    Interrupted,
 }
 
 impl From<reqwest::Error> for IaGetError {
