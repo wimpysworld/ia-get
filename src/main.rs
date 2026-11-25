@@ -549,6 +549,21 @@ struct Cli {
     limit_rate: Option<u64>,
 }
 
+/// Builds the application HTTP client with extended timeouts and explicit proxy configuration.
+fn build_http_client(proxy_config: &downloader::ProxyConfig) -> Result<Client> {
+    // Create a client with extended timeouts for large file downloads
+    // Connection timeout is set high, but no read timeout since large files
+    // may take a long time to transfer
+    let client = downloader::http_client_builder_with_proxy(proxy_config)?
+        .user_agent(USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(CONNECTION_TIMEOUT_SECS))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .pool_max_idle_per_host(1)
+        .tcp_keepalive(std::time::Duration::from_secs(60))
+        .build()?;
+    Ok(client)
+}
+
 /// Main application entry point
 ///
 /// Parses command line arguments, validates the archive.org URL, checks URL accessibility,
@@ -569,16 +584,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         verify::validate_check_dir(resolve_output_dir(cli.output_dir.as_deref()))?;
     }
 
-    // Create a client with extended timeouts for large file downloads
-    // Connection timeout is set high, but no read timeout since large files
-    // may take a long time to transfer
-    let client = downloader::http_client_builder()
-        .user_agent(USER_AGENT)
-        .connect_timeout(std::time::Duration::from_secs(CONNECTION_TIMEOUT_SECS))
-        .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .pool_max_idle_per_host(1)
-        .tcp_keepalive(std::time::Duration::from_secs(60))
-        .build()?;
+    let proxy_config = downloader::ProxyConfig::from_env()?;
+    let client = build_http_client(&proxy_config)?;
 
     let shutdown = downloader::install_signal_handler();
 
@@ -4764,5 +4771,88 @@ mod tests {
         assert!(requests[2]
             .request_line
             .starts_with("GET /download/item/throttled.bin "));
+    }
+
+    #[test]
+    fn build_http_client_succeeds_with_empty_and_configured_proxies() {
+        build_http_client(&downloader::ProxyConfig::default())
+            .expect("client should build without proxies");
+
+        let config = downloader::ProxyConfig::from_lookup(|name| match name {
+            "HTTP_PROXY" => Some("http://127.0.0.1:8080".to_string()),
+            "HTTPS_PROXY" => Some("https://127.0.0.1:8443".to_string()),
+            "ALL_PROXY" => Some("socks5h://127.0.0.1:1080".to_string()),
+            "NO_PROXY" => Some("localhost,127.0.0.1".to_string()),
+            _ => None,
+        })
+        .unwrap();
+
+        build_http_client(&config).expect("client should build with configured proxies");
+    }
+
+    #[test]
+    fn cli_does_not_accept_proxy_flag() {
+        let result = Cli::try_parse_from([
+            "ia-get",
+            "--proxy",
+            "http://127.0.0.1:8080",
+            "https://archive.org/details/deftributetozzap64",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn build_http_client_routes_fetch_xml_metadata_through_http_proxy() {
+        let expected_md5 = "0123456789abcdef0123456789abcdef".to_string();
+        let xml_body = build_xml_metadata(&[("proxied.bin", 1234, expected_md5.clone())]);
+
+        let proxy_server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+        ])
+        .await;
+        let proxy_url = format!("http://127.0.0.1:{}", proxy_server.addr.port());
+
+        let proxy_config = downloader::ProxyConfig::from_lookup(|name| match name {
+            "HTTP_PROXY" => Some(proxy_url.clone()),
+            _ => None,
+        })
+        .unwrap();
+        let client = build_http_client(&proxy_config).unwrap();
+
+        let xml_url =
+            Url::parse("http://archive.example/download/proxyitem/proxyitem_files.xml").unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 0,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let (files, base_url) =
+            fetch_xml_metadata_from_url(xml_url.clone(), &client, &spinner, None, &policy, &signal)
+                .await
+                .expect("fetch_xml_metadata_from_url should succeed via HTTP_PROXY");
+
+        assert_eq!(base_url, xml_url);
+        assert_eq!(files.files.len(), 1);
+        assert_eq!(files.files[0].name, "proxied.bin");
+        assert_eq!(files.files[0].size, Some(1234));
+        assert_eq!(files.files[0].md5.as_deref(), Some(expected_md5.as_str()));
+
+        let requests = proxy_server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].request_line,
+            "HEAD http://archive.example/download/proxyitem/proxyitem_files.xml HTTP/1.1"
+        );
+        assert_eq!(
+            requests[1].request_line,
+            "GET http://archive.example/download/proxyitem/proxyitem_files.xml HTTP/1.1"
+        );
+        assert_eq!(requests[0].header("User-Agent"), Some(USER_AGENT));
+        assert_eq!(requests[1].header("User-Agent"), Some(USER_AGENT));
     }
 }

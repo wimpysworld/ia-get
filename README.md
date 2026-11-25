@@ -145,6 +145,16 @@ ia-get --limit-rate 2M https://archive.org/details/<identifier>
 ia-get --limit-rate 1024 https://archive.org/download/<identifier>/<path>
 ```
 
+`ia-get` honours the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` environment variables automatically.
+Lowercase names take precedence over uppercase names, and scheme-specific variables (`HTTP_PROXY`, `HTTPS_PROXY`) take precedence over `ALL_PROXY`.
+Supported proxy schemes are `http://`, `https://`, `socks4://`, `socks4a://`, `socks5://`, and `socks5h://`.
+`ia-get` rejects malformed proxy URLs before any request starts and redacts embedded credentials in error messages.
+
+```shell
+HTTPS_PROXY=http://proxy.example:8080 ia-get https://archive.org/details/<identifier>
+ALL_PROXY=socks5h://127.0.0.1:1080 NO_PROXY=localhost,127.0.0.1 ia-get https://archive.org/details/<identifier>
+```
+
 ## Options
 
 | Option | Description |
@@ -179,6 +189,7 @@ So I co-authored `ia-get` to automate the download process.
 - ✅ Verifies existing local directories in read-only `--check` mode for file presence, leftover `.part` files, sizes, and MD5 hashes
 - 📋 Continues past individual file failures, prints a batch summary, and exits with a non-zero status on failed or interrupted runs
 - 🍪 Scopes cookies per request and redirect hop, checks live expiry, and rejects redirect loops and HTTPS-to-HTTP downgrades
+- 🌐 Honours `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` for HTTP, HTTPS, and SOCKS4/4a/5/5h proxies, and rejects malformed URLs
 - 🌱 Can be run multiple times to update existing downloads
 - 📊 Gets all the metadata for the archive
 - 📦️ Available for **Linux** 🐧 **macOS** 🍏 and **Windows** 🪟

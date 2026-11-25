@@ -98,6 +98,17 @@ pub enum IaGetError {
         reason: String,
     },
 
+    /// Proxy environment configuration is invalid
+    #[error("Invalid proxy configuration in {var} ('{value}'): {reason}")]
+    InvalidProxy {
+        /// Environment variable name holding the invalid proxy configuration
+        var: String,
+        /// Redacted proxy value from the environment variable
+        value: String,
+        /// Reason the proxy configuration is invalid
+        reason: String,
+    },
+
     /// Download was interrupted by the user
     #[error("Download interrupted by user")]
     Interrupted,

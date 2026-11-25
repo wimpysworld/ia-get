@@ -620,10 +620,256 @@ pub fn compute_retry_delay(
     compute_backoff_delay_with_sample(attempt, policy, random_u64())
 }
 
+/// Supported proxy URL schemes for environment-based proxy configuration.
+const ALLOWED_PROXY_SCHEMES: &[&str] = &["http", "https", "socks4", "socks4a", "socks5", "socks5h"];
+
+/// Validated HTTP, HTTPS, SOCKS, and bypass proxy configuration resolved from environment variables.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProxyConfig {
+    pub http_proxy: Option<Url>,
+    pub https_proxy: Option<Url>,
+    pub all_proxy: Option<Url>,
+    pub no_proxy: Option<String>,
+}
+
+fn is_rfc3986_scheme(scheme: &str) -> bool {
+    let mut bytes = scheme.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
+/// Redacts embedded credentials (`userinfo@`) from a proxy URL before including it in errors.
+fn redact_proxy_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let (scheme_prefix, rest) = match trimmed.find("://") {
+        Some(idx) if is_rfc3986_scheme(&trimmed[..idx]) => trimmed.split_at(idx + 3),
+        _ => ("", trimmed),
+    };
+
+    if let Some(at_idx) = rest.rfind('@') {
+        format!("{scheme_prefix}<redacted>@{}", &rest[at_idx + 1..])
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn invalid_proxy(var: &str, raw: &str, reason: impl Into<String>) -> IaGetError {
+    IaGetError::InvalidProxy {
+        var: var.to_string(),
+        value: redact_proxy_value(raw),
+        reason: reason.into(),
+    }
+}
+
+fn validate_parsed_proxy_url(var: &str, raw_for_error: &str, url: &Url) -> Result<()> {
+    let scheme = url.scheme();
+    if !ALLOWED_PROXY_SCHEMES.contains(&scheme) {
+        return Err(invalid_proxy(
+            var,
+            raw_for_error,
+            format!(
+                "unsupported scheme '{scheme}'; expected one of http, https, socks4, socks4a, socks5, socks5h"
+            ),
+        ));
+    }
+
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(invalid_proxy(
+            var,
+            raw_for_error,
+            "proxy URL must include a host",
+        ));
+    }
+
+    if url.port() == Some(0) {
+        return Err(invalid_proxy(
+            var,
+            raw_for_error,
+            "proxy port must not be 0",
+        ));
+    }
+
+    Ok(())
+}
+
+fn parse_proxy_url(var: &str, raw: &str) -> Result<Option<Url>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(invalid_proxy(
+            var,
+            trimmed,
+            "proxy URL must not contain whitespace or control characters",
+        ));
+    }
+
+    if !trimmed.contains("://") {
+        return Err(invalid_proxy(
+            var,
+            trimmed,
+            "proxy URL must include a scheme followed by '://'",
+        ));
+    }
+
+    let url = Url::parse(trimmed)
+        .map_err(|err| invalid_proxy(var, trimmed, format!("invalid URL ({err})")))?;
+
+    if !trimmed
+        .get(url.scheme().len()..)
+        .is_some_and(|rest| rest.starts_with("://"))
+    {
+        return Err(invalid_proxy(
+            var,
+            trimmed,
+            "proxy URL must include '://' immediately after the scheme",
+        ));
+    }
+
+    validate_parsed_proxy_url(var, trimmed, &url)?;
+    Ok(Some(url))
+}
+
+fn lookup_os_pair<F>(lookup: &F, lower: &str, upper: &str) -> Result<Option<(String, String)>>
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    let (var, raw) = if let Some(val) = lookup(lower) {
+        (lower, val)
+    } else if let Some(val) = lookup(upper) {
+        (upper, val)
+    } else {
+        return Ok(None);
+    };
+
+    let value = raw.into_string().map_err(|_| IaGetError::InvalidProxy {
+        var: var.to_string(),
+        value: "<non-UTF-8>".to_string(),
+        reason: "environment variable value is not valid UTF-8".to_string(),
+    })?;
+
+    Ok(Some((var.to_string(), value)))
+}
+
+impl ProxyConfig {
+    /// Resolves and validates proxy configuration from a string lookup function.
+    pub fn from_lookup<F>(lookup: F) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        Self::from_os_lookup(|name| lookup(name).map(OsString::from))
+    }
+
+    /// Resolves and validates proxy configuration from an OS-string lookup function.
+    pub fn from_os_lookup<F>(lookup: F) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<OsString>,
+    {
+        let http_proxy = lookup_os_pair(&lookup, "http_proxy", "HTTP_PROXY")?
+            .map(|(var, value)| parse_proxy_url(&var, &value))
+            .transpose()?
+            .flatten();
+
+        let https_proxy = lookup_os_pair(&lookup, "https_proxy", "HTTPS_PROXY")?
+            .map(|(var, value)| parse_proxy_url(&var, &value))
+            .transpose()?
+            .flatten();
+
+        let all_proxy = lookup_os_pair(&lookup, "all_proxy", "ALL_PROXY")?
+            .map(|(var, value)| parse_proxy_url(&var, &value))
+            .transpose()?
+            .flatten();
+
+        let no_proxy = lookup_os_pair(&lookup, "no_proxy", "NO_PROXY")?.and_then(|(_, value)| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+
+        Ok(Self {
+            http_proxy,
+            https_proxy,
+            all_proxy,
+            no_proxy,
+        })
+    }
+
+    /// Resolves and validates proxy configuration from the current process environment.
+    pub fn from_env() -> Result<Self> {
+        Self::from_os_lookup(|name| std::env::var_os(name))
+    }
+}
+
 /// Returns a [`reqwest::ClientBuilder`] with automatic redirect following disabled
 /// so redirects are handled manually with per-hop cookie resolution.
 pub fn http_client_builder() -> ClientBuilder {
     Client::builder().redirect(reqwest::redirect::Policy::none())
+}
+
+fn build_reqwest_proxy(
+    var: &str,
+    url: &Url,
+    no_proxy: Option<reqwest::NoProxy>,
+    ctor: fn(Url) -> std::result::Result<reqwest::Proxy, reqwest::Error>,
+) -> Result<reqwest::Proxy> {
+    validate_parsed_proxy_url(var, url.as_str(), url)?;
+    let proxy = ctor(url.clone())
+        .map_err(|err| invalid_proxy(var, url.as_str(), err.without_url().to_string()))?;
+    Ok(proxy.no_proxy(no_proxy))
+}
+
+/// Returns a [`reqwest::ClientBuilder`] with automatic redirect following disabled
+/// and explicit proxy rules configured from `proxy_config`.
+pub fn http_client_builder_with_proxy(proxy_config: &ProxyConfig) -> Result<ClientBuilder> {
+    let mut builder = http_client_builder().no_proxy();
+    let no_proxy = proxy_config
+        .no_proxy
+        .as_deref()
+        .and_then(reqwest::NoProxy::from_string);
+
+    if let Some(url) = &proxy_config.http_proxy {
+        builder = builder.proxy(build_reqwest_proxy(
+            "HTTP_PROXY",
+            url,
+            no_proxy.clone(),
+            reqwest::Proxy::http,
+        )?);
+    }
+
+    if let Some(url) = &proxy_config.https_proxy {
+        builder = builder.proxy(build_reqwest_proxy(
+            "HTTPS_PROXY",
+            url,
+            no_proxy.clone(),
+            reqwest::Proxy::https,
+        )?);
+    }
+
+    if let Some(url) = &proxy_config.all_proxy {
+        builder = builder.proxy(build_reqwest_proxy(
+            "ALL_PROXY",
+            url,
+            no_proxy,
+            reqwest::Proxy::all,
+        )?);
+    }
+
+    Ok(builder)
+}
+
+/// Returns a [`reqwest::ClientBuilder`] with automatic redirect following disabled
+/// and proxy configuration loaded from the current process environment.
+pub fn http_client_builder_from_env() -> Result<ClientBuilder> {
+    let proxy_config = ProxyConfig::from_env()?;
+    http_client_builder_with_proxy(&proxy_config)
 }
 
 fn is_redirect_status(status: StatusCode) -> bool {
@@ -7598,5 +7844,977 @@ mod tests {
         assert_eq!(saved, payload);
         assert_eq!(md5_hex(&saved), expected_md5);
         assert!(!temp_dir.part_path("resumed.bin").exists());
+    }
+
+    #[test]
+    fn proxy_config_prefers_lowercase_without_falling_back_to_uppercase() {
+        let lookup = |name: &str| match name {
+            "http_proxy" => Some(String::new()),
+            "HTTP_PROXY" => Some("http://upper-http.example.com:8080".to_string()),
+            "https_proxy" => Some("   ".to_string()),
+            "HTTPS_PROXY" => Some("https://upper-https.example.com:8443".to_string()),
+            "all_proxy" => Some("  socks5h://127.0.0.1:1080  ".to_string()),
+            "ALL_PROXY" => Some("socks5://upper-all.example.com:1080".to_string()),
+            "no_proxy" => Some(String::new()),
+            "NO_PROXY" => Some("archive.org".to_string()),
+            _ => None,
+        };
+
+        let config = ProxyConfig::from_lookup(lookup).unwrap();
+        assert_eq!(config.http_proxy, None);
+        assert_eq!(config.https_proxy, None);
+        assert_eq!(
+            config.all_proxy,
+            Some(Url::parse("socks5h://127.0.0.1:1080").unwrap())
+        );
+        assert_eq!(config.no_proxy, None);
+    }
+
+    #[test]
+    fn proxy_config_falls_back_to_uppercase_when_lowercase_unset() {
+        let lookup = |name: &str| match name {
+            "HTTP_PROXY" => Some("http://proxy.example.com:8080".to_string()),
+            "HTTPS_PROXY" => Some("https://secure.example.com:8443".to_string()),
+            "ALL_PROXY" => Some("socks5://127.0.0.1:1080".to_string()),
+            "NO_PROXY" => Some(" localhost, .archive.org ".to_string()),
+            _ => None,
+        };
+
+        let config = ProxyConfig::from_lookup(lookup).unwrap();
+        assert_eq!(
+            config.http_proxy,
+            Some(Url::parse("http://proxy.example.com:8080").unwrap())
+        );
+        assert_eq!(
+            config.https_proxy,
+            Some(Url::parse("https://secure.example.com:8443").unwrap())
+        );
+        assert_eq!(
+            config.all_proxy,
+            Some(Url::parse("socks5://127.0.0.1:1080").unwrap())
+        );
+        assert_eq!(config.no_proxy.as_deref(), Some("localhost, .archive.org"));
+    }
+
+    #[test]
+    fn proxy_config_accepts_all_supported_schemes_and_builds_client() {
+        for raw in [
+            "http://127.0.0.1:8080",
+            "https://127.0.0.1:8443",
+            "socks4://127.0.0.1:1080",
+            "socks4a://127.0.0.1:1080",
+            "socks5://127.0.0.1:1080",
+            "socks5h://user:pass@127.0.0.1:1080",
+        ] {
+            let config = ProxyConfig::from_lookup(|name| {
+                if name == "ALL_PROXY" {
+                    Some(raw.to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|err| panic!("expected '{raw}' to be valid, got {err}"));
+
+            http_client_builder_with_proxy(&config)
+                .unwrap_or_else(|err| panic!("builder failed for '{raw}': {err}"))
+                .build()
+                .unwrap_or_else(|err| panic!("client build failed for '{raw}': {err}"));
+        }
+    }
+
+    #[test]
+    fn proxy_config_rejects_invalid_urls_and_redacts_credentials() {
+        let invalid_cases = [
+            ("HTTP_PROXY", "proxy.example.com:8080", None),
+            (
+                "HTTP_PROXY",
+                "user:topsecret@proxy.example.com:8080",
+                Some("topsecret"),
+            ),
+            (
+                "HTTPS_PROXY",
+                "ftp://alice:s3cr3t@proxy.example.com:21",
+                Some("s3cr3t"),
+            ),
+            ("ALL_PROXY", "socks://127.0.0.1:1080", None),
+            (
+                "HTTP_PROXY",
+                "http://user:pw@proxy.example.com:0",
+                Some("pw"),
+            ),
+            ("ALL_PROXY", "socks5://:1080", None),
+            ("ALL_PROXY", "socks5:///path", None),
+            (
+                "HTTP_PROXY",
+                "http://user:hunter2@proxy host:8080",
+                Some("hunter2"),
+            ),
+            (
+                "HTTP_PROXY",
+                "http://user:hidden@proxy.example.com:8080\0",
+                Some("hidden"),
+            ),
+            ("HTTP_PROXY", "http:example.com/a://b", None),
+        ];
+
+        for (var_name, raw, secret) in invalid_cases {
+            let err = ProxyConfig::from_lookup(|name| {
+                if name == var_name {
+                    Some(raw.to_string())
+                } else {
+                    None
+                }
+            })
+            .expect_err(&format!("expected '{raw}' to fail"));
+
+            let rendered = err.to_string();
+            match &err {
+                IaGetError::InvalidProxy { var, value, .. } => {
+                    assert_eq!(var, var_name);
+                    if let Some(secret) = secret {
+                        assert!(!value.contains(secret), "secret leaked in value: {value}");
+                        assert!(
+                            value.contains("<redacted>@"),
+                            "expected redaction marker in value: {value}"
+                        );
+                        assert!(
+                            !rendered.contains(secret),
+                            "secret leaked in Display: {rendered}"
+                        );
+                    }
+                }
+                other => panic!("expected InvalidProxy for '{raw}', got {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proxy_config_rejects_non_utf8_os_value() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let err = ProxyConfig::from_os_lookup(|name| match name {
+            "http_proxy" => Some(OsString::from_vec(vec![0xff, 0xfe])),
+            "HTTP_PROXY" => Some(OsString::from("http://127.0.0.1:8080")),
+            _ => None,
+        })
+        .expect_err("non-UTF-8 http_proxy must fail without falling back");
+
+        match err {
+            IaGetError::InvalidProxy { var, value, .. } => {
+                assert_eq!(var, "http_proxy");
+                assert_eq!(value, "<non-UTF-8>");
+            }
+            other => panic!("expected InvalidProxy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proxy_config_empty_and_whitespace_only_env_produces_direct_client() {
+        let empty = ProxyConfig::from_lookup(|_| None).unwrap();
+        assert_eq!(empty, ProxyConfig::default());
+        http_client_builder_with_proxy(&empty)
+            .expect("empty proxy config should build client builder")
+            .build()
+            .expect("empty proxy config should build direct client");
+
+        let whitespace_only = ProxyConfig::from_lookup(|name| match name {
+            "HTTP_PROXY" => Some(String::new()),
+            "HTTPS_PROXY" => Some("   ".to_string()),
+            "ALL_PROXY" => Some("\t \n".to_string()),
+            "NO_PROXY" => Some("  \t ".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(whitespace_only, ProxyConfig::default());
+        http_client_builder_with_proxy(&whitespace_only)
+            .expect("whitespace-only proxy config should build client builder")
+            .build()
+            .expect("whitespace-only proxy config should build direct client");
+    }
+
+    #[test]
+    fn proxy_config_non_empty_lowercase_overrides_uppercase_for_all_vars() {
+        let config = ProxyConfig::from_lookup(|name| match name {
+            "http_proxy" => Some("http://lower-http.example:8080".to_string()),
+            "HTTP_PROXY" => Some("http://upper-http.example:8080".to_string()),
+            "https_proxy" => Some("https://lower-https.example:8443".to_string()),
+            "HTTPS_PROXY" => Some("https://upper-https.example:8443".to_string()),
+            "all_proxy" => Some("socks5://lower-all.example:1080".to_string()),
+            "ALL_PROXY" => Some("socks5://upper-all.example:1080".to_string()),
+            "no_proxy" => Some("127.0.0.1,localhost".to_string()),
+            "NO_PROXY" => Some("archive.org".to_string()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            config.http_proxy,
+            Some(Url::parse("http://lower-http.example:8080").unwrap())
+        );
+        assert_eq!(
+            config.https_proxy,
+            Some(Url::parse("https://lower-https.example:8443").unwrap())
+        );
+        assert_eq!(
+            config.all_proxy,
+            Some(Url::parse("socks5://lower-all.example:1080").unwrap())
+        );
+        assert_eq!(config.no_proxy.as_deref(), Some("127.0.0.1,localhost"));
+    }
+
+    #[test]
+    fn proxy_config_accepts_case_insensitive_schemes_ipv6_credentials_and_omitted_socks_port() {
+        let valid_cases = [
+            ("HTTP://127.0.0.1:8080", "http"),
+            ("HTTPS://127.0.0.1:8443", "https"),
+            ("SOCKS4://127.0.0.1:1080", "socks4"),
+            ("SOCKS4A://127.0.0.1:1080", "socks4a"),
+            ("SOCKS5://127.0.0.1:1080", "socks5"),
+            ("SOCKS5H://127.0.0.1:1080", "socks5h"),
+            ("http://[::1]:8080", "http"),
+            ("https://[::1]:8443", "https"),
+            ("socks5://[::1]:1080", "socks5"),
+            ("socks5h://[::1]:1080", "socks5h"),
+            ("socks4://127.0.0.1", "socks4"),
+            ("socks4a://proxy.example", "socks4a"),
+            ("socks5://127.0.0.1", "socks5"),
+            ("socks5h://proxy.example", "socks5h"),
+            ("http://alice:secret@127.0.0.1:8080", "http"),
+            ("https://token@127.0.0.1:8443", "https"),
+            ("socks5://bob:pw@[::1]:1080", "socks5"),
+        ];
+
+        for (raw, expected_scheme) in valid_cases {
+            let config = ProxyConfig::from_lookup(|name| {
+                if name == "ALL_PROXY" {
+                    Some(raw.to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|err| panic!("expected '{raw}' to be valid, got {err}"));
+
+            let parsed = config.all_proxy.as_ref().expect("all_proxy should be set");
+            assert_eq!(parsed.scheme(), expected_scheme);
+
+            http_client_builder_with_proxy(&config)
+                .unwrap_or_else(|err| panic!("builder failed for '{raw}': {err}"))
+                .build()
+                .unwrap_or_else(|err| panic!("client build failed for '{raw}': {err}"));
+        }
+    }
+
+    #[test]
+    fn proxy_config_rejects_additional_malformed_urls_and_redacts_complex_credentials() {
+        let invalid_cases = [
+            ("HTTP_PROXY", "not-a-url", None),
+            ("HTTP_PROXY", "proxy.local:8080", None),
+            ("HTTP_PROXY", "http://", None),
+            ("HTTP_PROXY", "http://:8080", None),
+            ("ALL_PROXY", "socks5://", None),
+            ("HTTP_PROXY", "http://127.0.0.1:99999", None),
+            ("HTTPS_PROXY", "https://127.0.0.1:abc", None),
+            ("ALL_PROXY", "socks5://127.0.0.1:0", None),
+            ("HTTP_PROXY", "://bad", None),
+            ("ALL_PROXY", "socks5://127.0.0.1\t:1080", None),
+            (
+                "HTTP_PROXY",
+                "http://user:p@ssword@proxy.local:99999",
+                Some("p@ssword"),
+            ),
+            (
+                "ALL_PROXY",
+                "socks5://alice:supersecret@:1080",
+                Some("supersecret"),
+            ),
+        ];
+
+        for (var_name, raw, secret) in invalid_cases {
+            let err = ProxyConfig::from_lookup(|name| {
+                if name == var_name {
+                    Some(raw.to_string())
+                } else {
+                    None
+                }
+            })
+            .expect_err(&format!("expected '{raw}' to fail"));
+
+            let rendered = err.to_string();
+            match &err {
+                IaGetError::InvalidProxy { var, value, .. } => {
+                    assert_eq!(var, var_name);
+                    if let Some(secret) = secret {
+                        assert!(!value.contains(secret), "secret leaked in value: {value}");
+                        assert!(
+                            value.contains("<redacted>@"),
+                            "expected redaction marker in value: {value}"
+                        );
+                        assert!(
+                            !rendered.contains(secret),
+                            "secret leaked in Display: {rendered}"
+                        );
+                    }
+                }
+                other => panic!("expected InvalidProxy for '{raw}', got {other:?}"),
+            }
+        }
+
+        // Direct builder validation also rejects unsupported schemes and redacts credentials.
+        let direct_invalid = ProxyConfig {
+            http_proxy: Some(Url::parse("ftp://alice:s3cr3t@proxy.local:21").unwrap()),
+            ..ProxyConfig::default()
+        };
+        let err = http_client_builder_with_proxy(&direct_invalid)
+            .expect_err("direct invalid scheme must be rejected");
+        let rendered = err.to_string();
+        match err {
+            IaGetError::InvalidProxy { var, value, .. } => {
+                assert_eq!(var, "HTTP_PROXY");
+                assert!(value.contains("<redacted>@"), "unexpected value: {value}");
+                assert!(!value.contains("s3cr3t"), "secret leaked in value: {value}");
+                assert!(
+                    !rendered.contains("s3cr3t"),
+                    "secret leaked in Display: {rendered}"
+                );
+            }
+            other => panic!("expected InvalidProxy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proxy_config_redacts_credentials_with_delimiters_and_invalid_scheme_prefixes() {
+        let cases = [
+            (
+                "http://alice:p/ass@proxy.local:8080",
+                "http://<redacted>@proxy.local:8080",
+            ),
+            (
+                "http://alice:p?w@proxy.local:8080",
+                "http://<redacted>@proxy.local:8080",
+            ),
+            (
+                "http://alice:p#w@proxy.local:8080",
+                "http://<redacted>@proxy.local:8080",
+            ),
+            (
+                "alice:p/ass@proxy.local:8080",
+                "<redacted>@proxy.local:8080",
+            ),
+            (
+                "http:alice:secret@proxy.local/a://b",
+                "<redacted>@proxy.local/a://b",
+            ),
+        ];
+        let forbidden = ["alice", "p/ass", "p?w", "p#w", "secret"];
+
+        for (raw, expected_redacted) in cases {
+            let err = ProxyConfig::from_lookup(|name| {
+                if name == "HTTP_PROXY" {
+                    Some(raw.to_string())
+                } else {
+                    None
+                }
+            })
+            .expect_err(&format!("expected '{raw}' to fail"));
+
+            let rendered = err.to_string();
+            match &err {
+                IaGetError::InvalidProxy { var, value, .. } => {
+                    assert_eq!(var, "HTTP_PROXY");
+                    assert_eq!(value, expected_redacted);
+                    assert!(
+                        value.contains("<redacted>@"),
+                        "expected redaction marker in value for '{raw}': {value}"
+                    );
+                    assert!(
+                        rendered.contains("<redacted>@"),
+                        "expected redaction marker in Display for '{raw}': {rendered}"
+                    );
+                    for needle in forbidden {
+                        assert!(
+                            !value.contains(needle),
+                            "credential fragment '{needle}' leaked in value for '{raw}': {value}"
+                        );
+                        assert!(
+                            !rendered.contains(needle),
+                            "credential fragment '{needle}' leaked in Display for '{raw}': {rendered}"
+                        );
+                    }
+                }
+                other => panic!("expected InvalidProxy for '{raw}', got {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proxy_config_rejects_non_utf8_uppercase_and_no_proxy_os_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let all_err = ProxyConfig::from_os_lookup(|name| match name {
+            "ALL_PROXY" => Some(OsString::from_vec(vec![0xff, 0x80])),
+            _ => None,
+        })
+        .expect_err("non-UTF-8 ALL_PROXY must fail");
+        match all_err {
+            IaGetError::InvalidProxy { var, value, .. } => {
+                assert_eq!(var, "ALL_PROXY");
+                assert_eq!(value, "<non-UTF-8>");
+            }
+            other => panic!("expected InvalidProxy, got {other:?}"),
+        }
+
+        let no_proxy_err = ProxyConfig::from_os_lookup(|name| match name {
+            "NO_PROXY" => Some(OsString::from_vec(vec![0xfe, 0xff])),
+            _ => None,
+        })
+        .expect_err("non-UTF-8 NO_PROXY must fail");
+        match no_proxy_err {
+            IaGetError::InvalidProxy { var, value, .. } => {
+                assert_eq!(var, "NO_PROXY");
+                assert_eq!(value, "<non-UTF-8>");
+            }
+            other => panic!("expected InvalidProxy, got {other:?}"),
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum MockSocks5Target {
+        Ipv4([u8; 4], u16),
+        Domain(String, u16),
+        Ipv6([u8; 16], u16),
+    }
+
+    #[derive(Debug, Clone)]
+    struct CapturedSocks5Connection {
+        target: MockSocks5Target,
+        request: CapturedRequest,
+    }
+
+    struct MockSocks5Server {
+        addr: std::net::SocketAddr,
+        connections: Arc<Mutex<Vec<CapturedSocks5Connection>>>,
+        handle: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl MockSocks5Server {
+        async fn start(responses: Vec<MockResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock SOCKS5 server");
+            let addr = listener.local_addr().expect("mock SOCKS5 local_addr");
+            let connections = Arc::new(Mutex::new(Vec::new()));
+            let connections_clone = Arc::clone(&connections);
+
+            let handle = tokio::spawn(async move {
+                for response in responses {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let _ = socket.set_nodelay(true);
+
+                    let Some(target) = socks5_handshake(&mut socket).await else {
+                        continue;
+                    };
+                    let Some(request) = read_http_request(&mut socket).await else {
+                        continue;
+                    };
+                    connections_clone
+                        .lock()
+                        .await
+                        .push(CapturedSocks5Connection { target, request });
+                    write_mock_response(&mut socket, response).await;
+                }
+            });
+
+            Self {
+                addr,
+                connections,
+                handle: Some(handle),
+            }
+        }
+
+        fn proxy_url(&self, scheme: &str) -> String {
+            format!("{scheme}://127.0.0.1:{}", self.addr.port())
+        }
+
+        async fn finish(mut self) -> Vec<CapturedSocks5Connection> {
+            if let Some(handle) = self.handle.take() {
+                let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            }
+            self.connections.lock().await.clone()
+        }
+
+        async fn abort_and_collect(mut self) -> Vec<CapturedSocks5Connection> {
+            if let Some(handle) = self.handle.take() {
+                handle.abort();
+                let _ = handle.await;
+            }
+            self.connections.lock().await.clone()
+        }
+    }
+
+    impl Drop for MockSocks5Server {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.abort();
+            }
+        }
+    }
+
+    async fn socks5_handshake(socket: &mut TcpStream) -> Option<MockSocks5Target> {
+        // RFC 1928 greeting: VER=0x05, NMETHODS, METHODS[NMETHODS]
+        let mut greeting = [0u8; 2];
+        socket.read_exact(&mut greeting).await.ok()?;
+        if greeting[0] != 0x05 {
+            return None;
+        }
+        let mut methods = vec![0u8; usize::from(greeting[1])];
+        socket.read_exact(&mut methods).await.ok()?;
+        // Select NO AUTHENTICATION REQUIRED (0x00)
+        socket.write_all(&[0x05, 0x00]).await.ok()?;
+        socket.flush().await.ok()?;
+
+        // RFC 1928 request: VER=0x05, CMD=0x01 (CONNECT), RSV=0x00, ATYP
+        let mut req_head = [0u8; 4];
+        socket.read_exact(&mut req_head).await.ok()?;
+        if req_head[0] != 0x05 || req_head[1] != 0x01 || req_head[2] != 0x00 {
+            return None;
+        }
+
+        let target = match req_head[3] {
+            0x01 => {
+                let mut ipv4 = [0u8; 4];
+                socket.read_exact(&mut ipv4).await.ok()?;
+                let mut port_bytes = [0u8; 2];
+                socket.read_exact(&mut port_bytes).await.ok()?;
+                MockSocks5Target::Ipv4(ipv4, u16::from_be_bytes(port_bytes))
+            }
+            0x03 => {
+                let mut len = [0u8; 1];
+                socket.read_exact(&mut len).await.ok()?;
+                let mut domain = vec![0u8; usize::from(len[0])];
+                socket.read_exact(&mut domain).await.ok()?;
+                let mut port_bytes = [0u8; 2];
+                socket.read_exact(&mut port_bytes).await.ok()?;
+                let domain_str = String::from_utf8(domain).ok()?;
+                MockSocks5Target::Domain(domain_str, u16::from_be_bytes(port_bytes))
+            }
+            0x04 => {
+                let mut ipv6 = [0u8; 16];
+                socket.read_exact(&mut ipv6).await.ok()?;
+                let mut port_bytes = [0u8; 2];
+                socket.read_exact(&mut port_bytes).await.ok()?;
+                MockSocks5Target::Ipv6(ipv6, u16::from_be_bytes(port_bytes))
+            }
+            _ => return None,
+        };
+
+        // Reply: VER=0x05, REP=0x00 (succeeded), RSV=0x00, ATYP=0x01 (IPv4), 127.0.0.1:0
+        socket
+            .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
+            .await
+            .ok()?;
+        socket.flush().await.ok()?;
+
+        Some(target)
+    }
+
+    #[tokio::test]
+    async fn proxy_http_proxy_routes_download_and_verifies_md5() {
+        let payload = b"downloaded through local mock HTTP proxy".to_vec();
+        let expected_md5 = md5_hex(&payload);
+        let proxy_server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
+        let proxy_url = format!("http://127.0.0.1:{}", proxy_server.addr.port());
+
+        let config = ProxyConfig::from_lookup(|name| match name {
+            "HTTP_PROXY" => Some(proxy_url.clone()),
+            _ => None,
+        })
+        .unwrap();
+        let client = http_client_builder_with_proxy(&config)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let temp_dir = TempTestDir::new("http-proxy-route");
+        let signal = ShutdownSignal::new();
+        let outcome = download_single_file(
+            &client,
+            &temp_dir.path,
+            "http://archive.example/download/item/test.bin",
+            "test.bin",
+            Some(&expected_md5),
+            &signal,
+            None,
+        )
+        .await
+        .expect("HTTP_PROXY download should succeed");
+
+        assert_eq!(outcome, FileOutcome::Downloaded);
+        let requests = proxy_server.finish().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].request_line,
+            "GET http://archive.example/download/item/test.bin HTTP/1.1"
+        );
+
+        let saved = fs::read(temp_dir.join("test.bin")).unwrap();
+        assert_eq!(saved, payload);
+        assert_eq!(md5_hex(&saved), expected_md5);
+        assert!(!temp_dir.part_path("test.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn proxy_all_proxy_fallback_and_http_proxy_precedence() {
+        // Fallback: ALL_PROXY handles HTTP when HTTP_PROXY is unset.
+        {
+            let payload = b"served via ALL_PROXY fallback".to_vec();
+            let expected_md5 = md5_hex(&payload);
+            let all_proxy_server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
+            let all_proxy_url = format!("http://127.0.0.1:{}", all_proxy_server.addr.port());
+
+            let config = ProxyConfig::from_lookup(|name| match name {
+                "ALL_PROXY" => Some(all_proxy_url.clone()),
+                _ => None,
+            })
+            .unwrap();
+            let client = http_client_builder_with_proxy(&config)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let temp_dir = TempTestDir::new("all-proxy-fallback");
+            let signal = ShutdownSignal::new();
+            let outcome = download_single_file(
+                &client,
+                &temp_dir.path,
+                "http://archive.example/download/item/fallback.bin",
+                "fallback.bin",
+                Some(&expected_md5),
+                &signal,
+                None,
+            )
+            .await
+            .expect("ALL_PROXY fallback download should succeed");
+
+            assert_eq!(outcome, FileOutcome::Downloaded);
+            let requests = all_proxy_server.finish().await;
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                requests[0].request_line,
+                "GET http://archive.example/download/item/fallback.bin HTTP/1.1"
+            );
+            assert_eq!(fs::read(temp_dir.join("fallback.bin")).unwrap(), payload);
+        }
+
+        // Precedence: HTTP_PROXY overrides ALL_PROXY when both are set.
+        {
+            let payload = b"served via HTTP_PROXY precedence".to_vec();
+            let expected_md5 = md5_hex(&payload);
+            let http_proxy_server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
+            let all_proxy_server = MockServer::start(vec![MockResponse::ok(b"wrong-proxy")]).await;
+            let http_proxy_url = format!("http://127.0.0.1:{}", http_proxy_server.addr.port());
+            let all_proxy_url = format!("http://127.0.0.1:{}", all_proxy_server.addr.port());
+
+            let config = ProxyConfig::from_lookup(|name| match name {
+                "HTTP_PROXY" => Some(http_proxy_url.clone()),
+                "ALL_PROXY" => Some(all_proxy_url.clone()),
+                _ => None,
+            })
+            .unwrap();
+            let client = http_client_builder_with_proxy(&config)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let temp_dir = TempTestDir::new("http-proxy-precedence");
+            let signal = ShutdownSignal::new();
+            let outcome = download_single_file(
+                &client,
+                &temp_dir.path,
+                "http://archive.example/download/item/precedence.bin",
+                "precedence.bin",
+                Some(&expected_md5),
+                &signal,
+                None,
+            )
+            .await
+            .expect("HTTP_PROXY precedence download should succeed");
+
+            assert_eq!(outcome, FileOutcome::Downloaded);
+            let http_requests = http_proxy_server.finish().await;
+            let all_requests = all_proxy_server.abort_and_collect().await;
+            assert_eq!(http_requests.len(), 1);
+            assert_eq!(
+                http_requests[0].request_line,
+                "GET http://archive.example/download/item/precedence.bin HTTP/1.1"
+            );
+            assert!(
+                all_requests.is_empty(),
+                "ALL_PROXY must not be contacted when HTTP_PROXY matches"
+            );
+            assert_eq!(fs::read(temp_dir.join("precedence.bin")).unwrap(), payload);
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_https_proxy_sends_connect_without_external_network() {
+        let proxy_server = MockServer::start(vec![MockResponse::with_headers(
+            "502 Bad Gateway",
+            vec![("Content-Length", "0".to_string())],
+            b"",
+        )])
+        .await;
+        let proxy_url = format!("http://127.0.0.1:{}", proxy_server.addr.port());
+
+        let config = ProxyConfig::from_lookup(|name| match name {
+            "HTTPS_PROXY" => Some(proxy_url.clone()),
+            _ => None,
+        })
+        .unwrap();
+        let client = http_client_builder_with_proxy(&config)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let temp_dir = TempTestDir::new("https-proxy-connect");
+        let signal = ShutdownSignal::new();
+        let policy = RetryPolicy {
+            max_retries: 0,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let result = download_single_file_with_policy(
+            &client,
+            &temp_dir.path,
+            "https://archive.example/download/item/test.bin",
+            "test.bin",
+            None,
+            &signal,
+            None,
+            &policy,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "CONNECT rejection with 502 Bad Gateway should fail the download"
+        );
+
+        let requests = proxy_server.finish().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].request_line,
+            "CONNECT archive.example:443 HTTP/1.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_no_proxy_bypasses_http_proxy_for_matching_host() {
+        let payload = b"served directly from local mock origin".to_vec();
+        let expected_md5 = md5_hex(&payload);
+        let origin_server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
+        let proxy_server = MockServer::start(vec![MockResponse::ok(b"wrong-from-proxy")]).await;
+        let proxy_url = format!("http://127.0.0.1:{}", proxy_server.addr.port());
+
+        let config = ProxyConfig::from_lookup(|name| match name {
+            "HTTP_PROXY" => Some(proxy_url.clone()),
+            "NO_PROXY" => Some("127.0.0.1".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        let client = http_client_builder_with_proxy(&config)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let temp_dir = TempTestDir::new("no-proxy-http-bypass");
+        let signal = ShutdownSignal::new();
+        let origin_url = origin_server.url("/direct.bin");
+        let outcome = download_single_file(
+            &client,
+            &temp_dir.path,
+            &origin_url,
+            "direct.bin",
+            Some(&expected_md5),
+            &signal,
+            None,
+        )
+        .await
+        .expect("NO_PROXY bypassed download should succeed");
+
+        assert_eq!(outcome, FileOutcome::Downloaded);
+        let origin_requests = origin_server.finish().await;
+        let proxy_requests = proxy_server.abort_and_collect().await;
+        assert_eq!(origin_requests.len(), 1);
+        assert_eq!(origin_requests[0].request_line, "GET /direct.bin HTTP/1.1");
+        assert!(
+            proxy_requests.is_empty(),
+            "HTTP proxy must receive 0 requests when bypassed by NO_PROXY"
+        );
+
+        let saved = fs::read(temp_dir.join("direct.bin")).unwrap();
+        assert_eq!(saved, payload);
+        assert_eq!(md5_hex(&saved), expected_md5);
+        assert!(!temp_dir.part_path("direct.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn proxy_all_proxy_socks5_tunnels_download_and_verifies_md5() {
+        let payload = b"tunneled through local mock SOCKS5 proxy".to_vec();
+        let expected_md5 = md5_hex(&payload);
+        let socks_server = MockSocks5Server::start(vec![MockResponse::ok(&payload)]).await;
+        let socks_url = socks_server.proxy_url("socks5");
+
+        let config = ProxyConfig::from_lookup(|name| match name {
+            "ALL_PROXY" => Some(socks_url.clone()),
+            _ => None,
+        })
+        .unwrap();
+        let client = http_client_builder_with_proxy(&config)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let temp_dir = TempTestDir::new("socks5-tunnel");
+        let signal = ShutdownSignal::new();
+        let outcome = download_single_file(
+            &client,
+            &temp_dir.path,
+            "http://127.0.0.1:80/socks5.bin",
+            "socks5.bin",
+            Some(&expected_md5),
+            &signal,
+            None,
+        )
+        .await
+        .expect("SOCKS5 tunneled download should succeed");
+
+        assert_eq!(outcome, FileOutcome::Downloaded);
+        let connections = socks_server.finish().await;
+        assert_eq!(connections.len(), 1);
+        assert_eq!(
+            connections[0].target,
+            MockSocks5Target::Ipv4([127, 0, 0, 1], 80)
+        );
+        assert_eq!(
+            connections[0].request.request_line,
+            "GET /socks5.bin HTTP/1.1"
+        );
+
+        let saved = fs::read(temp_dir.join("socks5.bin")).unwrap();
+        assert_eq!(saved, payload);
+        assert_eq!(md5_hex(&saved), expected_md5);
+        assert!(!temp_dir.part_path("socks5.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn proxy_all_proxy_socks5h_sends_domain_for_remote_dns_and_verifies_md5() {
+        let payload = b"tunneled through local mock SOCKS5H proxy with remote DNS".to_vec();
+        let expected_md5 = md5_hex(&payload);
+        let socks_server = MockSocks5Server::start(vec![MockResponse::ok(&payload)]).await;
+        let socks_url = socks_server.proxy_url("socks5h");
+
+        let config = ProxyConfig::from_lookup(|name| match name {
+            "ALL_PROXY" => Some(socks_url.clone()),
+            _ => None,
+        })
+        .unwrap();
+        let client = http_client_builder_with_proxy(&config)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let temp_dir = TempTestDir::new("socks5h-tunnel");
+        let signal = ShutdownSignal::new();
+        let outcome = download_single_file(
+            &client,
+            &temp_dir.path,
+            "http://archive.example/socks5h.bin",
+            "socks5h.bin",
+            Some(&expected_md5),
+            &signal,
+            None,
+        )
+        .await
+        .expect("SOCKS5H tunneled download should succeed without local DNS");
+
+        assert_eq!(outcome, FileOutcome::Downloaded);
+        let connections = socks_server.finish().await;
+        assert_eq!(connections.len(), 1);
+        assert_eq!(
+            connections[0].target,
+            MockSocks5Target::Domain("archive.example".to_string(), 80)
+        );
+        assert_eq!(
+            connections[0].request.request_line,
+            "GET /socks5h.bin HTTP/1.1"
+        );
+        assert_eq!(
+            connections[0].request.header("Host"),
+            Some("archive.example")
+        );
+
+        let saved = fs::read(temp_dir.join("socks5h.bin")).unwrap();
+        assert_eq!(saved, payload);
+        assert_eq!(md5_hex(&saved), expected_md5);
+        assert!(!temp_dir.part_path("socks5h.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn proxy_no_proxy_bypasses_socks5_all_proxy() {
+        let payload = b"origin payload bypassing SOCKS5 proxy".to_vec();
+        let expected_md5 = md5_hex(&payload);
+        let origin_server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
+        let socks_server =
+            MockSocks5Server::start(vec![MockResponse::ok(b"wrong-from-socks5")]).await;
+        let socks_url = socks_server.proxy_url("socks5");
+
+        let config = ProxyConfig::from_lookup(|name| match name {
+            "ALL_PROXY" => Some(socks_url.clone()),
+            "NO_PROXY" => Some("127.0.0.1".to_string()),
+            _ => None,
+        })
+        .unwrap();
+        let client = http_client_builder_with_proxy(&config)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let temp_dir = TempTestDir::new("no-proxy-socks5-bypass");
+        let signal = ShutdownSignal::new();
+        let origin_url = origin_server.url("/bypass-socks.bin");
+        let outcome = download_single_file(
+            &client,
+            &temp_dir.path,
+            &origin_url,
+            "bypass-socks.bin",
+            Some(&expected_md5),
+            &signal,
+            None,
+        )
+        .await
+        .expect("NO_PROXY bypassed SOCKS5 download should succeed");
+
+        assert_eq!(outcome, FileOutcome::Downloaded);
+        let origin_requests = origin_server.finish().await;
+        let socks_connections = socks_server.abort_and_collect().await;
+        assert_eq!(origin_requests.len(), 1);
+        assert_eq!(
+            origin_requests[0].request_line,
+            "GET /bypass-socks.bin HTTP/1.1"
+        );
+        assert!(
+            socks_connections.is_empty(),
+            "SOCKS5 proxy must receive 0 connections when bypassed by NO_PROXY"
+        );
+
+        let saved = fs::read(temp_dir.join("bypass-socks.bin")).unwrap();
+        assert_eq!(saved, payload);
+        assert_eq!(md5_hex(&saved), expected_md5);
+        assert!(!temp_dir.part_path("bypass-socks.bin").exists());
     }
 }
