@@ -59,6 +59,11 @@ For cross-platform safety, `ia-get` sanitises invalid characters, dot segments (
 It also renames reserved device names on Windows (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `CLOCK$`, `COM0`-`COM9`, `COM¹`-`COM³`, `LPT0`-`LPT9`, and `LPT¹`-`LPT³`).
 This check ignores case and matches reserved names with or without extensions, even with trailing spaces or dots before an extension.
 
+Before any file transfer starts, `ia-get` checks free space on the destination volume against the remaining known bytes of the selected files.
+This check deducts verified local files and resumable `.part` files, and ignores entries with unknown sizes.
+When free space is insufficient, `ia-get` stops before any file request and prints an error with the required and available space.
+`--list` and `--check` skip this check.
+
 For both metadata fetches and file downloads, `ia-get` retries transient transport errors and HTTP `408`, `429`, and `5xx` responses up to 3 times.
 Retries use exponential backoff with jitter, or honour `Retry-After` headers (delta-seconds or HTTP-date) capped at 60 seconds.
 Other `4xx` errors fail immediately, and Ctrl+C interrupts retry waits promptly.
@@ -153,6 +158,7 @@ So I co-authored `ia-get` to automate the download process.
 - 🔽 Retries transient errors on metadata and file downloads with exponential backoff, jitter, `Retry-After` support, and prompt Ctrl+C interruption
 - 🌳 Preserves the original directory structure
 - 📁 Saves downloads to a chosen directory with `-o`/`--output-dir <DIR>` and creates missing directories automatically
+- 💾 Checks free disk space on the destination volume before downloads start, deducts verified files and resumable `.part` files, and ignores unknown sizes
 - 🛡️ Keeps downloads inside the target output directory, refuses symlinks and non-regular files, and sanitises unsafe paths and reserved device names on Windows
 - 🔄 Stages downloads in `.part` files, resumes partial transfers, and validates HTTP range responses
 - 🔏 Verifies MD5 hashes and renames `.part` files atomically only after verification succeeds

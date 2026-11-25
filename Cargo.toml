@@ -25,6 +25,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 ctrlc = "3.5.2"
 colored = "3.0.0"
 globset = "0.4"
+fs4 = "0.13"
 
 [profile.release]
 strip = true  # Automatically strip symbols from the binary.

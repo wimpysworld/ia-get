@@ -11,6 +11,7 @@ use clap::Parser;
 use colored::*;
 use ia_get::archive_metadata::{parse_xml_files, XmlFiles};
 use ia_get::constants::USER_AGENT;
+use ia_get::disk_space;
 use ia_get::downloader;
 use ia_get::utils::{
     create_spinner, format_size, parse_archive_url, percent_decode_utf8, sanitize_filename,
@@ -351,6 +352,97 @@ fn resolve_output_dir(output_dir: Option<&Path>) -> &Path {
     output_dir.unwrap_or_else(|| Path::new("."))
 }
 
+/// Sanitised download plan built from selected archive metadata entries.
+struct DownloadPlan {
+    items: Vec<disk_space::PlannedDownload>,
+    sanitized: Vec<(String, String)>,
+}
+
+/// Builds a sanitised download plan from selected archive metadata entries.
+fn plan_downloads(files: XmlFiles, base_url: &Url) -> DownloadPlan {
+    let mut items = Vec::with_capacity(files.files.len());
+    let mut sanitized = Vec::new();
+
+    for file in files.files {
+        let absolute_url = build_file_download_url(base_url, &file.name);
+        let (sanitized_name, was_modified) = sanitize_filename(&file.name);
+
+        if was_modified {
+            sanitized.push((file.name, sanitized_name.clone()));
+        }
+
+        items.push(disk_space::PlannedDownload {
+            url: absolute_url.to_string(),
+            file_path: sanitized_name,
+            expected_md5: file.md5,
+            expected_size: file.size,
+        });
+    }
+
+    DownloadPlan { items, sanitized }
+}
+
+/// Prints per-file warnings and a summary when filenames were sanitised.
+fn print_sanitization_warnings(sanitized: &[(String, String)]) {
+    if sanitized.is_empty() {
+        return;
+    }
+
+    for (original_name, sanitized_name) in sanitized {
+        println!(
+            "{} {} {} → {}",
+            "⚠".yellow().bold(),
+            "Sanitized:".yellow(),
+            original_name.dimmed(),
+            sanitized_name.bold()
+        );
+    }
+
+    let sanitized_count = sanitized.len();
+    println!(
+        "\n{} {} {} file{} for filesystem compatibility",
+        "✓".green().bold(),
+        "Sanitized".bold(),
+        sanitized_count.to_string().bold(),
+        if sanitized_count == 1 { "" } else { "s" }
+    );
+}
+
+/// Runs the pre-download disk-space check and, when it succeeds, downloads all planned files.
+async fn run_planned_downloads_with_space_check<F>(
+    client: &Client,
+    output_dir: &Path,
+    plan: DownloadPlan,
+    cookie_source: Option<&CookieSource>,
+    policy: &downloader::RetryPolicy,
+    signal: &downloader::ShutdownSignal,
+    check_space: F,
+) -> Result<downloader::BatchSummary>
+where
+    F: FnOnce(&Path, &[disk_space::PlannedDownload], &downloader::ShutdownSignal) -> Result<()>,
+{
+    check_space(output_dir, &plan.items, signal)?;
+
+    print_sanitization_warnings(&plan.sanitized);
+
+    let total_files = plan.items.len();
+    let download_data = plan
+        .items
+        .into_iter()
+        .map(|item| (item.url, item.file_path, item.expected_md5));
+
+    downloader::download_files_in_dir(
+        client,
+        output_dir,
+        download_data,
+        total_files,
+        cookie_source,
+        policy,
+        signal,
+    )
+    .await
+}
+
 /// Finalises the metadata phase by listing files, validating a check directory,
 /// or preparing the output directory.
 fn finalize_metadata_phase(
@@ -525,66 +617,43 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Successfully finished initialization
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .template(&format!(
-                "{} {} to download {} {file_label} from archive.org {}",
-                "✔".green().bold(),
-                "Ready".bold(),
-                files.files.len().to_string().bold(),
-                "★".yellow()
-            ))
-            .expect("Failed to set completion style"),
-    );
-    spinner.finish();
+    let plan = plan_downloads(files, &base_url);
+    let total_files = plan.items.len();
+    let policy = downloader::RetryPolicy::default();
 
-    // Prepare download data for batch processing
-    let mut sanitized_count = 0;
-    let download_data = files
-        .files
-        .into_iter()
-        .map(|file| {
-            let absolute_url = build_file_download_url(&base_url, &file.name);
-
-            // Sanitize filename for filesystem compatibility
-            let (sanitized_name, was_modified) = sanitize_filename(&file.name);
-
-            // Warn user if filename was modified
-            if was_modified {
-                println!(
-                    "{} {} {} → {}",
-                    "⚠".yellow().bold(),
-                    "Sanitized:".yellow(),
-                    file.name.dimmed(),
-                    sanitized_name.bold()
-                );
-                sanitized_count += 1;
+    let summary = run_planned_downloads_with_space_check(
+        &client,
+        &output_dir,
+        plan,
+        cookie_source.as_ref(),
+        &policy,
+        &shutdown,
+        |dir, items, signal| {
+            spinner.set_message(format!(
+                "{} {}",
+                "⚙".blue(),
+                "Checking available disk space...".bold()
+            ));
+            if let Err(e) = disk_space::check_disk_space_with_signal(dir, items, signal) {
+                spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
+                return Err(e);
             }
 
-            (absolute_url.to_string(), sanitized_name, file.md5)
-        })
-        .collect::<Vec<_>>();
-
-    // Show summary if any files were sanitized
-    if sanitized_count > 0 {
-        println!(
-            "\n{} {} {} file{} for filesystem compatibility",
-            "✓".green().bold(),
-            "Sanitized".bold(),
-            sanitized_count.to_string().bold(),
-            if sanitized_count == 1 { "" } else { "s" }
-        );
-    }
-
-    // Download all files with integrated signal handling
-    let total_files = download_data.len();
-    let summary = downloader::download_files(
-        &client,
-        Some(output_dir.as_path()),
-        download_data,
-        total_files,
-        cookie_source.as_ref(),
+            // Successfully finished initialization
+            spinner.set_style(
+                ProgressStyle::default_spinner()
+                    .template(&format!(
+                        "{} {} to download {} {file_label} from archive.org {}",
+                        "✔".green().bold(),
+                        "Ready".bold(),
+                        total_files.to_string().bold(),
+                        "★".yellow()
+                    ))
+                    .expect("Failed to set completion style"),
+            );
+            spinner.finish();
+            Ok(())
+        },
     )
     .await?;
 
@@ -3748,6 +3817,648 @@ mod tests {
                 Err(IaGetError::VerificationFailed {
                     failed: 1,
                     total: 1
+                })
+            ));
+
+            let requests = server.finish().await;
+            assert_eq!(requests.len(), 2);
+            assert_eq!(before, snapshot_check_dir(&output_dir.0));
+        }
+    }
+
+    #[test]
+    fn plan_downloads_builds_items_and_records_sanitized_filenames() {
+        let base_url = Url::parse("https://archive.org/download/item/item_files.xml").unwrap();
+        let mut first = xml_file("docs/readme.txt", Some(128));
+        first.md5 = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string());
+        let second = xml_file("Season 1/Episode?.mp4", Some(4096));
+        let third = xml_file("notes.txt", None);
+
+        let plan = plan_downloads(
+            XmlFiles {
+                files: vec![first, second, third],
+            },
+            &base_url,
+        );
+
+        assert_eq!(plan.items.len(), 3);
+        assert_eq!(
+            plan.items[0],
+            disk_space::PlannedDownload {
+                url: "https://archive.org/download/item/docs/readme.txt".to_string(),
+                file_path: "docs/readme.txt".to_string(),
+                expected_md5: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+                expected_size: Some(128),
+            }
+        );
+        assert_eq!(
+            plan.items[1],
+            disk_space::PlannedDownload {
+                url: "https://archive.org/download/item/Season%201/Episode%3F.mp4".to_string(),
+                file_path: "Season 1/Episode_.mp4".to_string(),
+                expected_md5: None,
+                expected_size: Some(4096),
+            }
+        );
+        assert_eq!(plan.items[2].expected_size, None);
+        assert_eq!(
+            plan.sanitized,
+            vec![(
+                "Season 1/Episode?.mp4".to_string(),
+                "Season 1/Episode_.mp4".to_string(),
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_planned_downloads_with_space_check_aborts_before_file_requests_when_insufficient()
+    {
+        let payload = b"archive-file-body-bytes";
+        let xml_body = build_xml_metadata(&[(
+            "archive.bin",
+            payload.len(),
+            format!("{:x}", md5::compute(payload)),
+        )]);
+
+        let server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+        ])
+        .await;
+
+        let output_dir = TempTestDir::new("space-check-fail");
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 0,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let xml_url = server.url("/download/item/item_files.xml");
+        let (files, base_url) =
+            fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                .await
+                .unwrap();
+
+        let plan = plan_downloads(files, &base_url);
+        let err = run_planned_downloads_with_space_check(
+            &client,
+            &output_dir.0,
+            plan,
+            None,
+            &policy,
+            &signal,
+            |dir, items, sig| {
+                disk_space::check_disk_space_with_available_and_signal(dir, items, 5, sig)
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            IaGetError::InsufficientDiskSpace {
+                required,
+                available: 5,
+                ..
+            } if required == payload.len() as u64
+        ));
+        assert!(!output_dir.join("archive.bin").exists());
+        assert!(!output_dir.join("archive.bin.part").exists());
+
+        let requests = server.finish().await;
+        assert_eq!(
+            requests.len(),
+            2,
+            "insufficient disk space must stop before any file download HTTP requests: {requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_planned_downloads_with_space_check_downloads_when_space_sufficient() {
+        let payload = b"archive-file-body-bytes";
+        let xml_body = build_xml_metadata(&[(
+            "archive.bin",
+            payload.len(),
+            format!("{:x}", md5::compute(payload)),
+        )]);
+
+        let server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+            MockResponse::ok(payload),
+        ])
+        .await;
+
+        let output_dir = TempTestDir::new("space-check-pass");
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 0,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let xml_url = server.url("/download/item/item_files.xml");
+        let (files, base_url) =
+            fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                .await
+                .unwrap();
+
+        let plan = plan_downloads(files, &base_url);
+        let summary = run_planned_downloads_with_space_check(
+            &client,
+            &output_dir.0,
+            plan,
+            None,
+            &policy,
+            &signal,
+            |dir, items, sig| {
+                disk_space::check_disk_space_with_available_and_signal(
+                    dir,
+                    items,
+                    payload.len() as u64,
+                    sig,
+                )
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert_eq!(
+            std::fs::read(output_dir.join("archive.bin")).unwrap(),
+            payload
+        );
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2]
+            .request_line
+            .starts_with("GET /download/item/archive.bin "));
+    }
+
+    #[test]
+    fn plan_downloads_after_select_and_filter_retains_fields_for_details_and_download_urls() {
+        let base_url = Url::parse("https://archive.org/download/item/item_files.xml").unwrap();
+        let make_files = || XmlFiles {
+            files: vec![
+                xml_file_with_md5(
+                    "docs/issue01.pdf",
+                    Some(2_048),
+                    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                ),
+                xml_file_with_md5(
+                    "Season 1/Episode?.pdf",
+                    Some(4_096),
+                    Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                ),
+                xml_file_with_md5(
+                    "docs/draft_issue.pdf",
+                    Some(1_024),
+                    Some("cccccccccccccccccccccccccccccccc"),
+                ),
+                xml_file_with_md5("notes.txt", None, None),
+            ],
+        };
+
+        // /details/ URL with include + exclude filters
+        let details_target = parse_archive_url("https://archive.org/details/item").unwrap();
+        let filter = FileFilter::compile(["*.pdf", "!*draft*"]).unwrap();
+        let selected_details =
+            select_and_filter_files(make_files(), &details_target, &filter).unwrap();
+        let details_plan = plan_downloads(selected_details, &base_url);
+
+        assert_eq!(
+            details_plan.items,
+            vec![
+                disk_space::PlannedDownload {
+                    url: "https://archive.org/download/item/docs/issue01.pdf".to_string(),
+                    file_path: "docs/issue01.pdf".to_string(),
+                    expected_md5: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+                    expected_size: Some(2_048),
+                },
+                disk_space::PlannedDownload {
+                    url: "https://archive.org/download/item/Season%201/Episode%3F.pdf".to_string(),
+                    file_path: "Season 1/Episode_.pdf".to_string(),
+                    expected_md5: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
+                    expected_size: Some(4_096),
+                },
+            ]
+        );
+        assert_eq!(
+            details_plan.sanitized,
+            vec![(
+                "Season 1/Episode?.pdf".to_string(),
+                "Season 1/Episode_.pdf".to_string(),
+            )]
+        );
+
+        // /download/ URL selects single file and retains metadata + sanitised path + URL
+        let download_target =
+            parse_archive_url("https://archive.org/download/item/Season%201/Episode%3F.pdf")
+                .unwrap();
+        let no_filter = FileFilter::compile::<[&str; 0], _>([]).unwrap();
+        let selected_download =
+            select_and_filter_files(make_files(), &download_target, &no_filter).unwrap();
+        let download_plan = plan_downloads(selected_download, &base_url);
+
+        assert_eq!(
+            download_plan.items,
+            vec![disk_space::PlannedDownload {
+                url: "https://archive.org/download/item/Season%201/Episode%3F.pdf".to_string(),
+                file_path: "Season 1/Episode_.pdf".to_string(),
+                expected_md5: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
+                expected_size: Some(4_096),
+            }]
+        );
+        assert_eq!(
+            download_plan.sanitized,
+            vec![(
+                "Season 1/Episode?.pdf".to_string(),
+                "Season 1/Episode_.pdf".to_string(),
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_space_e2e_filtered_plan_fails_before_file_http_requests() {
+        let alpha = vec![b'a'; 20];
+        let beta = vec![b'b'; 30];
+        let excluded_torrent = vec![b't'; 500];
+
+        let xml_body = build_xml_metadata(&[
+            (
+                "alpha.bin",
+                alpha.len(),
+                format!("{:x}", md5::compute(&alpha)),
+            ),
+            (
+                "nested/beta?.bin",
+                beta.len(),
+                format!("{:x}", md5::compute(&beta)),
+            ),
+            (
+                "item_archive.torrent",
+                excluded_torrent.len(),
+                format!("{:x}", md5::compute(&excluded_torrent)),
+            ),
+        ]);
+
+        // Include a sentinel 3rd response so any unexpected file request would be captured.
+        let server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+            MockResponse::ok(&alpha),
+        ])
+        .await;
+
+        let output_dir = TempTestDir::new("space-e2e-filtered-fail");
+        let before = snapshot_check_dir(&output_dir.0);
+
+        let cli = Cli::try_parse_from([
+            "ia-get",
+            "-o",
+            output_dir.0.to_str().unwrap(),
+            "-f",
+            "*.bin",
+            "https://archive.org/details/item",
+        ])
+        .unwrap();
+        let file_filter = FileFilter::compile(&cli.filters).unwrap();
+        let target = parse_archive_url(&cli.url).unwrap();
+
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 0,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let xml_url = server.url("/download/item/item_files.xml");
+        let (all_files, base_url) =
+            fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                .await
+                .unwrap();
+
+        let filtered = select_and_filter_files(all_files, &target, &file_filter).unwrap();
+        let plan = plan_downloads(filtered, &base_url);
+        let expected_required = (alpha.len() + beta.len()) as u64;
+        let available = expected_required - 1;
+
+        let err = run_planned_downloads_with_space_check(
+            &client,
+            &output_dir.0,
+            plan,
+            None,
+            &policy,
+            &signal,
+            |dir, items, sig| {
+                disk_space::check_disk_space_with_available_and_signal(dir, items, available, sig)
+            },
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            IaGetError::InsufficientDiskSpace {
+                required,
+                available: err_avail,
+                path,
+            } => {
+                assert_eq!(required, expected_required);
+                assert_eq!(err_avail, available);
+                assert_eq!(path, output_dir.0);
+            }
+            other => panic!("expected InsufficientDiskSpace, got {other:?}"),
+        }
+
+        let requests = server.abort_and_collect().await;
+        assert_eq!(
+            requests.len(),
+            2,
+            "server must see only HEAD + GET for XML metadata and 0 file requests: {requests:?}"
+        );
+        assert!(requests[0]
+            .request_line
+            .starts_with("HEAD /download/item/item_files.xml "));
+        assert!(requests[1]
+            .request_line
+            .starts_with("GET /download/item/item_files.xml "));
+
+        let after = snapshot_check_dir(&output_dir.0);
+        assert_eq!(
+            before, after,
+            "failed disk-space check must not create files, .part files, or subdirectories"
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_space_e2e_resume_credit_allows_batch_when_remaining_fits() {
+        let verified_payload: Vec<u8> = (0u8..40).collect();
+        let resumed_payload: Vec<u8> = (100u8..160).collect();
+        let prefix_len = 25usize;
+        let remaining_bytes = (resumed_payload.len() - prefix_len) as u64;
+        let total_archive_bytes = (verified_payload.len() + resumed_payload.len()) as u64;
+        assert!(remaining_bytes < total_archive_bytes);
+
+        let xml_body = build_xml_metadata(&[
+            (
+                "verified.bin",
+                verified_payload.len(),
+                format!("{:x}", md5::compute(&verified_payload)),
+            ),
+            (
+                "resumed.bin",
+                resumed_payload.len(),
+                format!("{:x}", md5::compute(&resumed_payload)),
+            ),
+        ]);
+
+        let range_header = format!(
+            "bytes {prefix_len}-{}/{}",
+            resumed_payload.len() - 1,
+            resumed_payload.len()
+        );
+        let server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+            MockResponse::with_headers(
+                "206 Partial Content",
+                vec![
+                    ("Content-Range", range_header),
+                    ("Content-Length", remaining_bytes.to_string()),
+                ],
+                &resumed_payload[prefix_len..],
+            ),
+        ])
+        .await;
+
+        let output_dir = TempTestDir::new("space-e2e-resume-credit");
+        std::fs::write(output_dir.join("verified.bin"), &verified_payload).unwrap();
+        std::fs::write(
+            output_dir.join("resumed.bin.part"),
+            &resumed_payload[..prefix_len],
+        )
+        .unwrap();
+
+        let target = parse_archive_url("https://archive.org/details/item").unwrap();
+        let filter = FileFilter::compile::<[&str; 0], _>([]).unwrap();
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 0,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        let xml_url = server.url("/download/item/item_files.xml");
+        let (all_files, base_url) =
+            fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                .await
+                .unwrap();
+
+        let selected = select_and_filter_files(all_files, &target, &filter).unwrap();
+        let plan = plan_downloads(selected, &base_url);
+
+        let summary = run_planned_downloads_with_space_check(
+            &client,
+            &output_dir.0,
+            plan,
+            None,
+            &policy,
+            &signal,
+            |dir, items, sig| {
+                disk_space::check_disk_space_with_available_and_signal(
+                    dir,
+                    items,
+                    remaining_bytes,
+                    sig,
+                )
+            },
+        )
+        .await
+        .expect("batch should succeed when available bytes cover remaining resumed bytes");
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 1);
+        assert!(summary.failed.is_empty());
+        assert!(batch_exit_result(&summary, 2).is_ok());
+
+        assert_eq!(
+            std::fs::read(output_dir.join("verified.bin")).unwrap(),
+            verified_payload
+        );
+        assert_eq!(
+            std::fs::read(output_dir.join("resumed.bin")).unwrap(),
+            resumed_payload
+        );
+        assert!(!output_dir.join("resumed.bin.part").exists());
+
+        let requests = server.finish().await;
+        assert_eq!(
+            requests.len(),
+            3,
+            "verified file must be skipped and only resumed file fetched: {requests:?}"
+        );
+        assert!(requests[2]
+            .request_line
+            .starts_with("GET /download/item/resumed.bin "));
+        assert_eq!(
+            requests[2].header("Range"),
+            Some(format!("bytes={prefix_len}-").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn list_and_check_modes_bypass_disk_space_check_on_u64_max_metadata() {
+        let small_bytes = b"verified-small-payload";
+        let small_md5 = format!("{:x}", md5::compute(small_bytes));
+        let xml_body = format!(
+            "<files>\n\
+             \x20 <file name=\"small.txt\" source=\"original\">\n\
+             \x20   <size>{}</size>\n\
+             \x20   <md5>{small_md5}</md5>\n\
+             \x20 </file>\n\
+             \x20 <file name=\"impossibly_huge.bin\" source=\"original\">\n\
+             \x20   <size>{}</size>\n\
+             \x20   <md5>0123456789abcdef0123456789abcdef</md5>\n\
+             \x20 </file>\n\
+             </files>",
+            small_bytes.len(),
+            u64::MAX
+        );
+
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 0,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        // --list succeeds on u64::MAX metadata without disk-space failure or file/dir writes
+        {
+            let list_xml = format!(
+                "<files>\n\
+                 \x20 <file name=\"impossibly_huge.bin\" source=\"original\">\n\
+                 \x20   <size>{}</size>\n\
+                 \x20   <md5>0123456789abcdef0123456789abcdef</md5>\n\
+                 \x20 </file>\n\
+                 </files>",
+                u64::MAX
+            );
+            let server = MockHttpServer::start(vec![
+                MockResponse::ok(b""),
+                MockResponse::ok(list_xml.as_bytes()),
+            ])
+            .await;
+
+            let parent_dir = TempTestDir::new("list-u64-max");
+            let missing_output = parent_dir.join("never-created");
+
+            let cli = Cli::try_parse_from([
+                "ia-get",
+                "--list",
+                "-o",
+                missing_output.to_str().unwrap(),
+                "https://archive.org/details/item",
+            ])
+            .unwrap();
+            let file_filter = FileFilter::compile(&cli.filters).unwrap();
+            let target = parse_archive_url(&cli.url).unwrap();
+
+            let xml_url = server.url("/download/item/item_files.xml");
+            let (all_files, _base_url) =
+                fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                    .await
+                    .unwrap();
+            let filtered = select_and_filter_files(all_files, &target, &file_filter).unwrap();
+
+            assert_eq!(filtered.files.len(), 1);
+            assert_eq!(filtered.files[0].size, Some(u64::MAX));
+            assert!(finalize_metadata_phase(&cli, &filtered, &spinner)
+                .expect("--list must bypass disk-space check")
+                .is_none());
+            assert!(!missing_output.exists());
+
+            let requests = server.finish().await;
+            assert_eq!(requests.len(), 2);
+        }
+
+        // --check bypasses disk-space check on u64::MAX metadata and makes zero writes
+        {
+            let server = MockHttpServer::start(vec![
+                MockResponse::ok(b""),
+                MockResponse::ok(xml_body.as_bytes()),
+            ])
+            .await;
+
+            let output_dir = TempTestDir::new("check-u64-max");
+            std::fs::write(output_dir.join("small.txt"), small_bytes).unwrap();
+            let before = snapshot_check_dir(&output_dir.0);
+
+            let cli = Cli::try_parse_from([
+                "ia-get",
+                "--check",
+                "-o",
+                output_dir.0.to_str().unwrap(),
+                "https://archive.org/details/item",
+            ])
+            .unwrap();
+            let file_filter = FileFilter::compile(&cli.filters).unwrap();
+            let target = parse_archive_url(&cli.url).unwrap();
+            verify::validate_check_dir(resolve_output_dir(cli.output_dir.as_deref())).unwrap();
+
+            let xml_url = server.url("/download/item/item_files.xml");
+            let (all_files, base_url) =
+                fetch_xml_metadata_from_url(xml_url, &client, &spinner, None, &policy, &signal)
+                    .await
+                    .unwrap();
+            let filtered = select_and_filter_files(all_files, &target, &file_filter).unwrap();
+
+            let verified_dir = finalize_metadata_phase(&cli, &filtered, &spinner)
+                .expect("--check must bypass disk-space check")
+                .expect("--check returns canonical directory");
+
+            let summary = verify::verify_files(&verified_dir, &filtered.files, &signal)
+                .expect("--check verification must complete without InsufficientDiskSpace");
+            assert_eq!(summary.ok, 1);
+            assert_eq!(summary.failed.len(), 1);
+            assert_eq!(summary.failed[0].file_path, "impossibly_huge.bin");
+            assert_eq!(
+                summary.failed[0].issues,
+                vec![verify::VerificationIssue::Missing]
+            );
+            assert!(matches!(
+                verify_exit_result(&summary, filtered.files.len()),
+                Err(IaGetError::VerificationFailed {
+                    failed: 1,
+                    total: 2
+                })
+            ));
+
+            // Confirm the exact same metadata would fail download mode's disk-space check.
+            let plan = plan_downloads(filtered, &base_url);
+            assert!(matches!(
+                disk_space::check_disk_space(&verified_dir, &plan.items),
+                Err(IaGetError::InsufficientDiskSpace {
+                    required: u64::MAX,
+                    ..
                 })
             ));
 

@@ -1,5 +1,7 @@
 //! Error types for ia-get
 
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 /// Result type alias for ia-get operations
@@ -69,6 +71,22 @@ pub enum IaGetError {
     NoMatchingFiles {
         /// Comma-separated filter patterns supplied by the user
         patterns: String,
+    },
+
+    /// Destination volume does not have enough free disk space for the planned download
+    #[error(
+        "Insufficient disk space in '{}': need {}, only {} available",
+        path.display(),
+        crate::utils::format_size(*required),
+        crate::utils::format_size(*available)
+    )]
+    InsufficientDiskSpace {
+        /// Estimated remaining bytes required for the planned download
+        required: u64,
+        /// Available bytes reported on the destination volume
+        available: u64,
+        /// Destination directory path
+        path: PathBuf,
     },
 
     /// Download was interrupted by the user

@@ -8,6 +8,7 @@
 pub mod archive_metadata;
 pub mod constants;
 pub mod cookie;
+pub mod disk_space;
 pub mod downloader;
 pub mod error;
 pub mod filter;

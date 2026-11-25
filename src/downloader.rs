@@ -1199,15 +1199,17 @@ fn promote_part_file(root: &Path, rel_part_path: &Path, rel_final_path: &Path) -
     Ok(())
 }
 
-/// Calculates the MD5 hash of a verified regular file inside `root`.
-pub(crate) fn calculate_md5(
+/// Calculates the MD5 hash of a verified regular file inside `root`,
+/// optionally displaying a progress bar for large files.
+pub(crate) fn calculate_md5_with_progress(
     root: &Path,
     rel_path: &Path,
     running: &Arc<AtomicBool>,
+    show_progress: bool,
 ) -> Result<String> {
     let file = open_regular_file_for_read(root, rel_path)?;
     let file_size = file.metadata()?.len();
-    let is_large_file = file_size > LARGE_FILE_THRESHOLD;
+    let is_large_file = show_progress && file_size > LARGE_FILE_THRESHOLD;
 
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
     let mut context = md5::Context::new();
@@ -1257,6 +1259,15 @@ pub(crate) fn calculate_md5(
 
     let hash = context.finalize();
     Ok(format!("{:x}", hash))
+}
+
+/// Calculates the MD5 hash of a verified regular file inside `root`.
+pub(crate) fn calculate_md5(
+    root: &Path,
+    rel_path: &Path,
+    running: &Arc<AtomicBool>,
+) -> Result<String> {
+    calculate_md5_with_progress(root, rel_path, running, true)
 }
 
 /// Check if an existing file inside `root` has the correct hash.
