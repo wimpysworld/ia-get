@@ -15,7 +15,7 @@ edition = "2021"
 indicatif = "0.18.4"
 md5 = "0.8.0"
 regex = "1.12.4"
-reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls", "socks"] }
 tokio = { version = "1.50.0", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde-xml-rs = "0.8.2"
@@ -24,6 +24,8 @@ url = "2.5.4"
 clap = { version = "4.6.1", features = ["derive"] }
 ctrlc = "3.5.2"
 colored = "3.0.0"
+globset = "0.4"
+fs4 = "0.13"
 
 [profile.release]
 strip = true  # Automatically strip symbols from the binary.
