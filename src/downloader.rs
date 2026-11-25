@@ -22,7 +22,10 @@ use crate::constants::{
 };
 use crate::cookie::CookieSource;
 use crate::error::IaGetError; // Import IaGetError for explicit error conversion
-use crate::utils::{create_progress_bar, format_duration, format_size, format_transfer_rate};
+use crate::utils::{
+    create_progress_bar, format_duration, format_size, format_transfer_rate, sanitize_url_for_log,
+    VerboseLogger,
+};
 use crate::Result; // Import utility functions
 
 /// Buffer size for file operations (8KB)
@@ -55,11 +58,12 @@ impl Default for RetryPolicy {
 /// so network stalls cannot accumulate multi-second unthrottled bursts.
 const RATE_LIMIT_STALL_RESET_WINDOW: Duration = Duration::from_millis(100);
 
-/// Configuration controlling download retries and optional bandwidth throttling.
+/// Configuration controlling download retries, bandwidth throttling, and verbose logging.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DownloadOptions {
     pub retry_policy: RetryPolicy,
     pub limit_rate: Option<u64>,
+    pub verbose: bool,
 }
 
 /// Parses a bandwidth limit string into bytes per second.
@@ -603,6 +607,24 @@ pub fn compute_backoff_delay_with_sample(
     )
 }
 
+fn compute_retry_delay_with_source(
+    attempt: u32,
+    retry_after_header: Option<&str>,
+    now: SystemTime,
+    policy: &RetryPolicy,
+) -> (Duration, &'static str) {
+    if let Some(delay) =
+        retry_after_header.and_then(|value| parse_retry_after(value, now, policy.max_retry_after))
+    {
+        return (delay, "retry-after");
+    }
+
+    (
+        compute_backoff_delay_with_sample(attempt, policy, random_u64()),
+        "backoff",
+    )
+}
+
 /// Computes the retry delay for a 1-based `attempt`, preferring a valid `Retry-After` header
 /// and falling back to jittered exponential backoff otherwise.
 pub fn compute_retry_delay(
@@ -611,13 +633,7 @@ pub fn compute_retry_delay(
     now: SystemTime,
     policy: &RetryPolicy,
 ) -> Duration {
-    if let Some(delay) =
-        retry_after_header.and_then(|value| parse_retry_after(value, now, policy.max_retry_after))
-    {
-        return delay;
-    }
-
-    compute_backoff_delay_with_sample(attempt, policy, random_u64())
+    compute_retry_delay_with_source(attempt, retry_after_header, now, policy).0
 }
 
 /// Supported proxy URL schemes for environment-based proxy configuration.
@@ -884,27 +900,31 @@ fn is_redirect_status(status: StatusCode) -> bool {
 }
 
 fn resolve_redirect_target(current_url: &Url, location: &str) -> Result<Url> {
+    let safe_current = sanitize_url_for_log(current_url);
     let location = location.trim();
     if location.is_empty() {
         return Err(IaGetError::Network(format!(
             "Redirect from {} has empty Location header",
-            current_url
+            safe_current
         )));
     }
 
     let next_url = current_url.join(location).map_err(|err| {
         IaGetError::Network(format!(
             "Invalid redirect Location '{}' from {}: {}",
-            location, current_url, err
+            redact_proxy_value(location),
+            safe_current,
+            err
         ))
     })?;
+    let safe_next = sanitize_url_for_log(&next_url);
 
     if !matches!(next_url.scheme(), "http" | "https") {
         return Err(IaGetError::Network(format!(
             "Unsupported redirect scheme '{}' in Location '{}' from {}",
             next_url.scheme(),
-            location,
-            current_url
+            safe_next,
+            safe_current
         )));
     }
 
@@ -912,8 +932,8 @@ fn resolve_redirect_target(current_url: &Url, location: &str) -> Result<Url> {
         return Err(IaGetError::Network(format!(
             "Refusing HTTPS-to-{} redirect downgrade from {} to {}",
             next_url.scheme(),
-            current_url,
-            next_url
+            safe_current,
+            safe_next
         )));
     }
 
@@ -929,6 +949,7 @@ async fn send_following_redirects<F>(
     initial_url: &Url,
     signal: &ShutdownSignal,
     max_redirects: usize,
+    logger: &VerboseLogger,
     mut build_request: F,
 ) -> Result<RedirectSendOutcome>
 where
@@ -942,10 +963,54 @@ where
     visited.insert(normalised_initial);
 
     loop {
-        let request = build_request(&current_url)?;
-        let response = match await_interruptible(request.send(), signal).await? {
-            Ok(response) => response,
-            Err(err) => return Ok(RedirectSendOutcome::TransportError(err)),
+        let (client, request_result) = build_request(&current_url)?.build_split();
+        let request = request_result.map_err(reqwest::Error::without_url)?;
+        let method = request.method().clone();
+        let cookies_label = if request.headers().contains_key(reqwest::header::COOKIE) {
+            "yes"
+        } else {
+            "no"
+        };
+        let range = request
+            .headers()
+            .get(reqwest::header::RANGE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let safe_url = sanitize_url_for_log(request.url());
+
+        if let Some(ref range_value) = range {
+            logger.log(
+                "http",
+                format_args!(
+                    "-> {method} {safe_url} (cookies={cookies_label}, range={range_value})"
+                ),
+            );
+        } else {
+            logger.log(
+                "http",
+                format_args!("-> {method} {safe_url} (cookies={cookies_label})"),
+            );
+        }
+
+        let response = match await_interruptible(client.execute(request), signal).await? {
+            Ok(response) => {
+                logger.log(
+                    "http",
+                    format_args!(
+                        "<- {} {method} {safe_url} (cookies={cookies_label})",
+                        response.status()
+                    ),
+                );
+                response
+            }
+            Err(err) => {
+                let err = err.without_url();
+                logger.log(
+                    "http",
+                    format_args!("<- error {method} {safe_url} (cookies={cookies_label}): {err}"),
+                );
+                return Ok(RedirectSendOutcome::TransportError(err));
+            }
         };
 
         let status = response.status();
@@ -954,49 +1019,85 @@ where
         }
 
         if redirects_followed >= max_redirects {
+            logger.log(
+                "redirect",
+                format_args!("limit exceeded ({max_redirects}) while requesting {safe_url}"),
+            );
             return Err(IaGetError::Network(format!(
                 "Too many redirects (maximum {} exceeded) while requesting {}",
-                max_redirects, current_url
+                max_redirects, safe_url
             )));
         }
 
-        let location_header = response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .ok_or_else(|| {
-                IaGetError::Network(format!(
+        let location_header = match response.headers().get(reqwest::header::LOCATION) {
+            Some(header) => header,
+            None => {
+                logger.log(
+                    "redirect",
+                    format_args!("{status} {safe_url} missing Location header"),
+                );
+                return Err(IaGetError::Network(format!(
                     "HTTP {} redirect from {} missing Location header",
-                    status, current_url
-                ))
-            })?;
+                    status, safe_url
+                )));
+            }
+        };
 
-        let location = location_header.to_str().map_err(|_| {
-            IaGetError::Network(format!(
-                "HTTP {} redirect from {} has non-UTF-8 Location header",
-                status, current_url
-            ))
-        })?;
+        let location = match location_header.to_str() {
+            Ok(location) => location,
+            Err(_) => {
+                logger.log(
+                    "redirect",
+                    format_args!("{status} {safe_url} has non-UTF-8 Location header"),
+                );
+                return Err(IaGetError::Network(format!(
+                    "HTTP {} redirect from {} has non-UTF-8 Location header",
+                    status, safe_url
+                )));
+            }
+        };
 
-        let next_url = resolve_redirect_target(&current_url, location)?;
+        let next_url = match resolve_redirect_target(&current_url, location) {
+            Ok(next_url) => next_url,
+            Err(err) => {
+                logger.log("redirect", format_args!("error: {err}"));
+                return Err(err);
+            }
+        };
+        let next_safe = sanitize_url_for_log(&next_url);
 
         let mut normalised_next = next_url.clone();
         normalised_next.set_fragment(None);
         if !visited.insert(normalised_next) {
+            logger.log(
+                "redirect",
+                format_args!("loop detected {safe_url} -> {next_safe}"),
+            );
             return Err(IaGetError::Network(format!(
                 "Redirect loop detected while following redirect to {}",
-                next_url
+                next_safe
             )));
         }
 
+        let hop = redirects_followed + 1;
+        logger.log(
+            "redirect",
+            format_args!("{status} {safe_url} -> {next_safe} (hop {hop}/{max_redirects})"),
+        );
+
         drop(response);
-        redirects_followed += 1;
+        redirects_followed = hop;
         current_url = next_url;
     }
 }
 
 enum AttemptOutcome {
     Ready(Response),
-    Retry { delay: Duration, reason: String },
+    Retry {
+        delay: Duration,
+        delay_source: &'static str,
+        reason: String,
+    },
 }
 
 async fn send_attempt<F>(
@@ -1005,18 +1106,31 @@ async fn send_attempt<F>(
     retry_count: u32,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
+    logger: &VerboseLogger,
 ) -> Result<AttemptOutcome>
 where
     F: FnMut(&Url) -> Result<RequestBuilder>,
 {
-    match send_following_redirects(initial_url, signal, MAX_REDIRECTS, build_request).await? {
+    match send_following_redirects(initial_url, signal, MAX_REDIRECTS, logger, build_request)
+        .await?
+    {
         RedirectSendOutcome::Response(response) => {
             let status = response.status();
             if is_retryable_status(status) {
                 if retry_count >= policy.max_retries {
+                    logger.log(
+                        "retry",
+                        format_args!(
+                            "exhausted ({}/{}) for {} after HTTP {}",
+                            retry_count,
+                            policy.max_retries,
+                            sanitize_url_for_log(initial_url),
+                            status
+                        ),
+                    );
                     return match response.error_for_status() {
                         Ok(resp) => Ok(AttemptOutcome::Ready(resp)),
-                        Err(err) => Err(err.into()),
+                        Err(err) => Err(err.without_url().into()),
                     };
                 }
 
@@ -1024,24 +1138,51 @@ where
                     .headers()
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|value| value.to_str().ok());
-                let delay =
-                    compute_retry_delay(retry_count + 1, retry_after, SystemTime::now(), policy);
+                let (delay, delay_source) = compute_retry_delay_with_source(
+                    retry_count + 1,
+                    retry_after,
+                    SystemTime::now(),
+                    policy,
+                );
                 let reason = format!("HTTP {}", status);
                 drop(response);
-                Ok(AttemptOutcome::Retry { delay, reason })
+                Ok(AttemptOutcome::Retry {
+                    delay,
+                    delay_source,
+                    reason,
+                })
             } else {
-                let response = response.error_for_status()?;
+                let response = response
+                    .error_for_status()
+                    .map_err(reqwest::Error::without_url)?;
                 Ok(AttemptOutcome::Ready(response))
             }
         }
         RedirectSendOutcome::TransportError(err) => {
+            let err = err.without_url();
             if !is_retryable_reqwest_error(&err) || retry_count >= policy.max_retries {
+                if is_retryable_reqwest_error(&err) {
+                    logger.log(
+                        "retry",
+                        format_args!(
+                            "exhausted ({}/{}) for {}: {err}",
+                            retry_count,
+                            policy.max_retries,
+                            sanitize_url_for_log(initial_url),
+                        ),
+                    );
+                }
                 return Err(err.into());
             }
 
-            let delay = compute_retry_delay(retry_count + 1, None, SystemTime::now(), policy);
+            let (delay, delay_source) =
+                compute_retry_delay_with_source(retry_count + 1, None, SystemTime::now(), policy);
             let reason = err.to_string();
-            Ok(AttemptOutcome::Retry { delay, reason })
+            Ok(AttemptOutcome::Retry {
+                delay,
+                delay_source,
+                reason,
+            })
         }
     }
 }
@@ -1052,6 +1193,32 @@ pub async fn send_with_retry<F, H>(
     initial_url: &Url,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
+    build_request: F,
+    on_retry: H,
+) -> Result<Response>
+where
+    F: FnMut(&Url) -> Result<RequestBuilder>,
+    H: FnMut(&RetryEvent<'_>),
+{
+    send_with_retry_with_logger(
+        initial_url,
+        policy,
+        signal,
+        &VerboseLogger::disabled(),
+        build_request,
+        on_retry,
+    )
+    .await
+}
+
+/// Sends an HTTP request with retries and diagnostic logging on transient transport errors and
+/// retryable HTTP statuses, following redirects manually per attempt and honouring `Retry-After`
+/// headers and `ShutdownSignal`.
+pub async fn send_with_retry_with_logger<F, H>(
+    initial_url: &Url,
+    policy: &RetryPolicy,
+    signal: &ShutdownSignal,
+    logger: &VerboseLogger,
     mut build_request: F,
     mut on_retry: H,
 ) -> Result<Response>
@@ -1062,10 +1229,35 @@ where
     let mut retry_count: u32 = 0;
 
     loop {
-        match send_attempt(initial_url, &mut build_request, retry_count, policy, signal).await? {
+        match send_attempt(
+            initial_url,
+            &mut build_request,
+            retry_count,
+            policy,
+            signal,
+            logger,
+        )
+        .await?
+        {
             AttemptOutcome::Ready(response) => return Ok(response),
-            AttemptOutcome::Retry { delay, reason } => {
+            AttemptOutcome::Retry {
+                delay,
+                delay_source,
+                reason,
+            } => {
                 retry_count += 1;
+                logger.log(
+                    "retry",
+                    format_args!(
+                        "attempt {}/{} for {} after {}; waiting {:.2}s ({})",
+                        retry_count,
+                        policy.max_retries,
+                        sanitize_url_for_log(initial_url),
+                        reason,
+                        delay.as_secs_f64(),
+                        delay_source
+                    ),
+                );
                 on_retry(&RetryEvent {
                     attempt: retry_count,
                     max_retries: policy.max_retries,
@@ -1085,6 +1277,32 @@ pub async fn fetch_text_with_retry<F, H>(
     initial_url: &Url,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
+    build_request: F,
+    on_retry: H,
+) -> Result<String>
+where
+    F: FnMut(&Url) -> Result<RequestBuilder>,
+    H: FnMut(&RetryEvent<'_>),
+{
+    fetch_text_with_retry_with_logger(
+        initial_url,
+        policy,
+        signal,
+        &VerboseLogger::disabled(),
+        build_request,
+        on_retry,
+    )
+    .await
+}
+
+/// Fetches a text response body with retries and diagnostic logging on transient transport errors,
+/// retryable HTTP statuses, and transient body read errors, following redirects manually per
+/// attempt and honouring `Retry-After` and `ShutdownSignal`.
+pub async fn fetch_text_with_retry_with_logger<F, H>(
+    initial_url: &Url,
+    policy: &RetryPolicy,
+    signal: &ShutdownSignal,
+    logger: &VerboseLogger,
     mut build_request: F,
     mut on_retry: H,
 ) -> Result<String>
@@ -1095,9 +1313,34 @@ where
     let mut retry_count: u32 = 0;
 
     loop {
-        match send_attempt(initial_url, &mut build_request, retry_count, policy, signal).await? {
-            AttemptOutcome::Retry { delay, reason } => {
+        match send_attempt(
+            initial_url,
+            &mut build_request,
+            retry_count,
+            policy,
+            signal,
+            logger,
+        )
+        .await?
+        {
+            AttemptOutcome::Retry {
+                delay,
+                delay_source,
+                reason,
+            } => {
                 retry_count += 1;
+                logger.log(
+                    "retry",
+                    format_args!(
+                        "attempt {}/{} for {} after {}; waiting {:.2}s ({})",
+                        retry_count,
+                        policy.max_retries,
+                        sanitize_url_for_log(initial_url),
+                        reason,
+                        delay.as_secs_f64(),
+                        delay_source
+                    ),
+                );
                 on_retry(&RetryEvent {
                     attempt: retry_count,
                     max_retries: policy.max_retries,
@@ -1110,13 +1353,41 @@ where
                 match await_interruptible(response.text(), signal).await? {
                     Ok(text) => return Ok(text),
                     Err(err) => {
+                        let err = err.without_url();
                         if !is_retryable_reqwest_error(&err) || retry_count >= policy.max_retries {
+                            if is_retryable_reqwest_error(&err) {
+                                logger.log(
+                                    "retry",
+                                    format_args!(
+                                        "exhausted ({}/{}) for {} reading body: {err}",
+                                        retry_count,
+                                        policy.max_retries,
+                                        sanitize_url_for_log(initial_url),
+                                    ),
+                                );
+                            }
                             return Err(err.into());
                         }
                         retry_count += 1;
-                        let delay =
-                            compute_retry_delay(retry_count, None, SystemTime::now(), policy);
+                        let (delay, delay_source) = compute_retry_delay_with_source(
+                            retry_count,
+                            None,
+                            SystemTime::now(),
+                            policy,
+                        );
                         let reason = err.to_string();
+                        logger.log(
+                            "retry",
+                            format_args!(
+                                "attempt {}/{} for {} after {}; waiting {:.2}s ({})",
+                                retry_count,
+                                policy.max_retries,
+                                sanitize_url_for_log(initial_url),
+                                reason,
+                                delay.as_secs_f64(),
+                                delay_source
+                            ),
+                        );
                         on_retry(&RetryEvent {
                             attempt: retry_count,
                             max_retries: policy.max_retries,
@@ -1667,13 +1938,22 @@ pub(crate) fn calculate_md5(
     calculate_md5_with_progress(root, rel_path, running, true)
 }
 
+/// Result of inspecting an existing destination file before starting a download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExistingFileStatus {
+    Missing,
+    CompleteMd5Verified,
+    CompleteNoMd5,
+    NeedsRedownload,
+}
+
 /// Check if an existing file inside `root` has the correct hash.
 fn check_existing_file(
     root: &Path,
     file_path: &str,
     expected_md5: Option<&str>,
     running: &Arc<AtomicBool>,
-) -> Result<Option<bool>> {
+) -> Result<ExistingFileStatus> {
     let canonical_root = resolve_destination_root(root)?;
     let rel_path = Path::new(file_path);
     let target_path = validate_contained_path(&canonical_root, rel_path, true)?;
@@ -1693,12 +1973,14 @@ fn check_existing_file(
                 )));
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ExistingFileStatus::Missing)
+        }
         Err(e) => return Err(e.into()),
     }
 
     let Some(expected) = expected_md5 else {
-        return Ok(Some(true));
+        return Ok(ExistingFileStatus::CompleteNoMd5);
     };
 
     let local_md5 = match calculate_md5(root, rel_path, running) {
@@ -1717,11 +1999,15 @@ fn check_existing_file(
                 "Failed".red().bold(),
                 e
             );
-            return Ok(Some(false));
+            return Ok(ExistingFileStatus::NeedsRedownload);
         }
     };
 
-    Ok(Some(local_md5 == expected))
+    if local_md5 == expected {
+        Ok(ExistingFileStatus::CompleteMd5Verified)
+    } else {
+        Ok(ExistingFileStatus::NeedsRedownload)
+    }
 }
 
 /// Ensure parent directories exist inside `root` for a relative destination path.
@@ -1833,10 +2119,17 @@ async fn download_file_content(
     cookie_source: Option<&CookieSource>,
     expected_md5: Option<&str>,
     options: &DownloadOptions,
+    logger: &VerboseLogger,
 ) -> Result<(u64, bool)> {
     let policy = &options.retry_policy;
-    let initial_url = Url::parse(url)
-        .map_err(|e| IaGetError::Network(format!("Invalid download URL '{}': {}", url, e)))?;
+    let initial_url = Url::parse(url).map_err(|e| {
+        IaGetError::Network(format!(
+            "Invalid download URL '{}': {}",
+            redact_proxy_value(url),
+            e
+        ))
+    })?;
+    let safe_initial_url = sanitize_url_for_log(&initial_url);
     let mut retry_count: u32 = 0;
     let mut has_reset_range = false;
 
@@ -1858,7 +2151,7 @@ async fn download_file_content(
         };
 
         let send_outcome =
-            send_following_redirects(&initial_url, signal, MAX_REDIRECTS, |target_url| {
+            send_following_redirects(&initial_url, signal, MAX_REDIRECTS, logger, |target_url| {
                 let mut headers = HeaderMap::new();
                 if let Some(cookie_value) = cookie_source
                     .map(|source| source.header_value_for_url(target_url))
@@ -1884,10 +2177,18 @@ async fn download_file_content(
             RedirectSendOutcome::TransportError(e) => {
                 // Request failed before we even got a response
                 if !is_retryable_reqwest_error(&e) {
-                    return Err(e.into());
+                    return Err(e.without_url().into());
                 }
 
+                let safe_err = e.without_url();
                 if retry_count >= policy.max_retries {
+                    logger.log(
+                        "retry",
+                        format_args!(
+                            "exhausted ({}/{}) for {}: {}",
+                            retry_count, policy.max_retries, safe_initial_url, safe_err
+                        ),
+                    );
                     println!(
                         "{} {}      {} Maximum retries ({}) exceeded",
                         "├╼".cyan().dimmed(),
@@ -1895,11 +2196,24 @@ async fn download_file_content(
                         "✘".red().bold(),
                         policy.max_retries
                     );
-                    return Err(e.into());
+                    return Err(safe_err.into());
                 }
 
                 retry_count += 1;
-                let delay = compute_retry_delay(retry_count, None, SystemTime::now(), policy);
+                let (delay, delay_source) =
+                    compute_retry_delay_with_source(retry_count, None, SystemTime::now(), policy);
+                logger.log(
+                    "retry",
+                    format_args!(
+                        "attempt {}/{} for {} after {}; waiting {:.2}s ({})",
+                        retry_count,
+                        policy.max_retries,
+                        safe_initial_url,
+                        safe_err,
+                        delay.as_secs_f64(),
+                        delay_source
+                    ),
+                );
                 println!(
                     "{} {}      {} Connection error (attempt {}/{}): {}",
                     "├╼".cyan().dimmed(),
@@ -1907,7 +2221,7 @@ async fn download_file_content(
                     "⟳".yellow().bold(),
                     retry_count,
                     policy.max_retries,
-                    e
+                    safe_err
                 );
                 println!(
                     "{} {}      Waiting {:.1}s before retry...",
@@ -1933,11 +2247,23 @@ async fn download_file_content(
 
             if retry_count < policy.max_retries {
                 retry_count += 1;
-                let delay = compute_retry_delay(
+                let (delay, delay_source) = compute_retry_delay_with_source(
                     retry_count,
                     retry_after.as_deref(),
                     SystemTime::now(),
                     policy,
+                );
+                logger.log(
+                    "retry",
+                    format_args!(
+                        "attempt {}/{} for {} after HTTP {}; waiting {:.2}s ({})",
+                        retry_count,
+                        policy.max_retries,
+                        safe_initial_url,
+                        status,
+                        delay.as_secs_f64(),
+                        delay_source
+                    ),
                 );
                 println!(
                     "{} {}      {} HTTP {} (attempt {}/{})",
@@ -1959,6 +2285,13 @@ async fn download_file_content(
                 continue;
             }
 
+            logger.log(
+                "retry",
+                format_args!(
+                    "exhausted ({}/{}) for {} after HTTP {}",
+                    retry_count, policy.max_retries, safe_initial_url, status
+                ),
+            );
             println!(
                 "{} {}      {} Maximum retries ({}) exceeded",
                 "├╼".cyan().dimmed(),
@@ -1999,6 +2332,13 @@ async fn download_file_content(
                 total_expected_size,
             ),
             ResponseAction::VerifyCompletePart => {
+                logger.log(
+                    "download",
+                    format_args!(
+                        "HTTP {status} for '{}': verifying existing complete partial file ({current_file_size} bytes)",
+                        part_path.display()
+                    ),
+                );
                 if expected_md5.is_some() {
                     if !signal.is_running() {
                         return Err(interrupted_error());
@@ -2013,14 +2353,35 @@ async fn download_file_content(
                         return Err(interrupted_error());
                     }
                     if is_valid {
+                        logger.log(
+                            "download",
+                            format_args!(
+                                "verified complete partial file '{}' ({current_file_size} bytes)",
+                                part_path.display()
+                            ),
+                        );
                         return Ok((current_file_size, true));
                     }
                     if has_reset_range {
+                        logger.log(
+                            "download",
+                            format_args!(
+                                "complete partial file '{}' failed MD5 verification after range reset",
+                                part_path.display()
+                            ),
+                        );
                         return Err(IaGetError::Integrity(format!(
                             "MD5 mismatch for {}",
                             part_path.display()
                         )));
                     }
+                    logger.log(
+                        "download",
+                        format_args!(
+                            "complete partial file '{}' failed MD5 verification; discarding partial file and refetching without Range",
+                            part_path.display()
+                        ),
+                    );
                     has_reset_range = true;
                     remove_part_file_safely(root, part_path)?;
                     continue;
@@ -2028,15 +2389,36 @@ async fn download_file_content(
                 if !signal.is_running() {
                     return Err(interrupted_error());
                 }
+                logger.log(
+                    "download",
+                    format_args!(
+                        "accepting complete partial file '{}' ({current_file_size} bytes; no MD5 in metadata)",
+                        part_path.display()
+                    ),
+                );
                 return Ok((current_file_size, false));
             }
             ResponseAction::DiscardAndRefetchUnranged => {
                 if has_reset_range {
+                    logger.log(
+                        "download",
+                        format_args!(
+                            "HTTP {status} for '{}': repeated invalid range response after reset",
+                            part_path.display()
+                        ),
+                    );
                     return Err(IaGetError::Network(format!(
                         "HTTP error {}: repeated invalid range response after reset",
                         status
                     )));
                 }
+                logger.log(
+                    "download",
+                    format_args!(
+                        "HTTP {status} for '{}': discarding partial file ({current_file_size} bytes) and refetching without Range",
+                        part_path.display()
+                    ),
+                );
                 has_reset_range = true;
                 remove_part_file_safely(root, part_path)?;
                 continue;
@@ -2079,7 +2461,7 @@ async fn download_file_content(
                     .into());
                 }
 
-                let chunk = chunk_result?;
+                let chunk = chunk_result.map_err(reqwest::Error::without_url)?;
                 file.write_all(&chunk)?;
                 let chunk_len = chunk.len() as u64;
                 downloaded_bytes = downloaded_bytes.saturating_add(chunk_len);
@@ -2137,6 +2519,13 @@ async fn download_file_content(
                 if retry_count >= policy.max_retries {
                     let _ = file.flush();
                     drop(file);
+                    logger.log(
+                        "retry",
+                        format_args!(
+                            "exhausted ({}/{}) for {} mid-stream: {}",
+                            retry_count, policy.max_retries, safe_initial_url, e
+                        ),
+                    );
                     println!(
                         "{} {}      {} Maximum retries ({}) exceeded",
                         "├╼".cyan().dimmed(),
@@ -2148,7 +2537,20 @@ async fn download_file_content(
                 }
 
                 retry_count += 1;
-                let delay = compute_retry_delay(retry_count, None, SystemTime::now(), policy);
+                let (delay, delay_source) =
+                    compute_retry_delay_with_source(retry_count, None, SystemTime::now(), policy);
+                logger.log(
+                    "retry",
+                    format_args!(
+                        "attempt {}/{} for {} after mid-stream error ({}); waiting {:.2}s ({})",
+                        retry_count,
+                        policy.max_retries,
+                        safe_initial_url,
+                        e,
+                        delay.as_secs_f64(),
+                        delay_source
+                    ),
+                );
                 println!(
                     "{} {}      {} Download error (attempt {}/{}): {}",
                     "├╼".cyan().dimmed(),
@@ -2319,15 +2721,19 @@ async fn download_single_file_with_options(
     signal: &ShutdownSignal,
     cookie_source: Option<&CookieSource>,
     options: &DownloadOptions,
+    logger: &VerboseLogger,
 ) -> Result<FileOutcome> {
     if !signal.is_running() {
         return Err(interrupted_error());
     }
 
-    if let Some(is_valid) =
-        check_existing_file(root, file_path, expected_md5, signal.running_flag())?
-    {
-        if is_valid {
+    match check_existing_file(root, file_path, expected_md5, signal.running_flag())? {
+        ExistingFileStatus::Missing => {}
+        ExistingFileStatus::CompleteMd5Verified => {
+            logger.log(
+                "download",
+                format_args!("skipped '{file_path}': already exists; MD5 verified"),
+            );
             println!(
                 "{} {}   {}",
                 "╰╼".cyan().dimmed(),
@@ -2335,7 +2741,25 @@ async fn download_single_file_with_options(
                 "✔".green().bold()
             );
             return Ok(FileOutcome::Skipped);
-        } else {
+        }
+        ExistingFileStatus::CompleteNoMd5 => {
+            logger.log(
+                "download",
+                format_args!("skipped '{file_path}': already exists; no MD5 in metadata"),
+            );
+            println!(
+                "{} {}   {}",
+                "╰╼".cyan().dimmed(),
+                "Downloaded".white(),
+                "✔".green().bold()
+            );
+            return Ok(FileOutcome::Skipped);
+        }
+        ExistingFileStatus::NeedsRedownload => {
+            logger.log(
+                "download",
+                format_args!("redownloading '{file_path}': existing file hash mismatch"),
+            );
             println!(
                 "{} {}      {}",
                 "├╼".cyan().dimmed(),
@@ -2361,6 +2785,7 @@ async fn download_single_file_with_options(
         cookie_source,
         expected_md5,
         options,
+        logger,
     )
     .await?;
 
@@ -2401,6 +2826,7 @@ async fn download_single_file_with_policy(
     let options = DownloadOptions {
         retry_policy: *policy,
         limit_rate: None,
+        verbose: false,
     };
     download_single_file_with_options(
         client,
@@ -2411,6 +2837,7 @@ async fn download_single_file_with_policy(
         signal,
         cookie_source,
         &options,
+        &VerboseLogger::disabled(),
     )
     .await
 }
@@ -2439,13 +2866,14 @@ async fn download_single_file(
     .await
 }
 
-/// Downloads multiple files into destination `root` with explicit [`DownloadOptions`] and
-/// shutdown signal.
+/// Downloads multiple files into destination `root` with explicit [`DownloadOptions`],
+/// shutdown signal, and [`VerboseLogger`].
 ///
 /// Validates and prepares `root` before downloading, continues past per-file failures
 /// after printing a warning, stops promptly on shutdown signal interruption, prints an
 /// end-of-batch summary, and returns the collected [`BatchSummary`].
-pub async fn download_files_in_dir_with_options<I>(
+#[allow(clippy::too_many_arguments)]
+pub async fn download_files_in_dir_with_logger<I>(
     client: &Client,
     root: &Path,
     files: I,
@@ -2453,6 +2881,7 @@ pub async fn download_files_in_dir_with_options<I>(
     cookie_source: Option<&CookieSource>,
     options: &DownloadOptions,
     signal: &ShutdownSignal,
+    logger: &VerboseLogger,
 ) -> Result<BatchSummary>
 where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
@@ -2463,6 +2892,13 @@ where
     for (index, (url, file_path, expected_md5)) in files.into_iter().enumerate() {
         if !signal.is_running() {
             summary.interrupted = true;
+            logger.log(
+                "download",
+                format_args!(
+                    "interrupted before file {}/{total_files} ('{file_path}')",
+                    index + 1
+                ),
+            );
             println!(
                 "\n{} Download interrupted. Run the command again to resume remaining files.",
                 "✘".red().bold()
@@ -2495,14 +2931,28 @@ where
             signal,
             cookie_source,
             options,
+            logger,
         )
         .await
         {
-            Ok(FileOutcome::Downloaded) => summary.ok += 1,
+            Ok(FileOutcome::Downloaded) => {
+                summary.ok += 1;
+                logger.log(
+                    "download",
+                    format_args!("completed '{file_path}' ({}/{total_files})", index + 1),
+                );
+            }
             Ok(FileOutcome::Skipped) => summary.skipped += 1,
             Err(err) => {
                 if !signal.is_running() {
                     summary.interrupted = true;
+                    logger.log(
+                        "download",
+                        format_args!(
+                            "interrupted while downloading '{file_path}' ({}/{total_files})",
+                            index + 1
+                        ),
+                    );
                     println!(
                         "\n{} Download interrupted. Run the command again to resume remaining files.",
                         "✘".red().bold()
@@ -2510,6 +2960,7 @@ where
                     break;
                 }
 
+                logger.log("download", format_args!("failed '{file_path}': {err}"));
                 println!(
                     "{} {}      {} {}: {}",
                     "╰╼".cyan().dimmed(),
@@ -2526,8 +2977,50 @@ where
         }
     }
 
+    logger.log(
+        "summary",
+        format_args!(
+            "ok={} skipped={} failed={} interrupted={}",
+            summary.ok,
+            summary.skipped,
+            summary.failed.len(),
+            summary.interrupted
+        ),
+    );
     print_batch_summary(&summary);
     Ok(summary)
+}
+
+/// Downloads multiple files into destination `root` with explicit [`DownloadOptions`] and
+/// shutdown signal.
+///
+/// Validates and prepares `root` before downloading, continues past per-file failures
+/// after printing a warning, stops promptly on shutdown signal interruption, prints an
+/// end-of-batch summary, and returns the collected [`BatchSummary`].
+pub async fn download_files_in_dir_with_options<I>(
+    client: &Client,
+    root: &Path,
+    files: I,
+    total_files: usize,
+    cookie_source: Option<&CookieSource>,
+    options: &DownloadOptions,
+    signal: &ShutdownSignal,
+) -> Result<BatchSummary>
+where
+    I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
+{
+    let logger = VerboseLogger::from_enabled(options.verbose);
+    download_files_in_dir_with_logger(
+        client,
+        root,
+        files,
+        total_files,
+        cookie_source,
+        options,
+        signal,
+        &logger,
+    )
+    .await
 }
 
 /// Downloads multiple files into destination `root` with an explicit retry policy and shutdown signal.
@@ -2550,6 +3043,7 @@ where
     let options = DownloadOptions {
         retry_policy: *policy,
         limit_rate: None,
+        verbose: false,
     };
     download_files_in_dir_with_options(
         client,
@@ -2582,6 +3076,7 @@ where
     let options = DownloadOptions {
         retry_policy: *policy,
         limit_rate: None,
+        verbose: false,
     };
     download_files_in_dir_with_options(
         client,
@@ -7618,6 +8113,7 @@ mod tests {
         let options = DownloadOptions {
             retry_policy: RetryPolicy::default(),
             limit_rate: Some(parse_rate_limit("100K").unwrap()),
+            verbose: false,
         };
 
         let files = vec![(
@@ -7668,6 +8164,7 @@ mod tests {
         let options = DownloadOptions {
             retry_policy: RetryPolicy::default(),
             limit_rate: None,
+            verbose: false,
         };
 
         let files = vec![(
@@ -7712,6 +8209,7 @@ mod tests {
         let options = DownloadOptions {
             retry_policy: RetryPolicy::default(),
             limit_rate: Some(parse_rate_limit("1K").unwrap()),
+            verbose: false,
         };
 
         let part_path = temp_dir.part_path("interrupted.bin");
@@ -7798,6 +8296,7 @@ mod tests {
         let options = DownloadOptions {
             retry_policy: RetryPolicy::default(),
             limit_rate: Some(parse_rate_limit("100K").unwrap()),
+            verbose: false,
         };
 
         let files = vec![(
@@ -8816,5 +9315,398 @@ mod tests {
         assert_eq!(saved, payload);
         assert_eq!(md5_hex(&saved), expected_md5);
         assert!(!temp_dir.part_path("bypass-socks.bin").exists());
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs {
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl CapturedLogs {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn as_bytes(&self) -> Vec<u8> {
+            self.bytes.lock().unwrap().clone()
+        }
+
+        fn as_string(&self) -> String {
+            String::from_utf8(self.as_bytes()).expect("verbose logs must be valid UTF-8")
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verbose_logging_redirect_and_cookie_redaction_with_sentinel_secret() {
+        const SENTINEL_NAME: &str = "ia_sentinel_cookie_name";
+        const SENTINEL_VALUE: &str = "SUPER_SECRET_SENTINEL_9f8e7d6c";
+
+        let payload = b"redirected payload after protected hop".to_vec();
+        let expected_md5 = md5_hex(&payload);
+        let server = MockServer::start(vec![
+            MockResponse::with_headers(
+                "302 Found",
+                vec![
+                    ("Location", "/public/final.bin".to_string()),
+                    ("Content-Length", "0".to_string()),
+                ],
+                b"",
+            ),
+            MockResponse::ok(&payload),
+        ])
+        .await;
+
+        let netscape =
+            format!("127.0.0.1\tFALSE\t/protected/\tFALSE\t0\t{SENTINEL_NAME}\t{SENTINEL_VALUE}\n");
+        let cookie_source = CookieSource::from_netscape_str(&netscape);
+
+        let client = http_client_builder().build().unwrap();
+        let temp_dir = TempTestDir::new("verbose-redirect-cookie");
+        let signal = ShutdownSignal::new();
+        let options = DownloadOptions {
+            retry_policy: RetryPolicy {
+                max_retries: 0,
+                initial_delay: Duration::from_millis(5),
+                max_delay: Duration::from_millis(10),
+                max_retry_after: Duration::from_millis(50),
+            },
+            limit_rate: None,
+            verbose: true,
+        };
+        let captured = CapturedLogs::new();
+        let logger = VerboseLogger::with_writer(captured.clone());
+
+        let start_url = server.url("/protected/start.bin");
+        let final_url = server.url("/public/final.bin");
+
+        let outcome = download_single_file_with_options(
+            &client,
+            &temp_dir.path,
+            &start_url,
+            "final.bin",
+            Some(&expected_md5),
+            &signal,
+            Some(&cookie_source),
+            &options,
+            &logger,
+        )
+        .await
+        .expect("redirected download with scoped cookie should succeed");
+        assert_eq!(outcome, FileOutcome::Downloaded);
+        assert_eq!(fs::read(temp_dir.join("final.bin")).unwrap(), payload);
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].request_line,
+            "GET /protected/start.bin HTTP/1.1"
+        );
+        assert_eq!(
+            requests[0].header("Cookie"),
+            Some(format!("{SENTINEL_NAME}={SENTINEL_VALUE}").as_str()),
+            "sentinel cookie must genuinely be transmitted on hop 1"
+        );
+        assert_eq!(requests[1].request_line, "GET /public/final.bin HTTP/1.1");
+        assert_eq!(
+            requests[1].header("Cookie"),
+            None,
+            "path-scoped cookie must not be sent on hop 2"
+        );
+
+        let raw_bytes = captured.as_bytes();
+        assert!(
+            !raw_bytes.contains(&0x1b),
+            "verbose logs must contain zero ANSI escape bytes"
+        );
+
+        let logs = captured.as_string();
+        assert!(
+            !logs.contains(SENTINEL_NAME),
+            "verbose logs must never leak cookie name:\n{logs}"
+        );
+        assert!(
+            !logs.contains(SENTINEL_VALUE),
+            "verbose logs must never leak cookie value:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!("[verbose] http: -> GET {start_url} (cookies=yes)")),
+            "missing hop 1 GET with cookies=yes:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!(
+                "[verbose] http: <- 302 Found GET {start_url} (cookies=yes)"
+            )),
+            "missing hop 1 302 response:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!(
+                "[verbose] redirect: 302 Found {start_url} -> {final_url} (hop 1/"
+            )),
+            "missing 302 redirect from -> to line:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!("[verbose] http: -> GET {final_url} (cookies=no)")),
+            "missing hop 2 GET with cookies=no:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!(
+                "[verbose] http: <- 200 OK GET {final_url} (cookies=no)"
+            )),
+            "missing hop 2 200 OK response:\n{logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verbose_logging_retries_with_retry_after_and_backoff() {
+        let payload = b"recovered after 429 and 503".to_vec();
+        let expected_md5 = md5_hex(&payload);
+        let server = MockServer::start(vec![
+            MockResponse::with_headers(
+                "429 Too Many Requests",
+                vec![
+                    ("Retry-After", "0".to_string()),
+                    ("Content-Length", "0".to_string()),
+                ],
+                b"",
+            ),
+            MockResponse::with_headers(
+                "503 Service Unavailable",
+                vec![("Content-Length", "0".to_string())],
+                b"",
+            ),
+            MockResponse::ok(&payload),
+        ])
+        .await;
+
+        let client = http_client_builder().build().unwrap();
+        let temp_dir = TempTestDir::new("verbose-retries");
+        let signal = ShutdownSignal::new();
+        let options = DownloadOptions {
+            retry_policy: RetryPolicy {
+                max_retries: 3,
+                initial_delay: Duration::from_millis(5),
+                max_delay: Duration::from_millis(10),
+                max_retry_after: Duration::from_millis(50),
+            },
+            limit_rate: None,
+            verbose: true,
+        };
+        let captured = CapturedLogs::new();
+        let logger = VerboseLogger::with_writer(captured.clone());
+        let url = server.url("/flaky.bin");
+
+        let outcome = download_single_file_with_options(
+            &client,
+            &temp_dir.path,
+            &url,
+            "flaky.bin",
+            Some(&expected_md5),
+            &signal,
+            None,
+            &options,
+            &logger,
+        )
+        .await
+        .expect("download should recover after 429 and 503");
+        assert_eq!(outcome, FileOutcome::Downloaded);
+        assert_eq!(fs::read(temp_dir.join("flaky.bin")).unwrap(), payload);
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 3);
+
+        let raw_bytes = captured.as_bytes();
+        assert!(
+            !raw_bytes.contains(&0x1b),
+            "retry verbose logs must contain zero ANSI escape bytes"
+        );
+
+        let logs = captured.as_string();
+        assert!(
+            logs.contains(&format!(
+                "[verbose] retry: attempt 1/3 for {url} after HTTP 429 Too Many Requests; waiting 0.00s (retry-after)"
+            )),
+            "missing attempt 1 retry-after line:\n{logs}"
+        );
+
+        let backoff_line = logs
+            .lines()
+            .find(|line| {
+                line.contains(&format!(
+                    "[verbose] retry: attempt 2/3 for {url} after HTTP 503 Service Unavailable; waiting "
+                )) && line.ends_with("s (backoff)")
+            })
+            .unwrap_or_else(|| panic!("missing attempt 2 backoff line:\n{logs}"));
+        assert!(
+            backoff_line.contains("waiting 0."),
+            "expected sub-second backoff delay in line: {backoff_line}"
+        );
+        assert!(
+            logs.contains(&format!("[verbose] http: <- 200 OK GET {url} (cookies=no)")),
+            "missing final 200 OK log line:\n{logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verbose_logging_batch_skips_downloads_failures_and_summary() {
+        let existing_payload = b"already on disk and verified".to_vec();
+        let existing_md5 = md5_hex(&existing_payload);
+
+        let fresh_payload = b"freshly fetched file".to_vec();
+        let fresh_md5 = md5_hex(&fresh_payload);
+
+        let server = MockServer::start(vec![
+            MockResponse::ok(&fresh_payload),
+            MockResponse::with_headers(
+                "404 Not Found",
+                vec![("Content-Length", "0".to_string())],
+                b"",
+            ),
+        ])
+        .await;
+
+        let temp_dir = TempTestDir::new("verbose-batch-mixed");
+        fs::write(temp_dir.join("existing.bin"), &existing_payload).unwrap();
+
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+        let options = DownloadOptions {
+            retry_policy: RetryPolicy {
+                max_retries: 0,
+                initial_delay: Duration::from_millis(5),
+                max_delay: Duration::from_millis(10),
+                max_retry_after: Duration::from_millis(50),
+            },
+            limit_rate: None,
+            verbose: true,
+        };
+        let captured = CapturedLogs::new();
+        let logger = VerboseLogger::with_writer(captured.clone());
+
+        let batch = vec![
+            (
+                server.url("/existing.bin"),
+                "existing.bin".to_string(),
+                Some(existing_md5),
+            ),
+            (
+                server.url("/fresh.bin"),
+                "fresh.bin".to_string(),
+                Some(fresh_md5),
+            ),
+            (server.url("/missing.bin"), "missing.bin".to_string(), None),
+        ];
+
+        let summary = download_files_in_dir_with_logger(
+            &client,
+            &temp_dir.path,
+            batch,
+            3,
+            None,
+            &options,
+            &signal,
+            &logger,
+        )
+        .await
+        .expect("mixed batch should return summary");
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].file_path, "missing.bin");
+        assert!(!summary.interrupted);
+        assert_eq!(fs::read(temp_dir.join("fresh.bin")).unwrap(), fresh_payload);
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].request_line, "GET /fresh.bin HTTP/1.1");
+        assert_eq!(requests[1].request_line, "GET /missing.bin HTTP/1.1");
+
+        let raw_bytes = captured.as_bytes();
+        assert!(
+            !raw_bytes.contains(&0x1b),
+            "batch verbose logs must contain zero ANSI escape bytes"
+        );
+
+        let logs = captured.as_string();
+        assert!(
+            logs.contains(
+                "[verbose] download: skipped 'existing.bin': already exists; MD5 verified"
+            ),
+            "missing skip reason:\n{logs}"
+        );
+        assert!(
+            logs.contains("[verbose] download: completed 'fresh.bin' (2/3)"),
+            "missing download completion line:\n{logs}"
+        );
+        assert!(
+            logs.lines().any(|line| {
+                line.starts_with("[verbose] download: failed 'missing.bin': ")
+                    && line.contains("404")
+            }),
+            "missing failure reason for missing.bin:\n{logs}"
+        );
+        assert!(
+            logs.contains("[verbose] summary: ok=1 skipped=1 failed=1 interrupted=false"),
+            "missing batch summary counts:\n{logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verbose_logging_disabled_emits_zero_lines() {
+        let default_options = DownloadOptions::default();
+        assert!(
+            !default_options.verbose,
+            "DownloadOptions::default() must disable verbose logging"
+        );
+
+        let disabled_from_options = VerboseLogger::from_enabled(default_options.verbose);
+        assert!(!disabled_from_options.is_enabled());
+
+        let disabled = VerboseLogger::disabled();
+        assert!(!disabled.is_enabled());
+
+        let payload = b"silent download payload".to_vec();
+        let expected_md5 = md5_hex(&payload);
+        let server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
+        let temp_dir = TempTestDir::new("verbose-disabled");
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        let summary = download_files_in_dir_with_logger(
+            &client,
+            &temp_dir.path,
+            vec![(
+                server.url("/silent.bin"),
+                "silent.bin".to_string(),
+                Some(expected_md5),
+            )],
+            1,
+            None,
+            &default_options,
+            &signal,
+            &disabled,
+        )
+        .await
+        .expect("disabled verbose batch should succeed");
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert!(!summary.interrupted);
+        assert_eq!(fs::read(temp_dir.join("silent.bin")).unwrap(), payload);
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 1);
     }
 }

@@ -3,9 +3,11 @@
 use crate::constants::IDENTIFIER_PATTERN;
 use crate::{IaGetError, Result};
 use colored::*;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use regex::Regex;
-use std::sync::LazyLock;
+use std::fmt;
+use std::io::{self, Write};
+use std::sync::{Arc, LazyLock, Mutex};
 use url::Url;
 
 /// Spinner tick interval in milliseconds
@@ -229,6 +231,139 @@ pub fn validate_archive_url(url: &str) -> Result<()> {
     parse_archive_url(url).map(|_| ())
 }
 
+/// Returns the shared draw target used by all `indicatif` progress indicators.
+///
+/// Routing progress bars and spinners to `stdout` keeps `stderr` clean for
+/// `--verbose` diagnostic logs so `2> ia-get.log` captures diagnostics without
+/// terminal control codes or progress noise.
+pub(crate) fn progress_draw_target() -> ProgressDrawTarget {
+    ProgressDrawTarget::stdout()
+}
+
+/// Sanitises a URL for diagnostic logging by redacting any embedded userinfo
+/// (`username:password@`) while keeping scheme, host, port, path, query, and
+/// fragment intact.
+pub fn sanitize_url_for_log(url: &Url) -> String {
+    if url.username().is_empty() && url.password().is_none() {
+        return url.as_str().to_string();
+    }
+
+    let mut sanitized = url.clone();
+    let _ = sanitized.set_username("");
+    let _ = sanitized.set_password(None);
+    let serialized = sanitized.as_str();
+    let prefix = format!("{}://", sanitized.scheme());
+    if let Some(rest) = serialized.strip_prefix(&prefix) {
+        format!("{prefix}<redacted>@{rest}")
+    } else {
+        serialized.to_string()
+    }
+}
+
+#[derive(Clone)]
+enum LogSink {
+    Disabled,
+    Stderr,
+    Writer(Arc<Mutex<Box<dyn Write + Send>>>),
+}
+
+impl fmt::Debug for LogSink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disabled => f.write_str("Disabled"),
+            Self::Stderr => f.write_str("Stderr"),
+            Self::Writer(_) => f.write_str("Writer(..)"),
+        }
+    }
+}
+
+/// Structured single-line diagnostic logger for `--verbose` output.
+///
+/// Emits plain text `[verbose] <category>: <message>` lines to `stderr` or an
+/// injected writer, with no ANSI escape codes. Write errors (such as broken
+/// pipes) are ignored so diagnostic output never aborts a transfer.
+#[derive(Clone, Debug)]
+pub struct VerboseLogger {
+    sink: LogSink,
+}
+
+impl Default for VerboseLogger {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+impl VerboseLogger {
+    /// Creates a disabled logger that drops all messages without formatting.
+    pub fn disabled() -> Self {
+        Self {
+            sink: LogSink::Disabled,
+        }
+    }
+
+    /// Creates a logger that writes diagnostic lines to `stderr`.
+    pub fn stderr() -> Self {
+        Self {
+            sink: LogSink::Stderr,
+        }
+    }
+
+    /// Creates a `stderr` logger when `enabled` is `true`, or a disabled logger otherwise.
+    pub fn from_enabled(enabled: bool) -> Self {
+        if enabled {
+            Self::stderr()
+        } else {
+            Self::disabled()
+        }
+    }
+
+    /// Creates a logger that writes diagnostic lines to an arbitrary writer.
+    pub fn with_writer<W: Write + Send + 'static>(writer: W) -> Self {
+        Self {
+            sink: LogSink::Writer(Arc::new(Mutex::new(Box::new(writer)))),
+        }
+    }
+
+    /// Returns `true` when diagnostic logging is enabled.
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self.sink, LogSink::Disabled)
+    }
+
+    /// Emits a single plain-text diagnostic line when enabled.
+    ///
+    /// Embedded carriage returns and newlines in `message` are normalised to
+    /// spaces so every log record stays on a single line.
+    pub fn log(&self, category: &str, message: impl fmt::Display) {
+        if !self.is_enabled() {
+            return;
+        }
+
+        let raw = message.to_string();
+        let clean = if raw.contains(['\r', '\n']) {
+            raw.replace(['\r', '\n'], " ")
+        } else {
+            raw
+        };
+        let line = format!("[verbose] {category}: {clean}\n");
+
+        match &self.sink {
+            LogSink::Disabled => {}
+            LogSink::Stderr => {
+                let mut stderr = io::stderr().lock();
+                let _ = stderr.write_all(line.as_bytes());
+                let _ = stderr.flush();
+            }
+            LogSink::Writer(writer) => {
+                let mut guard = writer
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let _ = guard.write_all(line.as_bytes());
+                let _ = guard.flush();
+            }
+        }
+    }
+}
+
 /// Create a progress bar with consistent styling
 ///
 /// # Arguments
@@ -245,7 +380,7 @@ pub fn create_progress_bar(
     color: Option<&str>,
     with_eta: bool,
 ) -> ProgressBar {
-    let pb = ProgressBar::new(total);
+    let pb = ProgressBar::with_draw_target(Some(total), progress_draw_target());
     let color_str = color.unwrap_or("green/green");
 
     let styled_action = if action.contains("├╼") || action.contains("╰╼") {
@@ -286,7 +421,7 @@ pub fn create_progress_bar(
 /// # Returns
 /// A configured spinner
 pub fn create_spinner(message: &str) -> ProgressBar {
-    let spinner = ProgressBar::new_spinner();
+    let spinner = ProgressBar::with_draw_target(None, progress_draw_target());
     spinner.set_style(
         ProgressStyle::default_spinner()
             .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
@@ -1039,5 +1174,183 @@ mod tests {
                 "expected UrlFormat from validate_archive_url({url:?}), got {validate_err:?}"
             );
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl CapturedLogs {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn as_bytes(&self) -> Vec<u8> {
+            self.bytes.lock().unwrap().clone()
+        }
+
+        fn as_string(&self) -> String {
+            String::from_utf8(self.as_bytes()).expect("verbose logs must be valid UTF-8")
+        }
+    }
+
+    impl Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_progress_bar_and_spinner_target_stdout() {
+        let target = progress_draw_target();
+        let expected_stdout = ProgressDrawTarget::stdout();
+        let stderr_target = ProgressDrawTarget::stderr();
+
+        fn strip_rate_limiter(debug: &str) -> &str {
+            debug
+                .split_once("rate_limiter:")
+                .map_or(debug, |(prefix, _)| prefix)
+        }
+
+        let actual_debug = format!("{target:?}");
+        let stdout_debug = format!("{expected_stdout:?}");
+        let stderr_debug = format!("{stderr_target:?}");
+
+        assert_eq!(
+            strip_rate_limiter(&actual_debug),
+            strip_rate_limiter(&stdout_debug)
+        );
+        assert_eq!(target.is_hidden(), expected_stdout.is_hidden());
+        assert!(
+            !actual_debug.contains("Stderr"),
+            "progress draw target must never target stderr: {actual_debug}"
+        );
+        if !expected_stdout.is_hidden() {
+            assert!(
+                actual_debug.contains("Stdout"),
+                "when stdout is a terminal, progress draw target must target stdout: {actual_debug}"
+            );
+        }
+        if !expected_stdout.is_hidden() || !stderr_target.is_hidden() {
+            assert_ne!(
+                strip_rate_limiter(&actual_debug),
+                strip_rate_limiter(&stderr_debug),
+                "when stdout or stderr is a terminal, progress_draw_target() must differ from stderr"
+            );
+        } else {
+            assert!(
+                target.is_hidden(),
+                "when neither stdout nor stderr is a terminal, progress target must be hidden"
+            );
+        }
+
+        let pb_with_eta = create_progress_bar(100, "╰╼ Downloading  ", None, true);
+        assert_eq!(pb_with_eta.is_hidden(), expected_stdout.is_hidden());
+        pb_with_eta.inc(50);
+        pb_with_eta.finish_and_clear();
+
+        let pb_no_eta = create_progress_bar(100, "├╼ Verifying    ", Some("cyan/blue"), false);
+        assert_eq!(pb_no_eta.is_hidden(), expected_stdout.is_hidden());
+        pb_no_eta.inc(100);
+        pb_no_eta.finish_and_clear();
+
+        let spinner = create_spinner("Testing spinner lifecycle");
+        assert_eq!(spinner.is_hidden(), expected_stdout.is_hidden());
+        spinner.set_message("Updated spinner message");
+        spinner.finish_and_clear();
+    }
+
+    #[test]
+    fn test_sanitize_url_for_log_redacts_userinfo_and_preserves_plain_urls() {
+        let with_user_pass =
+            Url::parse("https://alice:s3cr3t@archive.org/download/item/file.bin?token=1#top")
+                .unwrap();
+        let sanitized_user_pass = sanitize_url_for_log(&with_user_pass);
+        assert_eq!(
+            sanitized_user_pass,
+            "https://<redacted>@archive.org/download/item/file.bin?token=1#top"
+        );
+        assert!(!sanitized_user_pass.contains("alice"));
+        assert!(!sanitized_user_pass.contains("s3cr3t"));
+
+        let with_user_only = Url::parse("https://bob@archive.org/details/item").unwrap();
+        let sanitized_user_only = sanitize_url_for_log(&with_user_only);
+        assert_eq!(
+            sanitized_user_only,
+            "https://<redacted>@archive.org/details/item"
+        );
+        assert!(!sanitized_user_only.contains("bob"));
+
+        let with_pass_only =
+            Url::parse("http://:onlypass@127.0.0.1:8080/protected/file.bin?a=1&b=2").unwrap();
+        let sanitized_pass_only = sanitize_url_for_log(&with_pass_only);
+        assert_eq!(
+            sanitized_pass_only,
+            "http://<redacted>@127.0.0.1:8080/protected/file.bin?a=1&b=2"
+        );
+        assert!(!sanitized_pass_only.contains("onlypass"));
+
+        let plain_https = Url::parse("https://archive.org/details/deftributetozzap64").unwrap();
+        assert_eq!(
+            sanitize_url_for_log(&plain_https),
+            "https://archive.org/details/deftributetozzap64"
+        );
+
+        let plain_with_port_path_query =
+            Url::parse("http://127.0.0.1:9000/download/item/my%20file.pdf?download=1&foo=bar#frag")
+                .unwrap();
+        assert_eq!(
+            sanitize_url_for_log(&plain_with_port_path_query),
+            "http://127.0.0.1:9000/download/item/my%20file.pdf?download=1&foo=bar#frag"
+        );
+    }
+
+    #[test]
+    fn test_verbose_logger_disabled_is_silent_and_enabled_has_no_ansi_codes() {
+        let disabled = VerboseLogger::disabled();
+        assert!(!disabled.is_enabled());
+        disabled.log("http", "this must be dropped silently");
+
+        let from_false = VerboseLogger::from_enabled(false);
+        assert!(!from_false.is_enabled());
+        from_false.log("download", "this must also be dropped silently");
+
+        let default_logger = VerboseLogger::default();
+        assert!(!default_logger.is_enabled());
+
+        assert!(VerboseLogger::stderr().is_enabled());
+        assert!(VerboseLogger::from_enabled(true).is_enabled());
+
+        let captured = CapturedLogs::new();
+        let enabled = VerboseLogger::with_writer(captured.clone());
+        assert!(enabled.is_enabled());
+
+        enabled.log(
+            "http",
+            "-> GET https://archive.org/details/item (cookies=no)",
+        );
+        enabled.log("download", "line1\nline2\r\nline3\rline4");
+
+        let raw_bytes = captured.as_bytes();
+        assert!(
+            !raw_bytes.contains(&0x1b),
+            "verbose logger must not emit ANSI escape bytes: {raw_bytes:?}"
+        );
+
+        let output = captured.as_string();
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "[verbose] http: -> GET https://archive.org/details/item (cookies=no)",
+                "[verbose] download: line1 line2  line3 line4",
+            ]
+        );
     }
 }

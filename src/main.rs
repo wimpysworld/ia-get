@@ -15,10 +15,10 @@ use ia_get::disk_space;
 use ia_get::downloader;
 use ia_get::utils::{
     create_spinner, format_size, parse_archive_url, percent_decode_utf8, sanitize_filename,
-    ArchiveUrl,
+    sanitize_url_for_log, ArchiveUrl,
 };
 use ia_get::verify;
-use ia_get::{CookieSource, FileFilter, IaGetError, Result};
+use ia_get::{CookieSource, FileFilter, IaGetError, Result, VerboseLogger};
 use indicatif::ProgressStyle;
 use reqwest::header::{HeaderMap, COOKIE};
 use reqwest::{Client, Url};
@@ -26,18 +26,20 @@ use reqwest::{Client, Url};
 /// Extended timeout for large file downloads (10 minutes for connection, no read timeout)
 const CONNECTION_TIMEOUT_SECS: u64 = 600;
 
-/// Checks if a URL is accessible by sending a HEAD request with an explicit retry policy.
-async fn is_url_accessible_with_policy(
+/// Checks if a URL is accessible by sending a HEAD request with an explicit retry policy and logger.
+async fn is_url_accessible_with_logger(
     url: &Url,
     client: &Client,
     cookie_source: Option<&CookieSource>,
     policy: &downloader::RetryPolicy,
     signal: &downloader::ShutdownSignal,
+    logger: &VerboseLogger,
 ) -> Result<()> {
-    let _response = downloader::send_with_retry(
+    let _response = downloader::send_with_retry_with_logger(
         url,
         policy,
         signal,
+        logger,
         |target_url| {
             let mut request = client
                 .head(target_url.clone())
@@ -60,7 +62,28 @@ async fn is_url_accessible_with_policy(
     Ok(())
 }
 
+/// Checks if a URL is accessible by sending a HEAD request with an explicit retry policy.
+#[allow(dead_code)]
+async fn is_url_accessible_with_policy(
+    url: &Url,
+    client: &Client,
+    cookie_source: Option<&CookieSource>,
+    policy: &downloader::RetryPolicy,
+    signal: &downloader::ShutdownSignal,
+) -> Result<()> {
+    is_url_accessible_with_logger(
+        url,
+        client,
+        cookie_source,
+        policy,
+        signal,
+        &VerboseLogger::disabled(),
+    )
+    .await
+}
+
 /// Checks if a URL is accessible by sending a HEAD request
+#[allow(dead_code)]
 async fn is_url_accessible(
     url: &Url,
     client: &Client,
@@ -77,14 +100,16 @@ async fn is_url_accessible(
     .await
 }
 
-/// Fetches and parses XML metadata from an already-resolved XML URL with an explicit retry policy.
-async fn fetch_xml_metadata_from_url(
+/// Fetches and parses XML metadata from an already-resolved XML URL with an explicit retry policy
+/// and diagnostic logger.
+async fn fetch_xml_metadata_from_url_with_logger(
     base_url: reqwest::Url,
     client: &Client,
     spinner: &indicatif::ProgressBar,
     cookie_source: Option<&CookieSource>,
     policy: &downloader::RetryPolicy,
     signal: &downloader::ShutdownSignal,
+    logger: &VerboseLogger,
 ) -> Result<(XmlFiles, reqwest::Url)> {
     let xml_url = base_url.as_str();
     spinner.set_message(format!(
@@ -95,7 +120,8 @@ async fn fetch_xml_metadata_from_url(
 
     // Check XML URL accessibility
     if let Err(e) =
-        is_url_accessible_with_policy(&base_url, client, cookie_source, policy, signal).await
+        is_url_accessible_with_logger(&base_url, client, cookie_source, policy, signal, logger)
+            .await
     {
         spinner.finish_with_message(format!(
             "{} XML metadata not accessible: {}",
@@ -111,10 +137,11 @@ async fn fetch_xml_metadata_from_url(
         "Parsing archive metadata...".bold()
     ));
 
-    let xml_content = downloader::fetch_text_with_retry(
+    let xml_content = downloader::fetch_text_with_retry_with_logger(
         &base_url,
         policy,
         signal,
+        logger,
         |target_url| {
             let mut request = client.get(target_url.clone());
             if let Some(cookie_header) = cookie_source
@@ -143,8 +170,62 @@ async fn fetch_xml_metadata_from_url(
 
     // Parse XML content with improved error handling
     let files = parse_xml_files(&xml_content)?;
+    logger.log(
+        "metadata",
+        format_args!(
+            "parsed {} file(s) from {}",
+            files.files.len(),
+            sanitize_url_for_log(&base_url)
+        ),
+    );
 
     Ok((files, base_url))
+}
+
+/// Fetches and parses XML metadata from an already-resolved XML URL with an explicit retry policy.
+#[allow(dead_code)]
+async fn fetch_xml_metadata_from_url(
+    base_url: reqwest::Url,
+    client: &Client,
+    spinner: &indicatif::ProgressBar,
+    cookie_source: Option<&CookieSource>,
+    policy: &downloader::RetryPolicy,
+    signal: &downloader::ShutdownSignal,
+) -> Result<(XmlFiles, reqwest::Url)> {
+    fetch_xml_metadata_from_url_with_logger(
+        base_url,
+        client,
+        spinner,
+        cookie_source,
+        policy,
+        signal,
+        &VerboseLogger::disabled(),
+    )
+    .await
+}
+
+/// Fetches and parses XML metadata from archive.org with diagnostic logging.
+async fn fetch_xml_metadata_with_logger(
+    target: &ArchiveUrl,
+    client: &Client,
+    spinner: &indicatif::ProgressBar,
+    cookie_source: Option<&CookieSource>,
+    signal: &downloader::ShutdownSignal,
+    logger: &VerboseLogger,
+) -> Result<(XmlFiles, reqwest::Url)> {
+    let xml_url = target.xml_url();
+    let base_url = reqwest::Url::parse(&xml_url)?;
+
+    fetch_xml_metadata_from_url_with_logger(
+        base_url,
+        client,
+        spinner,
+        cookie_source,
+        &downloader::RetryPolicy::default(),
+        signal,
+        logger,
+    )
+    .await
 }
 
 /// Fetches and parses XML metadata from archive.org
@@ -161,6 +242,7 @@ async fn fetch_xml_metadata_from_url(
 ///
 /// # Returns
 /// Tuple of (XmlFiles, base_url) for download processing
+#[allow(dead_code)]
 async fn fetch_xml_metadata(
     target: &ArchiveUrl,
     client: &Client,
@@ -168,16 +250,13 @@ async fn fetch_xml_metadata(
     cookie_source: Option<&CookieSource>,
     signal: &downloader::ShutdownSignal,
 ) -> Result<(XmlFiles, reqwest::Url)> {
-    let xml_url = target.xml_url();
-    let base_url = reqwest::Url::parse(&xml_url)?;
-
-    fetch_xml_metadata_from_url(
-        base_url,
+    fetch_xml_metadata_with_logger(
+        target,
         client,
         spinner,
         cookie_source,
-        &downloader::RetryPolicy::default(),
         signal,
+        &VerboseLogger::disabled(),
     )
     .await
 }
@@ -409,14 +488,16 @@ fn print_sanitization_warnings(sanitized: &[(String, String)]) {
 }
 
 /// Runs the pre-download disk-space check and, when it succeeds, downloads all planned files
-/// using explicit [`downloader::DownloadOptions`].
-async fn run_planned_downloads_with_options<F>(
+/// using explicit [`downloader::DownloadOptions`] and [`VerboseLogger`].
+#[allow(clippy::too_many_arguments)]
+async fn run_planned_downloads_with_logger<F>(
     client: &Client,
     output_dir: &Path,
     plan: DownloadPlan,
     cookie_source: Option<&CookieSource>,
     options: &downloader::DownloadOptions,
     signal: &downloader::ShutdownSignal,
+    logger: &VerboseLogger,
     check_space: F,
 ) -> Result<downloader::BatchSummary>
 where
@@ -432,7 +513,7 @@ where
         .into_iter()
         .map(|item| (item.url, item.file_path, item.expected_md5));
 
-    downloader::download_files_in_dir_with_options(
+    downloader::download_files_in_dir_with_logger(
         client,
         output_dir,
         download_data,
@@ -440,6 +521,36 @@ where
         cookie_source,
         options,
         signal,
+        logger,
+    )
+    .await
+}
+
+/// Runs the pre-download disk-space check and, when it succeeds, downloads all planned files
+/// using explicit [`downloader::DownloadOptions`].
+#[allow(dead_code)]
+async fn run_planned_downloads_with_options<F>(
+    client: &Client,
+    output_dir: &Path,
+    plan: DownloadPlan,
+    cookie_source: Option<&CookieSource>,
+    options: &downloader::DownloadOptions,
+    signal: &downloader::ShutdownSignal,
+    check_space: F,
+) -> Result<downloader::BatchSummary>
+where
+    F: FnOnce(&Path, &[disk_space::PlannedDownload], &downloader::ShutdownSignal) -> Result<()>,
+{
+    let logger = VerboseLogger::from_enabled(options.verbose);
+    run_planned_downloads_with_logger(
+        client,
+        output_dir,
+        plan,
+        cookie_source,
+        options,
+        signal,
+        &logger,
+        check_space,
     )
     .await
 }
@@ -461,6 +572,7 @@ where
     let options = downloader::DownloadOptions {
         retry_policy: *policy,
         limit_rate: None,
+        verbose: false,
     };
     run_planned_downloads_with_options(
         client,
@@ -521,7 +633,8 @@ Examples:
   ia-get -f '*.pdf' https://archive.org/details/deftributetozzap64
   ia-get -f '!*.torrent' https://archive.org/details/deftributetozzap64
   ia-get -b cookies.txt https://archive.org/details/deftributetozzap64
-  ia-get --limit-rate 500K https://archive.org/details/deftributetozzap64")]
+  ia-get --limit-rate 500K https://archive.org/details/deftributetozzap64
+  ia-get -v https://archive.org/details/deftributetozzap64 2> ia-get.log")]
 struct Cli {
     /// Archive.org item details URL (/details/<item>) or direct file URL (/download/<item>/<path>)
     url: String,
@@ -547,6 +660,9 @@ struct Cli {
         value_parser = downloader::parse_rate_limit
     )]
     limit_rate: Option<u64>,
+    /// Emit structured diagnostic logs to stderr while keeping progress output on stdout
+    #[arg(short = 'v', long = "verbose")]
+    verbose: bool,
 }
 
 /// Builds the application HTTP client with extended timeouts and explicit proxy configuration.
@@ -571,6 +687,7 @@ fn build_http_client(proxy_config: &downloader::ProxyConfig) -> Result<Client> {
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let logger = VerboseLogger::from_enabled(cli.verbose);
 
     let cookie_source = cli
         .cookies
@@ -604,8 +721,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let details_url = Url::parse(&target.details_url())?;
 
     // Check URL accessibility
-    if let Err(e) =
-        is_url_accessible(&details_url, &client, cookie_source.as_ref(), &shutdown).await
+    if let Err(e) = is_url_accessible_with_logger(
+        &details_url,
+        &client,
+        cookie_source.as_ref(),
+        &downloader::RetryPolicy::default(),
+        &shutdown,
+        &logger,
+    )
+    .await
     {
         spinner.finish_with_message(format!(
             "{} Archive.org URL not accessible: {}",
@@ -616,12 +740,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
 
     // Fetch and parse XML metadata in one operation
-    let (files, base_url) = fetch_xml_metadata(
+    let (files, base_url) = fetch_xml_metadata_with_logger(
         &target,
         &client,
         &spinner,
         cookie_source.as_ref(),
         &shutdown,
+        &logger,
     )
     .await?;
 
@@ -658,7 +783,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         );
         spinner.finish();
 
-        let summary = verify::verify_files(&output_dir, &files.files, &shutdown)?;
+        let summary =
+            verify::verify_files_with_logger(&output_dir, &files.files, &shutdown, &logger)?;
         verify_exit_result(&summary, files.files.len())?;
         return Ok(());
     }
@@ -668,15 +794,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let options = downloader::DownloadOptions {
         retry_policy: downloader::RetryPolicy::default(),
         limit_rate: cli.limit_rate,
+        verbose: cli.verbose,
     };
 
-    let summary = run_planned_downloads_with_options(
+    let summary = run_planned_downloads_with_logger(
         &client,
         &output_dir,
         plan,
         cookie_source.as_ref(),
         &options,
         &shutdown,
+        &logger,
         |dir, items, signal| {
             spinner.set_message(format!(
                 "{} {}",
@@ -2529,6 +2657,7 @@ mod tests {
                 (Some('o'), Some("output-dir")),
                 (Some('f'), Some("filter")),
                 (None, Some("limit-rate")),
+                (Some('v'), Some("verbose")),
             ]
         );
 
@@ -2604,6 +2733,14 @@ mod tests {
                 "ia-get --limit-rate 500K https://archive.org/details/deftributetozzap64"
             ),
             "help should include --limit-rate example:\n{help}"
+        );
+        assert!(
+            help.contains("-v, --verbose"),
+            "help should expose -v/--verbose:\n{help}"
+        );
+        assert!(
+            help.contains("ia-get -v https://archive.org/details/deftributetozzap64 2> ia-get.log"),
+            "help should include -v stderr redirection example:\n{help}"
         );
     }
 
@@ -4722,6 +4859,7 @@ mod tests {
         let options = downloader::DownloadOptions {
             retry_policy: policy,
             limit_rate: cli.limit_rate,
+            verbose: false,
         };
 
         let started = Instant::now();
@@ -4854,5 +4992,371 @@ mod tests {
         );
         assert_eq!(requests[0].header("User-Agent"), Some(USER_AGENT));
         assert_eq!(requests[1].header("User-Agent"), Some(USER_AGENT));
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs {
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl CapturedLogs {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn as_bytes(&self) -> Vec<u8> {
+            self.bytes.lock().unwrap().clone()
+        }
+
+        fn as_string(&self) -> String {
+            String::from_utf8(self.as_bytes()).expect("verbose logs must be valid UTF-8")
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cli_parses_verbose_short_and_long_flags_and_defaults_false() {
+        const KIB: u64 = 1024;
+        const MIB: u64 = 1024 * KIB;
+        let url = "https://archive.org/details/deftributetozzap64";
+
+        let default_cli = Cli::try_parse_from(["ia-get", url]).unwrap();
+        assert!(!default_cli.verbose);
+
+        let short_cli = Cli::try_parse_from(["ia-get", "-v", url]).unwrap();
+        assert!(short_cli.verbose);
+
+        let long_cli = Cli::try_parse_from(["ia-get", "--verbose", url]).unwrap();
+        assert!(long_cli.verbose);
+
+        let with_list_combo = Cli::try_parse_from([
+            "ia-get",
+            "-v",
+            "--list",
+            "-b",
+            "cookies.txt",
+            "-o",
+            "./downloads",
+            "-f",
+            "*.pdf",
+            "--limit-rate",
+            "500K",
+            url,
+        ])
+        .unwrap();
+        assert!(with_list_combo.verbose);
+        assert!(with_list_combo.list);
+        assert_eq!(with_list_combo.cookies.as_deref(), Some("cookies.txt"));
+        assert_eq!(
+            with_list_combo.output_dir,
+            Some(PathBuf::from("./downloads"))
+        );
+        assert_eq!(with_list_combo.filters, vec!["*.pdf"]);
+        assert_eq!(with_list_combo.limit_rate, Some(500 * KIB));
+
+        let with_check_combo = Cli::try_parse_from([
+            "ia-get",
+            "--verbose",
+            "--check",
+            "-b",
+            "auth=1",
+            "-o",
+            "./downloads",
+            "-f",
+            "!*.torrent",
+            "--limit-rate=2M",
+            url,
+        ])
+        .unwrap();
+        assert!(with_check_combo.verbose);
+        assert!(with_check_combo.check);
+        assert_eq!(with_check_combo.cookies.as_deref(), Some("auth=1"));
+        assert_eq!(
+            with_check_combo.output_dir,
+            Some(PathBuf::from("./downloads"))
+        );
+        assert_eq!(with_check_combo.filters, vec!["!*.torrent"]);
+        assert_eq!(with_check_combo.limit_rate, Some(2 * MIB));
+    }
+
+    #[test]
+    fn cli_help_documents_verbose_flag_and_stderr_redirection_example() {
+        use clap::CommandFactory;
+
+        Cli::command().debug_assert();
+
+        let help = Cli::command().render_help().to_string();
+        assert!(help.contains("-v"), "help should mention -v:\n{help}");
+        assert!(
+            help.contains("--verbose"),
+            "help should mention --verbose:\n{help}"
+        );
+        assert!(
+            help.contains("stderr"),
+            "help should mention stderr:\n{help}"
+        );
+        assert!(
+            help.contains("2> ia-get.log"),
+            "help should include 2> ia-get.log redirection example:\n{help}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verbose_pipeline_e2e_logs_head_get_cookies_and_stays_silent_when_disabled() {
+        const SENTINEL_NAME: &str = "ia_e2e_sentinel_cookie";
+        const SENTINEL_VALUE: &str = "E2E_TOP_SECRET_TOKEN_a1b2c3d4";
+
+        let payload = b"end-to-end verbose pipeline payload";
+        let expected_md5 = format!("{:x}", md5::compute(payload));
+        let xml_body = build_xml_metadata(&[("asset.bin", payload.len(), expected_md5.clone())]);
+
+        let netscape =
+            format!("127.0.0.1\tFALSE\t/\tFALSE\t0\t{SENTINEL_NAME}\t{SENTINEL_VALUE}\n");
+        let cookie_source = CookieSource::from_netscape_str(&netscape);
+        let expected_cookie_header = format!("{SENTINEL_NAME}={SENTINEL_VALUE}");
+
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 0,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_retry_after: Duration::from_millis(50),
+        };
+
+        // Run 1: verbose logging enabled with captured writer
+        let server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+            MockResponse::ok(payload),
+        ])
+        .await;
+
+        let details_url = server.url("/details/item");
+        let xml_url = server.url("/download/item/item_files.xml");
+        let asset_url = server.url("/download/item/asset.bin");
+        let output_dir = TempTestDir::new("verbose-e2e-enabled");
+        let captured = CapturedLogs::new();
+        let logger = VerboseLogger::with_writer(captured.clone());
+        let options = downloader::DownloadOptions {
+            retry_policy: policy,
+            limit_rate: None,
+            verbose: true,
+        };
+
+        is_url_accessible_with_logger(
+            &details_url,
+            &client,
+            Some(&cookie_source),
+            &policy,
+            &signal,
+            &logger,
+        )
+        .await
+        .expect("details HEAD check should succeed");
+
+        let (files, base_url) = fetch_xml_metadata_from_url_with_logger(
+            xml_url.clone(),
+            &client,
+            &spinner,
+            Some(&cookie_source),
+            &policy,
+            &signal,
+            &logger,
+        )
+        .await
+        .expect("XML metadata fetch should succeed");
+
+        let plan = plan_downloads(files, &base_url);
+        let summary = run_planned_downloads_with_logger(
+            &client,
+            &output_dir.0,
+            plan,
+            Some(&cookie_source),
+            &options,
+            &signal,
+            &logger,
+            |_, _, _| Ok(()),
+        )
+        .await
+        .expect("planned download should succeed");
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert!(!summary.interrupted);
+        assert_eq!(
+            std::fs::read(output_dir.join("asset.bin")).unwrap(),
+            payload
+        );
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].request_line.starts_with("HEAD /details/item "));
+        assert!(requests[1]
+            .request_line
+            .starts_with("HEAD /download/item/item_files.xml "));
+        assert!(requests[2]
+            .request_line
+            .starts_with("GET /download/item/item_files.xml "));
+        assert!(requests[3]
+            .request_line
+            .starts_with("GET /download/item/asset.bin "));
+        for (idx, req) in requests.iter().enumerate() {
+            assert_eq!(
+                req.header("Cookie"),
+                Some(expected_cookie_header.as_str()),
+                "request #{idx} ({}) must genuinely transmit sentinel cookie",
+                req.request_line
+            );
+        }
+
+        let raw_bytes = captured.as_bytes();
+        assert!(
+            !raw_bytes.contains(&0x1b),
+            "e2e verbose logs must contain zero ANSI escape bytes"
+        );
+
+        let logs = captured.as_string();
+        assert!(
+            !logs.contains(SENTINEL_NAME),
+            "e2e verbose logs must never leak cookie name:\n{logs}"
+        );
+        assert!(
+            !logs.contains(SENTINEL_VALUE),
+            "e2e verbose logs must never leak cookie value:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!(
+                "[verbose] http: -> HEAD {details_url} (cookies=yes)"
+            )),
+            "missing details HEAD request log:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!(
+                "[verbose] http: <- 200 OK HEAD {details_url} (cookies=yes)"
+            )),
+            "missing details HEAD 200 OK response log:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!("[verbose] http: -> HEAD {xml_url} (cookies=yes)")),
+            "missing XML HEAD request log:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!("[verbose] http: -> GET {xml_url} (cookies=yes)")),
+            "missing XML GET request log:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!(
+                "[verbose] http: <- 200 OK GET {xml_url} (cookies=yes)"
+            )),
+            "missing XML GET 200 OK response log:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!(
+                "[verbose] metadata: parsed 1 file(s) from {xml_url}"
+            )),
+            "missing metadata parse log:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!("[verbose] http: -> GET {asset_url} (cookies=yes)")),
+            "missing asset GET request log:\n{logs}"
+        );
+        assert!(
+            logs.contains(&format!(
+                "[verbose] http: <- 200 OK GET {asset_url} (cookies=yes)"
+            )),
+            "missing asset GET 200 OK response log:\n{logs}"
+        );
+        assert!(
+            logs.contains("[verbose] download: completed 'asset.bin' (1/1)"),
+            "missing download completed log:\n{logs}"
+        );
+        assert!(
+            logs.contains("[verbose] summary: ok=1 skipped=0 failed=0 interrupted=false"),
+            "missing summary log:\n{logs}"
+        );
+
+        // Run 2: verbose logging disabled stays silent
+        let silent_server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::ok(b""),
+            MockResponse::ok(xml_body.as_bytes()),
+            MockResponse::ok(payload),
+        ])
+        .await;
+
+        let silent_details_url = silent_server.url("/details/item");
+        let silent_xml_url = silent_server.url("/download/item/item_files.xml");
+        let silent_output_dir = TempTestDir::new("verbose-e2e-disabled");
+        let disabled_logger = VerboseLogger::disabled();
+        assert!(!disabled_logger.is_enabled());
+        assert!(!VerboseLogger::from_enabled(false).is_enabled());
+        let silent_options = downloader::DownloadOptions {
+            retry_policy: policy,
+            limit_rate: None,
+            verbose: false,
+        };
+
+        is_url_accessible_with_logger(
+            &silent_details_url,
+            &client,
+            Some(&cookie_source),
+            &policy,
+            &signal,
+            &disabled_logger,
+        )
+        .await
+        .expect("silent details HEAD check should succeed");
+
+        let (silent_files, silent_base_url) = fetch_xml_metadata_from_url_with_logger(
+            silent_xml_url,
+            &client,
+            &spinner,
+            Some(&cookie_source),
+            &policy,
+            &signal,
+            &disabled_logger,
+        )
+        .await
+        .expect("silent XML metadata fetch should succeed");
+
+        let silent_plan = plan_downloads(silent_files, &silent_base_url);
+        let silent_summary = run_planned_downloads_with_logger(
+            &client,
+            &silent_output_dir.0,
+            silent_plan,
+            Some(&cookie_source),
+            &silent_options,
+            &signal,
+            &disabled_logger,
+            |_, _, _| Ok(()),
+        )
+        .await
+        .expect("silent planned download should succeed");
+
+        assert_eq!(silent_summary.ok, 1);
+        assert_eq!(silent_summary.skipped, 0);
+        assert!(silent_summary.failed.is_empty());
+        assert!(!silent_summary.interrupted);
+        assert_eq!(
+            std::fs::read(silent_output_dir.join("asset.bin")).unwrap(),
+            payload
+        );
+
+        let silent_requests = silent_server.finish().await;
+        assert_eq!(silent_requests.len(), 4);
     }
 }

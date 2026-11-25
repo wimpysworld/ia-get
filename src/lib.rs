@@ -19,3 +19,4 @@ pub mod verify;
 pub use cookie::CookieSource;
 pub use error::{IaGetError, Result};
 pub use filter::FileFilter;
+pub use utils::VerboseLogger;

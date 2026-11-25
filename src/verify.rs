@@ -9,7 +9,7 @@ use colored::*;
 use crate::archive_metadata::XmlFile;
 use crate::downloader::{self, ShutdownSignal};
 use crate::error::IaGetError;
-use crate::utils;
+use crate::utils::{self, VerboseLogger};
 use crate::Result;
 
 /// A single issue detected while verifying a local file against archive metadata.
@@ -232,12 +232,24 @@ pub fn verify_files(
     files: &[XmlFile],
     signal: &ShutdownSignal,
 ) -> Result<VerificationSummary> {
+    verify_files_with_logger(root, files, signal, &VerboseLogger::disabled())
+}
+
+/// Verifies local files inside `root` against `files` without creating, modifying, or deleting
+/// any files or directories, emitting diagnostic logs to `logger`.
+pub fn verify_files_with_logger(
+    root: &Path,
+    files: &[XmlFile],
+    signal: &ShutdownSignal,
+    logger: &VerboseLogger,
+) -> Result<VerificationSummary> {
     let canonical_root = validate_check_dir(root)?;
     let mut summary = VerificationSummary::default();
 
     for file in files {
         if !signal.is_running() {
             summary.interrupted = true;
+            logger.log("verify", "interrupted by user");
             print_interrupted_notice();
             break;
         }
@@ -344,6 +356,12 @@ pub fn verify_files(
                                         if let Some(expected_md5) = file.md5.as_deref() {
                                             if !signal.is_running() {
                                                 summary.interrupted = true;
+                                                logger.log(
+                                                    "verify",
+                                                    format_args!(
+                                                        "interrupted while verifying '{sanitized_name}'"
+                                                    ),
+                                                );
                                                 print_interrupted_notice();
                                                 break;
                                             }
@@ -371,6 +389,12 @@ pub fn verify_files(
                                                             .contains("interrupted by signal")
                                                     {
                                                         summary.interrupted = true;
+                                                        logger.log(
+                                                            "verify",
+                                                            format_args!(
+                                                                "interrupted while verifying '{sanitized_name}'"
+                                                            ),
+                                                        );
                                                         print_interrupted_notice();
                                                         break;
                                                     }
@@ -429,12 +453,18 @@ pub fn verify_files(
 
         if issues.is_empty() {
             summary.ok += 1;
+            logger.log("verify", format_args!("ok '{sanitized_name}'"));
         } else {
+            let formatted_issues = format_issues(&issues);
+            logger.log(
+                "verify",
+                format_args!("failed '{sanitized_name}': {formatted_issues}"),
+            );
             println!(
                 "{} {}: {}",
                 "✘".red().bold(),
                 sanitized_name.bold(),
-                format_issues(&issues)
+                formatted_issues
             );
             summary.failed.push(FailedVerification {
                 file_path: sanitized_name,
@@ -443,6 +473,15 @@ pub fn verify_files(
         }
     }
 
+    logger.log(
+        "summary",
+        format_args!(
+            "ok={} failed={} interrupted={}",
+            summary.ok,
+            summary.failed.len(),
+            summary.interrupted
+        ),
+    );
     print_verification_summary(&summary);
     Ok(summary)
 }
@@ -1165,5 +1204,92 @@ mod tests {
             format_verification_summary(&interrupted_with_failure),
             "Verification summary: 0 ok, 1 failed, interrupted\nFailed files:\n  - missing.bin: missing"
         );
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs {
+        bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl CapturedLogs {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn as_bytes(&self) -> Vec<u8> {
+            self.bytes.lock().unwrap().clone()
+        }
+
+        fn as_string(&self) -> String {
+            String::from_utf8(self.as_bytes()).expect("verbose logs must be valid UTF-8")
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn verify_files_with_logger_emits_plain_diagnostics_and_stays_silent_when_disabled() {
+        let sandbox = TempTestDir::new("verify-verbose");
+
+        let good_payload = b"verified archive content";
+        let good_md5 = format!("{:x}", md5::compute(good_payload));
+        fs::write(sandbox.join("good.bin"), good_payload).unwrap();
+
+        let corrupt_payload = b"corrupted content";
+        fs::write(sandbox.join("corrupt.bin"), corrupt_payload).unwrap();
+
+        let files = vec![
+            xml_file("good.bin", Some(good_payload.len() as u64), Some(&good_md5)),
+            xml_file(
+                "corrupt.bin",
+                Some(corrupt_payload.len() as u64),
+                Some("00000000000000000000000000000000"),
+            ),
+        ];
+
+        let signal = ShutdownSignal::new();
+        let captured = CapturedLogs::new();
+        let logger = VerboseLogger::with_writer(captured.clone());
+
+        let summary = verify_files_with_logger(&sandbox.0, &files, &signal, &logger).unwrap();
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].file_path, "corrupt.bin");
+        assert!(!summary.interrupted);
+
+        let raw_bytes = captured.as_bytes();
+        assert!(
+            !raw_bytes.contains(&0x1b),
+            "verification verbose logs must contain zero ANSI escape bytes"
+        );
+
+        let logs = captured.as_string();
+        assert!(
+            logs.contains("[verbose] verify: ok 'good.bin'"),
+            "missing ok log line:\n{logs}"
+        );
+        assert!(
+            logs.contains("[verbose] verify: failed 'corrupt.bin': MD5 mismatch"),
+            "missing failure reason log line:\n{logs}"
+        );
+        assert!(
+            logs.contains("[verbose] summary: ok=1 failed=1 interrupted=false"),
+            "missing verification summary line:\n{logs}"
+        );
+
+        let disabled = VerboseLogger::disabled();
+        assert!(!disabled.is_enabled());
+        let silent_summary =
+            verify_files_with_logger(&sandbox.0, &files, &signal, &disabled).unwrap();
+        assert_eq!(silent_summary, summary);
     }
 }

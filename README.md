@@ -145,6 +145,18 @@ ia-get --limit-rate 2M https://archive.org/details/<identifier>
 ia-get --limit-rate 1024 https://archive.org/download/<identifier>/<path>
 ```
 
+Write diagnostic logs to `stderr` with `-v` or `--verbose`.
+Progress bars and spinners draw to `stdout`, so `stderr` stays clean when you redirect it to a file.
+Without `-v`, `ia-get` writes no verbose diagnostic lines to `stderr`.
+With `-v`, `ia-get` writes plain-text lines without ANSI escape codes for HTTP requests, statuses, redirect hops, and retry delays (`retry-after` or `backoff`).
+These logs also record per-file skip, failure, and verification reasons, plus run summaries.
+`ia-get` redacts embedded credentials in logged URLs and logs only `cookies=yes` or `cookies=no`, never `Cookie` header names or values.
+
+```shell
+ia-get -v https://archive.org/details/<identifier> 2> ia-get.log
+ia-get --verbose --check https://archive.org/details/<identifier> 2> check.log
+```
+
 `ia-get` honours the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` environment variables automatically.
 Lowercase names take precedence over uppercase names, and scheme-specific variables (`HTTP_PROXY`, `HTTPS_PROXY`) take precedence over `ALL_PROXY`.
 Supported proxy schemes are `http://`, `https://`, `socks4://`, `socks4a://`, `socks5://`, and `socks5h://`.
@@ -165,6 +177,7 @@ ALL_PROXY=socks5h://127.0.0.1:1080 NO_PROXY=localhost,127.0.0.1 ia-get https://a
 | `--check` | Verify local files against archive metadata without downloading or modifying files (conflicts with `--list`). |
 | `-f`, `--filter <GLOB>` | Filter files by glob pattern (repeatable, prefix with `!` to exclude). |
 | `--limit-rate <RATE>` | Limit download bandwidth (raw bytes per second or `B`, `K`/`KB`, `M`/`MB`, `G`/`GB` in 1024-byte units). |
+| `-v`, `--verbose` | Write plain-text diagnostic logs to `stderr` while progress output stays on `stdout`. |
 
 ## Why? 🤔💭
 
@@ -188,6 +201,7 @@ So I co-authored `ia-get` to automate the download process.
 - 🔏 Verifies MD5 hashes and renames `.part` files atomically only after verification succeeds
 - ✅ Verifies existing local directories in read-only `--check` mode for file presence, leftover `.part` files, sizes, and MD5 hashes
 - 📋 Continues past individual file failures, prints a batch summary, and exits with a non-zero status on failed or interrupted runs
+- 📝 Writes plain-text diagnostic logs to `stderr` with `-v`/`--verbose` (requests, redirects, retries, file outcomes, and summaries) while progress draws to `stdout`
 - 🍪 Scopes cookies per request and redirect hop, checks live expiry, and rejects redirect loops and HTTPS-to-HTTP downgrades
 - 🌐 Honours `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` for HTTP, HTTPS, and SOCKS4/4a/5/5h proxies, and rejects malformed URLs
 - 🌱 Can be run multiple times to update existing downloads
