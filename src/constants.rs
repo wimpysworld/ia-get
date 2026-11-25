@@ -20,3 +20,6 @@ pub const MAX_RETRY_DELAY_SECS: u64 = 60;
 
 /// Maximum honourable `Retry-After` delay in seconds
 pub const MAX_RETRY_AFTER_SECS: u64 = 60;
+
+/// Maximum number of HTTP redirects to follow per request
+pub const MAX_REDIRECTS: usize = 10;

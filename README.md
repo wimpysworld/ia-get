@@ -62,7 +62,11 @@ At the end of a run, `ia-get` prints a summary with `ok`, `skipped`, and `failed
 If any file fails or Ctrl+C interrupts the run, `ia-get` exits with a non-zero status.
 
 Pass cookies for archive.org items that require a logged-in session.
-`--cookies`/`-b` accepts either a raw Cookie header string or a Netscape `cookies.txt` file exported from your browser.
+`--cookies`/`-b` accepts either a raw `Cookie` header or a Netscape `cookies.txt` file exported from your browser.
+Raw cookie strings attach only to HTTPS requests for `archive.org` and its subdomains.
+For `cookies.txt` files, `ia-get` matches host, path (longest path first per RFC 6265), the `Secure` flag, and live expiry on every request and retry.
+`ia-get` follows up to 10 redirects manually and rejects redirect loops and HTTPS-to-HTTP downgrades.
+`ia-get` re-evaluates cookies on every hop so that credentials never leak to unrelated hosts or mismatched paths.
 
 ```shell
 ia-get --cookies cookies.txt https://archive.org/details/<identifier>
@@ -94,6 +98,7 @@ So I co-authored `ia-get` to automate the download process.
 - 🔄 Stages downloads in `.part` files, resumes partial transfers, and validates HTTP range responses
 - 🔏 Verifies MD5 hashes and renames `.part` files atomically only after verification succeeds
 - 📋 Continues past individual file failures, prints a batch summary, and exits with a non-zero status on failed or interrupted runs
+- 🍪 Scopes cookies per request and redirect hop, checks live expiry, and rejects redirect loops and HTTPS-to-HTTP downgrades
 - 🌱 Can be run multiple times to update existing downloads
 - 📊 Gets all the metadata for the archive
 - 📦️ Available for **Linux** 🐧 **macOS** 🍏 and **Windows** 🪟

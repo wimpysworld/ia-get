@@ -7,9 +7,11 @@
 
 pub mod archive_metadata;
 pub mod constants;
+pub mod cookie;
 pub mod downloader;
 pub mod error;
 pub mod utils;
 
-// Re-export the error types for convenience
+// Re-export common types for convenience
+pub use cookie::CookieSource;
 pub use error::{IaGetError, Result};

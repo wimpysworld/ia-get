@@ -1,6 +1,7 @@
 //! Module for handling file downloads, verification, and related operations.
 
 use std::collections::hash_map::RandomState;
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::future::Future;
@@ -13,12 +14,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use colored::*;
 use reqwest::header::{HeaderMap, HeaderValue};
-use reqwest::{Client, RequestBuilder, Response, StatusCode};
+use reqwest::{Client, ClientBuilder, RequestBuilder, Response, StatusCode, Url};
 use tokio::sync::Notify;
 
 use crate::constants::{
-    INITIAL_RETRY_DELAY_MS, MAX_RETRIES, MAX_RETRY_AFTER_SECS, MAX_RETRY_DELAY_SECS,
+    INITIAL_RETRY_DELAY_MS, MAX_REDIRECTS, MAX_RETRIES, MAX_RETRY_AFTER_SECS, MAX_RETRY_DELAY_SECS,
 };
+use crate::cookie::CookieSource;
 use crate::error::IaGetError; // Import IaGetError for explicit error conversion
 use crate::utils::{create_progress_bar, format_duration, format_size, format_transfer_rate};
 use crate::Result; // Import utility functions
@@ -467,24 +469,151 @@ pub fn compute_retry_delay(
     compute_backoff_delay_with_sample(attempt, policy, random_u64())
 }
 
+/// Returns a [`reqwest::ClientBuilder`] with automatic redirect following disabled
+/// so redirects are handled manually with per-hop cookie resolution.
+pub fn http_client_builder() -> ClientBuilder {
+    Client::builder().redirect(reqwest::redirect::Policy::none())
+}
+
+fn is_redirect_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    )
+}
+
+fn resolve_redirect_target(current_url: &Url, location: &str) -> Result<Url> {
+    let location = location.trim();
+    if location.is_empty() {
+        return Err(IaGetError::Network(format!(
+            "Redirect from {} has empty Location header",
+            current_url
+        )));
+    }
+
+    let next_url = current_url.join(location).map_err(|err| {
+        IaGetError::Network(format!(
+            "Invalid redirect Location '{}' from {}: {}",
+            location, current_url, err
+        ))
+    })?;
+
+    if !matches!(next_url.scheme(), "http" | "https") {
+        return Err(IaGetError::Network(format!(
+            "Unsupported redirect scheme '{}' in Location '{}' from {}",
+            next_url.scheme(),
+            location,
+            current_url
+        )));
+    }
+
+    if current_url.scheme() == "https" && next_url.scheme() != "https" {
+        return Err(IaGetError::Network(format!(
+            "Refusing HTTPS-to-{} redirect downgrade from {} to {}",
+            next_url.scheme(),
+            current_url,
+            next_url
+        )));
+    }
+
+    Ok(next_url)
+}
+
+enum RedirectSendOutcome {
+    Response(Response),
+    TransportError(reqwest::Error),
+}
+
+async fn send_following_redirects<F>(
+    initial_url: &Url,
+    signal: &ShutdownSignal,
+    max_redirects: usize,
+    mut build_request: F,
+) -> Result<RedirectSendOutcome>
+where
+    F: FnMut(&Url) -> Result<RequestBuilder>,
+{
+    let mut current_url = initial_url.clone();
+    let mut redirects_followed: usize = 0;
+    let mut visited = HashSet::new();
+    let mut normalised_initial = current_url.clone();
+    normalised_initial.set_fragment(None);
+    visited.insert(normalised_initial);
+
+    loop {
+        let request = build_request(&current_url)?;
+        let response = match await_interruptible(request.send(), signal).await? {
+            Ok(response) => response,
+            Err(err) => return Ok(RedirectSendOutcome::TransportError(err)),
+        };
+
+        let status = response.status();
+        if !is_redirect_status(status) {
+            return Ok(RedirectSendOutcome::Response(response));
+        }
+
+        if redirects_followed >= max_redirects {
+            return Err(IaGetError::Network(format!(
+                "Too many redirects (maximum {} exceeded) while requesting {}",
+                max_redirects, current_url
+            )));
+        }
+
+        let location_header = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .ok_or_else(|| {
+                IaGetError::Network(format!(
+                    "HTTP {} redirect from {} missing Location header",
+                    status, current_url
+                ))
+            })?;
+
+        let location = location_header.to_str().map_err(|_| {
+            IaGetError::Network(format!(
+                "HTTP {} redirect from {} has non-UTF-8 Location header",
+                status, current_url
+            ))
+        })?;
+
+        let next_url = resolve_redirect_target(&current_url, location)?;
+
+        let mut normalised_next = next_url.clone();
+        normalised_next.set_fragment(None);
+        if !visited.insert(normalised_next) {
+            return Err(IaGetError::Network(format!(
+                "Redirect loop detected while following redirect to {}",
+                next_url
+            )));
+        }
+
+        drop(response);
+        redirects_followed += 1;
+        current_url = next_url;
+    }
+}
+
 enum AttemptOutcome {
     Ready(Response),
     Retry { delay: Duration, reason: String },
 }
 
 async fn send_attempt<F>(
+    initial_url: &Url,
     build_request: &mut F,
     retry_count: u32,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
 ) -> Result<AttemptOutcome>
 where
-    F: FnMut() -> RequestBuilder,
+    F: FnMut(&Url) -> Result<RequestBuilder>,
 {
-    let send_result = await_interruptible(build_request().send(), signal).await?;
-
-    match send_result {
-        Ok(response) => {
+    match send_following_redirects(initial_url, signal, MAX_REDIRECTS, build_request).await? {
+        RedirectSendOutcome::Response(response) => {
             let status = response.status();
             if is_retryable_status(status) {
                 if retry_count >= policy.max_retries {
@@ -508,7 +637,7 @@ where
                 Ok(AttemptOutcome::Ready(response))
             }
         }
-        Err(err) => {
+        RedirectSendOutcome::TransportError(err) => {
             if !is_retryable_reqwest_error(&err) || retry_count >= policy.max_retries {
                 return Err(err.into());
             }
@@ -521,21 +650,22 @@ where
 }
 
 /// Sends an HTTP request with retries on transient transport errors and retryable HTTP statuses,
-/// honouring `Retry-After` headers and immediate cancellation via `ShutdownSignal`.
+/// following redirects manually per attempt and honouring `Retry-After` headers and `ShutdownSignal`.
 pub async fn send_with_retry<F, H>(
+    initial_url: &Url,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
     mut build_request: F,
     mut on_retry: H,
 ) -> Result<Response>
 where
-    F: FnMut() -> RequestBuilder,
+    F: FnMut(&Url) -> Result<RequestBuilder>,
     H: FnMut(&RetryEvent<'_>),
 {
     let mut retry_count: u32 = 0;
 
     loop {
-        match send_attempt(&mut build_request, retry_count, policy, signal).await? {
+        match send_attempt(initial_url, &mut build_request, retry_count, policy, signal).await? {
             AttemptOutcome::Ready(response) => return Ok(response),
             AttemptOutcome::Retry { delay, reason } => {
                 retry_count += 1;
@@ -552,21 +682,23 @@ where
 }
 
 /// Fetches a text response body with retries on transient transport errors, retryable HTTP
-/// statuses, and transient body read errors, honouring `Retry-After` and `ShutdownSignal`.
+/// statuses, and transient body read errors, following redirects manually per attempt and
+/// honouring `Retry-After` and `ShutdownSignal`.
 pub async fn fetch_text_with_retry<F, H>(
+    initial_url: &Url,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
     mut build_request: F,
     mut on_retry: H,
 ) -> Result<String>
 where
-    F: FnMut() -> RequestBuilder,
+    F: FnMut(&Url) -> Result<RequestBuilder>,
     H: FnMut(&RetryEvent<'_>),
 {
     let mut retry_count: u32 = 0;
 
     loop {
-        match send_attempt(&mut build_request, retry_count, policy, signal).await? {
+        match send_attempt(initial_url, &mut build_request, retry_count, policy, signal).await? {
             AttemptOutcome::Retry { delay, reason } => {
                 retry_count += 1;
                 on_retry(&RetryEvent {
@@ -1245,10 +1377,12 @@ async fn download_file_content(
     url: &str,
     part_path: &Path,
     signal: &ShutdownSignal,
-    cookie_header: Option<&str>,
+    cookie_source: Option<&CookieSource>,
     expected_md5: Option<&str>,
     policy: &RetryPolicy,
 ) -> Result<(u64, bool)> {
+    let initial_url = Url::parse(url)
+        .map_err(|e| IaGetError::Network(format!("Invalid download URL '{}': {}", url, e)))?;
     let mut retry_count: u32 = 0;
     let mut has_reset_range = false;
 
@@ -1259,34 +1393,41 @@ async fn download_file_content(
 
         // Re-check `.part` file size at start of each attempt (in case of retry)
         let current_file_size = existing_part_size(root, part_path)?;
-
-        let mut headers = HeaderMap::new();
-        if let Some(cookie_header) = cookie_header {
-            headers.insert(
-                reqwest::header::COOKIE,
-                HeaderValue::from_str(cookie_header).map_err(|e| {
-                    IaGetError::Network(format!("Invalid cookie header value: {}", e))
-                })?,
-            );
-        }
-        if current_file_size > 0 {
-            // Use IaGetError::Network for header parsing errors
-            headers.insert(
-                reqwest::header::RANGE,
+        let range_header = if current_file_size > 0 {
+            Some(
                 HeaderValue::from_str(&format!("bytes={}-", current_file_size)).map_err(|e| {
                     IaGetError::Network(format!("Invalid range header value: {}", e))
                 })?,
-            );
-        }
+            )
+        } else {
+            None
+        };
 
-        let mut request = client.get(url);
-        if !headers.is_empty() {
-            request = request.headers(headers);
-        }
+        let send_outcome =
+            send_following_redirects(&initial_url, signal, MAX_REDIRECTS, |target_url| {
+                let mut headers = HeaderMap::new();
+                if let Some(cookie_value) = cookie_source
+                    .map(|source| source.header_value_for_url(target_url))
+                    .transpose()?
+                    .flatten()
+                {
+                    headers.insert(reqwest::header::COOKIE, cookie_value);
+                }
+                if let Some(range_header) = range_header.as_ref() {
+                    headers.insert(reqwest::header::RANGE, range_header.clone());
+                }
 
-        let mut response = match await_interruptible(request.send(), signal).await? {
-            Ok(resp) => resp,
-            Err(e) => {
+                let mut request = client.get(target_url.clone());
+                if !headers.is_empty() {
+                    request = request.headers(headers);
+                }
+                Ok(request)
+            })
+            .await?;
+
+        let mut response = match send_outcome {
+            RedirectSendOutcome::Response(resp) => resp,
+            RedirectSendOutcome::TransportError(e) => {
                 // Request failed before we even got a response
                 if !is_retryable_reqwest_error(&e) {
                     return Err(e.into());
@@ -1716,7 +1857,7 @@ async fn download_single_file_with_policy(
     file_path: &str,
     expected_md5: Option<&str>,
     signal: &ShutdownSignal,
-    cookie_header: Option<&str>,
+    cookie_source: Option<&CookieSource>,
     policy: &RetryPolicy,
 ) -> Result<FileOutcome> {
     if !signal.is_running() {
@@ -1757,7 +1898,7 @@ async fn download_single_file_with_policy(
         url,
         &part_path,
         signal,
-        cookie_header,
+        cookie_source,
         expected_md5,
         policy,
     )
@@ -1792,7 +1933,7 @@ async fn download_single_file(
     file_path: &str,
     expected_md5: Option<&str>,
     signal: &ShutdownSignal,
-    cookie_header: Option<&str>,
+    cookie_source: Option<&CookieSource>,
 ) -> Result<FileOutcome> {
     download_single_file_with_policy(
         client,
@@ -1801,7 +1942,7 @@ async fn download_single_file(
         file_path,
         expected_md5,
         signal,
-        cookie_header,
+        cookie_source,
         &RetryPolicy::default(),
     )
     .await
@@ -1817,7 +1958,7 @@ pub async fn download_files_in_dir<I>(
     root: &Path,
     files: I,
     total_files: usize,
-    cookie_header: Option<&str>,
+    cookie_source: Option<&CookieSource>,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
 ) -> BatchSummary
@@ -1859,7 +2000,7 @@ where
             &file_path,
             expected_md5.as_deref(),
             signal,
-            cookie_header,
+            cookie_source,
             policy,
         )
         .await
@@ -1905,7 +2046,7 @@ pub async fn download_files_with_policy_and_signal<I>(
     client: &Client,
     files: I,
     total_files: usize,
-    cookie_header: Option<&str>,
+    cookie_source: Option<&CookieSource>,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
 ) -> BatchSummary
@@ -1917,7 +2058,7 @@ where
         Path::new("."),
         files,
         total_files,
-        cookie_header,
+        cookie_source,
         policy,
         signal,
     )
@@ -1933,7 +2074,7 @@ pub async fn download_files<I>(
     client: &Client,
     files: I,
     total_files: usize,
-    cookie_header: Option<&str>,
+    cookie_source: Option<&CookieSource>,
 ) -> BatchSummary
 where
     I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
@@ -1943,7 +2084,7 @@ where
         client,
         files,
         total_files,
-        cookie_header,
+        cookie_source,
         &RetryPolicy::default(),
         &signal,
     )
@@ -2479,6 +2620,7 @@ mod tests {
     }
 
     struct MockServer {
+        host: &'static str,
         addr: std::net::SocketAddr,
         requests: Arc<Mutex<Vec<CapturedRequest>>>,
         handle: Option<tokio::task::JoinHandle<()>>,
@@ -2489,6 +2631,21 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind mock server");
+            Self::start_with_listener(listener, "127.0.0.1", responses)
+        }
+
+        async fn start_on_localhost(responses: Vec<MockResponse>) -> Self {
+            let listener = TcpListener::bind(("localhost", 0))
+                .await
+                .expect("bind localhost mock server");
+            Self::start_with_listener(listener, "localhost", responses)
+        }
+
+        fn start_with_listener(
+            listener: TcpListener,
+            host: &'static str,
+            responses: Vec<MockResponse>,
+        ) -> Self {
             let addr = listener.local_addr().expect("mock server local_addr");
             let requests = Arc::new(Mutex::new(Vec::new()));
             let requests_clone = Arc::clone(&requests);
@@ -2507,6 +2664,7 @@ mod tests {
             });
 
             Self {
+                host,
                 addr,
                 requests,
                 handle: Some(handle),
@@ -2514,7 +2672,7 @@ mod tests {
         }
 
         fn url(&self, path: &str) -> String {
-            format!("http://{}{}", self.addr, path)
+            format!("http://{}:{}{}", self.host, self.addr.port(), path)
         }
 
         fn requests_handle(&self) -> Arc<Mutex<Vec<CapturedRequest>>> {
@@ -2656,7 +2814,7 @@ mod tests {
         let rel_path = "nested/item.bin";
         let final_path = dir.join(rel_path);
         let part_path = dir.part_path(rel_path);
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
         download_single_file(
@@ -2701,7 +2859,7 @@ mod tests {
         }])
         .await;
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let err = download_single_file(
             &client,
             &dir.path,
@@ -2754,7 +2912,7 @@ mod tests {
         )])
         .await;
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         download_single_file(
             &client,
@@ -2791,7 +2949,7 @@ mod tests {
         fs::write(&part_path, stale_prefix).unwrap();
 
         let server = MockServer::start(vec![MockResponse::ok(full_payload)]).await;
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
         download_single_file(
@@ -2844,7 +3002,7 @@ mod tests {
         ])
         .await;
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         download_single_file(
             &client,
@@ -2901,7 +3059,7 @@ mod tests {
             ])
             .await;
 
-            let client = Client::new();
+            let client = http_client_builder().build().unwrap();
             let signal = ShutdownSignal::new();
             download_single_file(
                 &client,
@@ -2954,7 +3112,7 @@ mod tests {
         ])
         .await;
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let err = download_single_file(
             &client,
@@ -3001,7 +3159,7 @@ mod tests {
         )])
         .await;
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         download_single_file(
             &client,
@@ -3050,7 +3208,7 @@ mod tests {
         ])
         .await;
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         download_single_file(
             &client,
@@ -3102,7 +3260,7 @@ mod tests {
         ])
         .await;
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         download_single_file(
             &client,
@@ -3149,7 +3307,7 @@ mod tests {
             ("403", "403 Forbidden", b"Access Denied", 1),
         ];
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let fast_policy = RetryPolicy {
             max_retries: 2,
@@ -3270,7 +3428,7 @@ mod tests {
         let rel_path = "corrupt.bin";
         let final_path = dir.join(rel_path);
         let part_path = dir.part_path(rel_path);
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
         let err = download_single_file(
@@ -3330,7 +3488,7 @@ mod tests {
         }])
         .await;
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let result = download_single_file(
             &client,
             &dir.path,
@@ -3701,7 +3859,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_retryable_reqwest_error_classification() {
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
 
         // Builder error (invalid URL) is permanent and must not be retried
         let builder_err = client.get("://not-a-url").send().await.unwrap_err();
@@ -3776,7 +3934,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_and_fetch_text_with_retry_behavior() {
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let policy = RetryPolicy {
             max_retries: 3,
             initial_delay: Duration::from_millis(5),
@@ -3798,10 +3956,12 @@ mod tests {
 
         let signal = ShutdownSignal::new();
         let mut events = Vec::new();
+        let meta_url = Url::parse(&server.url("/meta.xml")).unwrap();
         let body = fetch_text_with_retry(
+            &meta_url,
             &policy,
             &signal,
-            || client.get(server.url("/meta.xml")),
+            |target_url| Ok(client.get(target_url.clone())),
             |event| {
                 events.push((
                     event.attempt,
@@ -3833,10 +3993,12 @@ mod tests {
         )])
         .await;
         let mut retry_calls = 0;
+        let missing_url = Url::parse(&server_404.url("/missing")).unwrap();
         let err = send_with_retry(
+            &missing_url,
             &policy,
             &signal,
-            || client.get(server_404.url("/missing")),
+            |target_url| Ok(client.get(target_url.clone())),
             |_| retry_calls += 1,
         )
         .await
@@ -3858,10 +4020,12 @@ mod tests {
         ])
         .await;
         let mut attempts = Vec::new();
+        let down_url = Url::parse(&server_503.url("/down")).unwrap();
         let err = send_with_retry(
+            &down_url,
             &small_policy,
             &signal,
-            || client.get(server_503.url("/down")),
+            |target_url| Ok(client.get(target_url.clone())),
             |event| attempts.push(event.attempt),
         )
         .await
@@ -3881,14 +4045,16 @@ mod tests {
         let cancel_signal = ShutdownSignal::new();
         let trigger_signal = cancel_signal.clone();
         let start = std::time::Instant::now();
+        let rate_limited_url = Url::parse(&server_cancel.url("/rate-limited")).unwrap();
         let err = send_with_retry(
+            &rate_limited_url,
             &RetryPolicy {
                 max_retries: 2,
                 max_retry_after: Duration::from_secs(60),
                 ..policy
             },
             &cancel_signal,
-            || client.get(server_cancel.url("/rate-limited")),
+            |target_url| Ok(client.get(target_url.clone())),
             |_| trigger_signal.trigger(),
         )
         .await
@@ -3960,7 +4126,7 @@ mod tests {
         let rel_path = "item.bin";
         let final_path = dir.join(rel_path);
         let part_path = dir.part_path(rel_path);
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let policy = RetryPolicy {
             max_retries: 2,
@@ -4016,7 +4182,7 @@ mod tests {
         let rel_path = "item.bin";
         let final_path = dir.join(rel_path);
         let part_path = dir.part_path(rel_path);
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let policy = RetryPolicy {
             max_retries: 2,
@@ -4073,7 +4239,7 @@ mod tests {
         let rel_path = "item.bin";
         let final_path = dir.join(rel_path);
         let part_path = dir.part_path(rel_path);
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let policy = RetryPolicy {
             max_retries: 2,
@@ -4129,7 +4295,7 @@ mod tests {
         let rel_path = "item.bin";
         let final_path = dir.join(rel_path);
         let part_path = dir.part_path(rel_path);
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let policy = RetryPolicy {
             max_retries: 2,
@@ -4166,7 +4332,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_408_and_502_retry_and_recover_on_200() {
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let fast_policy = RetryPolicy {
             max_retries: 2,
@@ -4243,7 +4409,7 @@ mod tests {
         let rel_path = "item.bin";
         let final_path = dir.join(rel_path);
         let part_path = dir.part_path(rel_path);
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
         let err = download_single_file_with_policy(
@@ -4269,7 +4435,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_403_and_404_fail_fast_without_retrying() {
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let slow_policy = RetryPolicy {
             max_retries: 3,
@@ -4342,7 +4508,7 @@ mod tests {
         let rel_path = "item.bin";
         let final_path = dir.join(rel_path);
         let part_path = dir.part_path(rel_path);
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let policy = RetryPolicy {
             max_retries: 3,
@@ -4434,7 +4600,7 @@ mod tests {
         let file2 = "file2.bin".to_string();
         let file3 = "nested/file3.bin".to_string();
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let policy = RetryPolicy {
             max_retries: 2,
@@ -4506,7 +4672,7 @@ mod tests {
         let file1 = "file1.bin".to_string();
         let file2 = "file2.bin".to_string();
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let fast_policy = RetryPolicy {
             max_retries: 1,
@@ -4560,7 +4726,7 @@ mod tests {
         let file1 = "corrupt.bin".to_string();
         let file2 = "good.bin".to_string();
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let policy = RetryPolicy {
             max_retries: 1,
@@ -4627,7 +4793,7 @@ mod tests {
         ])
         .await;
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         let policy = RetryPolicy {
             max_retries: 1,
@@ -4715,7 +4881,7 @@ mod tests {
         ])
         .await;
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let policy = RetryPolicy {
             max_retries: 1,
             initial_delay: Duration::from_millis(1),
@@ -4766,7 +4932,7 @@ mod tests {
         let file1 = "file1.bin".to_string();
         let file2 = "file2.bin".to_string();
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
         signal.trigger();
 
@@ -4904,7 +5070,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
 
         let server = MockServer::start(vec![MockResponse::ok(b"should never be fetched")]).await;
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
         for unsafe_path in [
@@ -4941,7 +5107,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_rejects_directory_at_target_or_part_with_zero_requests() {
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
         // Directory at target (with and without expected_md5)
@@ -5000,7 +5166,7 @@ mod tests {
         fs::write(&blocker, b"existing regular file").unwrap();
 
         let server = MockServer::start(vec![MockResponse::ok(b"payload")]).await;
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
         let err = download_single_file(
@@ -5078,7 +5244,7 @@ mod tests {
         symlink(&outside, root.join("sub")).unwrap();
 
         let server = MockServer::start(vec![MockResponse::ok(b"attacker payload")]).await;
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
         let err = download_single_file(
@@ -5105,7 +5271,7 @@ mod tests {
     async fn test_unix_live_and_dangling_symlinked_part_refused_with_zero_requests() {
         use std::os::unix::fs::symlink;
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
         // Live symlinked .part
@@ -5177,7 +5343,7 @@ mod tests {
     async fn test_unix_live_and_dangling_symlinked_target_refused_with_and_without_md5() {
         use std::os::unix::fs::symlink;
 
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
         for expected_md5 in [None, Some("d41d8cd98f00b204e9800998ecf8427e")] {
@@ -5243,7 +5409,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_unix_fifo_at_target_and_part_refused_without_hanging() {
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
         // FIFO at target (with and without expected_md5)
@@ -5385,7 +5551,7 @@ mod tests {
         let payload = b"downloaded through symlinked root";
         let expected_md5 = md5_hex(payload);
         let server = MockServer::start(vec![MockResponse::ok(payload)]).await;
-        let client = Client::new();
+        let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
         // Normal nested download inside symlinked root must succeed
@@ -5427,5 +5593,704 @@ mod tests {
         assert!(matches!(err, IaGetError::FileSystem(_)));
         assert!(bad_requests.is_empty());
         assert!(!outside.join("bad.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn test_download_cross_host_redirect_strips_cookie_and_verifies_md5() {
+        let payload = b"cross-host redirected archive payload with verified md5";
+        let expected_md5 = md5_hex(payload);
+
+        let target_server = MockServer::start_on_localhost(vec![MockResponse::ok(payload)]).await;
+        let redirect_url = target_server.url("/final/item.bin");
+        let origin_server = MockServer::start(vec![MockResponse::with_headers(
+            "302 Found",
+            vec![
+                ("Location", redirect_url),
+                ("Content-Length", "0".to_string()),
+            ],
+            b"",
+        )])
+        .await;
+
+        let cookie_source =
+            CookieSource::from_netscape_str("127.0.0.1\tFALSE\t/\tFALSE\t0\tsession\tsecret123\n");
+        let dir = TempTestDir::new("redirect-strip-cookie");
+        let rel_path = "item.bin";
+        let final_path = dir.join(rel_path);
+        let part_path = dir.part_path(rel_path);
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        download_single_file(
+            &client,
+            &dir.path,
+            &origin_server.url("/download/item.bin"),
+            rel_path,
+            Some(&expected_md5),
+            &signal,
+            Some(&cookie_source),
+        )
+        .await
+        .expect("cross-host redirect download should succeed and pass MD5 check");
+
+        let origin_requests = origin_server.finish().await;
+        let target_requests = target_server.finish().await;
+        assert_eq!(origin_requests.len(), 1);
+        assert!(origin_requests[0]
+            .request_line
+            .starts_with("GET /download/item.bin "));
+        assert_eq!(
+            origin_requests[0].header("cookie"),
+            Some("session=secret123")
+        );
+
+        assert_eq!(target_requests.len(), 1);
+        assert!(target_requests[0]
+            .request_line
+            .starts_with("GET /final/item.bin "));
+        assert_eq!(
+            target_requests[0].header("cookie"),
+            None,
+            "redirect to non-matching host must strip Cookie header"
+        );
+
+        assert_eq!(fs::read(&final_path).unwrap(), payload);
+        assert!(!part_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_download_same_host_redirect_rescopes_and_orders_path_cookies() {
+        let payload = b"same-host path-scoped redirect payload";
+        let expected_md5 = md5_hex(payload);
+
+        let server = MockServer::start(vec![
+            MockResponse::with_headers(
+                "302 Found",
+                vec![
+                    ("Location", "/download/public/item.bin".to_string()),
+                    ("Content-Length", "0".to_string()),
+                ],
+                b"",
+            ),
+            MockResponse::ok(payload),
+        ])
+        .await;
+
+        // Place shorter path before longer path in file order to verify RFC 6265 longest-path-first sorting.
+        let cookie_source = CookieSource::from_netscape_str(concat!(
+            "127.0.0.1\tFALSE\t/\tFALSE\t0\troot\t1\n",
+            "127.0.0.1\tFALSE\t/download/private\tFALSE\t0\tprivate\t1\n",
+        ));
+
+        let dir = TempTestDir::new("redirect-path-scope");
+        let rel_path = "item.bin";
+        let final_path = dir.join(rel_path);
+        let part_path = dir.part_path(rel_path);
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        download_single_file(
+            &client,
+            &dir.path,
+            &server.url("/download/private/item.bin"),
+            rel_path,
+            Some(&expected_md5),
+            &signal,
+            Some(&cookie_source),
+        )
+        .await
+        .expect("same-host path-scoped redirect download should succeed");
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0]
+            .request_line
+            .starts_with("GET /download/private/item.bin "));
+        assert_eq!(requests[0].header("cookie"), Some("private=1; root=1"));
+
+        assert!(requests[1]
+            .request_line
+            .starts_with("GET /download/public/item.bin "));
+        assert_eq!(requests[1].header("cookie"), Some("root=1"));
+
+        assert_eq!(fs::read(&final_path).unwrap(), payload);
+        assert!(!part_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_download_resume_preserves_range_across_all_redirect_statuses() {
+        let prefix = b"partial-prefix-";
+        let suffix = b"resumed-payload-after-redirect";
+        let mut full = Vec::new();
+        full.extend_from_slice(prefix);
+        full.extend_from_slice(suffix);
+        let expected_md5 = md5_hex(&full);
+        let expected_range = format!("bytes={}-", prefix.len());
+        let content_range = format!("bytes {}-{}/{}", prefix.len(), full.len() - 1, full.len());
+
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        for (code, status_line) in [
+            ("301", "301 Moved Permanently"),
+            ("302", "302 Found"),
+            ("303", "303 See Other"),
+            ("307", "307 Temporary Redirect"),
+            ("308", "308 Permanent Redirect"),
+        ] {
+            let dir = TempTestDir::new(&format!("resume-redirect-{code}"));
+            let rel_path = "resumed.bin";
+            let final_path = dir.join(rel_path);
+            let part_path = dir.part_path(rel_path);
+            fs::write(&part_path, prefix).unwrap();
+
+            let server = MockServer::start(vec![
+                MockResponse::with_headers(
+                    status_line,
+                    vec![
+                        ("Location", "/cdn/resumed.bin".to_string()),
+                        ("Content-Length", "0".to_string()),
+                    ],
+                    b"",
+                ),
+                MockResponse::with_headers(
+                    "206 Partial Content",
+                    vec![
+                        ("Content-Range", content_range.clone()),
+                        ("Content-Length", suffix.len().to_string()),
+                    ],
+                    suffix,
+                ),
+            ])
+            .await;
+
+            download_single_file(
+                &client,
+                &dir.path,
+                &server.url("/download/resumed.bin"),
+                rel_path,
+                Some(&expected_md5),
+                &signal,
+                None,
+            )
+            .await
+            .unwrap_or_else(|err| panic!("resume across {code} redirect should succeed: {err}"));
+
+            let requests = server.finish().await;
+            assert_eq!(requests.len(), 2, "status {code}");
+            assert!(
+                requests[0]
+                    .request_line
+                    .starts_with("GET /download/resumed.bin "),
+                "status {code}"
+            );
+            assert_eq!(
+                requests[0].header("range"),
+                Some(expected_range.as_str()),
+                "status {code} hop 0 must send Range"
+            );
+            assert!(
+                requests[1]
+                    .request_line
+                    .starts_with("GET /cdn/resumed.bin "),
+                "status {code}"
+            );
+            assert_eq!(
+                requests[1].header("range"),
+                Some(expected_range.as_str()),
+                "status {code} hop 1 must preserve Range"
+            );
+            assert_eq!(fs::read(&final_path).unwrap(), full, "status {code}");
+            assert!(!part_path.exists(), "status {code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_raw_vs_cookies_txt_disambiguation_end_to_end() {
+        let payload = b"cookie source disambiguation payload";
+        let expected_md5 = md5_hex(payload);
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        // Raw cookie string: strictly scoped to HTTPS archive.org, so http://127.0.0.1 receives no Cookie.
+        let raw_source = CookieSource::from_input("logged-in-user=yes; logged-in-sig=abc123")
+            .expect("raw cookie string should parse");
+        assert!(matches!(raw_source, CookieSource::Raw(_)));
+
+        let dir_raw = TempTestDir::new("cookie-raw-e2e");
+        let server_raw = MockServer::start(vec![MockResponse::ok(payload)]).await;
+        download_single_file(
+            &client,
+            &dir_raw.path,
+            &server_raw.url("/download/item.bin"),
+            "item.bin",
+            Some(&expected_md5),
+            &signal,
+            Some(&raw_source),
+        )
+        .await
+        .expect("download with raw cookie source should succeed");
+
+        let raw_requests = server_raw.finish().await;
+        assert_eq!(raw_requests.len(), 1);
+        assert_eq!(
+            raw_requests[0].header("cookie"),
+            None,
+            "raw cookie must not be sent to plain HTTP 127.0.0.1"
+        );
+        assert_eq!(fs::read(dir_raw.join("item.bin")).unwrap(), payload);
+
+        // Netscape cookies.txt file: attaches only matching host and path cookies.
+        let dir_file = TempTestDir::new("cookie-file-e2e");
+        let cookie_file = dir_file.join("cookies.txt");
+        fs::write(
+            &cookie_file,
+            concat!(
+                "# Netscape HTTP Cookie File\n",
+                "127.0.0.1\tFALSE\t/download\tFALSE\t0\tsession\tfromfile\n",
+                "127.0.0.1\tFALSE\t/other\tFALSE\t0\tother\tskip\n",
+                "example.com\tFALSE\t/\tFALSE\t0\tforeign\tskip\n",
+            ),
+        )
+        .unwrap();
+
+        let file_source = CookieSource::from_input(cookie_file.to_str().unwrap())
+            .expect("cookies.txt file should parse");
+        assert!(matches!(file_source, CookieSource::NetscapeFile(_)));
+
+        let server_file = MockServer::start(vec![MockResponse::ok(payload)]).await;
+        download_single_file(
+            &client,
+            &dir_file.path,
+            &server_file.url("/download/item.bin"),
+            "item.bin",
+            Some(&expected_md5),
+            &signal,
+            Some(&file_source),
+        )
+        .await
+        .expect("download with cookies.txt file should succeed");
+
+        let file_requests = server_file.finish().await;
+        assert_eq!(file_requests.len(), 1);
+        assert_eq!(file_requests[0].header("cookie"), Some("session=fromfile"));
+        assert_eq!(fs::read(dir_file.join("item.bin")).unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn test_download_redirect_errors_fail_fast_without_retrying() {
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+        let slow_policy = RetryPolicy {
+            max_retries: 3,
+            initial_delay: Duration::from_secs(10),
+            max_delay: Duration::from_secs(10),
+            max_retry_after: Duration::from_secs(10),
+        };
+
+        let mut too_many_responses: Vec<MockResponse> = (0..=MAX_REDIRECTS)
+            .map(|hop| {
+                MockResponse::with_headers(
+                    "302 Found",
+                    vec![
+                        ("Location", format!("/hop-{}", hop + 1)),
+                        ("Content-Length", "0".to_string()),
+                    ],
+                    b"",
+                )
+            })
+            .collect();
+        too_many_responses.push(MockResponse::ok(b"should not retry"));
+
+        let cases: Vec<(&str, &str, Vec<MockResponse>, usize, &str)> = vec![
+            (
+                "direct-loop",
+                "/a",
+                vec![
+                    MockResponse::with_headers(
+                        "302 Found",
+                        vec![
+                            ("Location", "/a".to_string()),
+                            ("Content-Length", "0".to_string()),
+                        ],
+                        b"",
+                    ),
+                    MockResponse::ok(b"should not retry"),
+                ],
+                1,
+                "Redirect loop",
+            ),
+            (
+                "two-hop-loop",
+                "/a",
+                vec![
+                    MockResponse::with_headers(
+                        "302 Found",
+                        vec![
+                            ("Location", "/b".to_string()),
+                            ("Content-Length", "0".to_string()),
+                        ],
+                        b"",
+                    ),
+                    MockResponse::with_headers(
+                        "302 Found",
+                        vec![
+                            ("Location", "/a".to_string()),
+                            ("Content-Length", "0".to_string()),
+                        ],
+                        b"",
+                    ),
+                    MockResponse::ok(b"should not retry"),
+                ],
+                2,
+                "Redirect loop",
+            ),
+            (
+                "fragment-only-loop",
+                "/a",
+                vec![
+                    MockResponse::with_headers(
+                        "302 Found",
+                        vec![
+                            ("Location", "/a#section".to_string()),
+                            ("Content-Length", "0".to_string()),
+                        ],
+                        b"",
+                    ),
+                    MockResponse::ok(b"should not retry"),
+                ],
+                1,
+                "Redirect loop",
+            ),
+            (
+                "too-many-redirects",
+                "/hop-0",
+                too_many_responses,
+                MAX_REDIRECTS + 1,
+                "Too many redirects",
+            ),
+            (
+                "missing-location",
+                "/missing",
+                vec![
+                    MockResponse::with_headers(
+                        "302 Found",
+                        vec![("Content-Length", "0".to_string())],
+                        b"",
+                    ),
+                    MockResponse::ok(b"should not retry"),
+                ],
+                1,
+                "missing Location",
+            ),
+            (
+                "empty-location",
+                "/empty",
+                vec![
+                    MockResponse::with_headers(
+                        "302 Found",
+                        vec![
+                            ("Location", "   ".to_string()),
+                            ("Content-Length", "0".to_string()),
+                        ],
+                        b"",
+                    ),
+                    MockResponse::ok(b"should not retry"),
+                ],
+                1,
+                "empty Location",
+            ),
+            (
+                "non-http-scheme",
+                "/scheme",
+                vec![
+                    MockResponse::with_headers(
+                        "302 Found",
+                        vec![
+                            ("Location", "file:///etc/passwd".to_string()),
+                            ("Content-Length", "0".to_string()),
+                        ],
+                        b"",
+                    ),
+                    MockResponse::ok(b"should not retry"),
+                ],
+                1,
+                "Unsupported redirect scheme",
+            ),
+        ];
+
+        for (label, initial_path, responses, expected_requests, expected_msg) in cases {
+            let dir = TempTestDir::new(&format!("redirect-err-{label}"));
+            let server = MockServer::start(responses).await;
+
+            let start = std::time::Instant::now();
+            let err = download_single_file_with_policy(
+                &client,
+                &dir.path,
+                &server.url(initial_path),
+                "item.bin",
+                None,
+                &signal,
+                None,
+                &slow_policy,
+            )
+            .await
+            .unwrap_err();
+            let elapsed = start.elapsed();
+
+            let requests = server.abort_and_collect().await;
+            assert_eq!(
+                requests.len(),
+                expected_requests,
+                "case {label}: unexpected request count"
+            );
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "case {label}: redirect error must fail fast without retrying, took {:?}",
+                elapsed
+            );
+            assert!(
+                matches!(err, IaGetError::Network(_)),
+                "case {label}: expected Network error, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains(expected_msg),
+                "case {label}: expected '{expected_msg}' in error '{err}'"
+            );
+            assert!(!dir.join("item.bin").exists(), "case {label}");
+            assert!(!dir.part_path("item.bin").exists(), "case {label}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_retry_after_redirected_503_restarts_from_initial_hop() {
+        let payload = b"payload recovered after redirected 503";
+        let expected_md5 = md5_hex(payload);
+
+        let server = MockServer::start(vec![
+            MockResponse::with_headers(
+                "302 Found",
+                vec![
+                    ("Location", "/cdn/item.bin".to_string()),
+                    ("Content-Length", "0".to_string()),
+                ],
+                b"",
+            ),
+            MockResponse::with_headers(
+                "503 Service Unavailable",
+                vec![
+                    ("Retry-After", "0".to_string()),
+                    ("Content-Length", "4".to_string()),
+                ],
+                b"busy",
+            ),
+            MockResponse::with_headers(
+                "302 Found",
+                vec![
+                    ("Location", "/cdn/item.bin".to_string()),
+                    ("Content-Length", "0".to_string()),
+                ],
+                b"",
+            ),
+            MockResponse::ok(payload),
+        ])
+        .await;
+
+        let dir = TempTestDir::new("redirect-retry-503");
+        let rel_path = "item.bin";
+        let final_path = dir.join(rel_path);
+        let part_path = dir.part_path(rel_path);
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+        let policy = RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_secs(10),
+            max_delay: Duration::from_secs(10),
+            max_retry_after: Duration::from_secs(5),
+        };
+
+        let start = std::time::Instant::now();
+        download_single_file_with_policy(
+            &client,
+            &dir.path,
+            &server.url("/download/item.bin"),
+            rel_path,
+            Some(&expected_md5),
+            &signal,
+            None,
+            &policy,
+        )
+        .await
+        .expect("retry after redirected 503 should restart from hop 0 and succeed");
+        let elapsed = start.elapsed();
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0]
+            .request_line
+            .starts_with("GET /download/item.bin "));
+        assert!(requests[1].request_line.starts_with("GET /cdn/item.bin "));
+        assert!(requests[2]
+            .request_line
+            .starts_with("GET /download/item.bin "));
+        assert!(requests[3].request_line.starts_with("GET /cdn/item.bin "));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "Retry-After: 0 should retry immediately, took {:?}",
+            elapsed
+        );
+        assert_eq!(fs::read(&final_path).unwrap(), payload);
+        assert!(!part_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_download_cookie_expiry_reevaluated_across_retry_wait() {
+        let payload = b"payload delivered after short-lived cookie expired";
+        let expected_md5 = md5_hex(payload);
+
+        let server = MockServer::start(vec![
+            MockResponse::with_headers(
+                "503 Service Unavailable",
+                vec![
+                    ("Retry-After", "2".to_string()),
+                    ("Content-Length", "4".to_string()),
+                ],
+                b"busy",
+            ),
+            MockResponse::ok(payload),
+        ])
+        .await;
+
+        let dir = TempTestDir::new("cookie-expiry-retry");
+        let rel_path = "item.bin";
+        let final_path = dir.join(rel_path);
+        let part_path = dir.part_path(rel_path);
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+        let policy = RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_secs(10),
+            max_delay: Duration::from_secs(10),
+            max_retry_after: Duration::from_secs(5),
+        };
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after UNIX_EPOCH")
+            .as_secs();
+        let cookie_source = CookieSource::from_netscape_str(&format!(
+            "127.0.0.1\tFALSE\t/\tFALSE\t{}\tshort\ttemp\n\
+             127.0.0.1\tFALSE\t/\tFALSE\t{}\tlong\tkeep\n",
+            now + 2,
+            now + 3600
+        ));
+
+        download_single_file_with_policy(
+            &client,
+            &dir.path,
+            &server.url("/download/item.bin"),
+            rel_path,
+            Some(&expected_md5),
+            &signal,
+            Some(&cookie_source),
+            &policy,
+        )
+        .await
+        .expect("retry after 503 should succeed with re-evaluated cookies");
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].header("cookie"), Some("short=temp; long=keep"));
+        assert_eq!(
+            requests[1].header("cookie"),
+            Some("long=keep"),
+            "expired short-lived cookie must be omitted on retry"
+        );
+        assert_eq!(fs::read(&final_path).unwrap(), payload);
+        assert!(!part_path.exists());
+    }
+
+    #[test]
+    fn test_resolve_redirect_target_rejects_https_to_http_downgrade() {
+        let current = Url::parse("https://archive.org/download/item/a").unwrap();
+
+        for target in [
+            "http://archive.org/download/item/a",
+            "http://mirror.example/a",
+        ] {
+            let err = resolve_redirect_target(&current, target).unwrap_err();
+            assert!(
+                matches!(err, IaGetError::Network(_)),
+                "target {target}: expected Network error, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains("downgrade"),
+                "target {target}: expected downgrade error message, got '{err}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_redirect_target_allows_valid_transitions() {
+        let cases = [
+            (
+                "https://archive.org/download/item/a",
+                "https://mirror.example/download/item/a",
+                "https://mirror.example/download/item/a",
+            ),
+            (
+                "https://archive.org/download/item/a",
+                "/cdn/item/a",
+                "https://archive.org/cdn/item/a",
+            ),
+            (
+                "https://archive.org/download/item/a",
+                "b",
+                "https://archive.org/download/item/b",
+            ),
+            (
+                "http://archive.org/download/item/a",
+                "http://mirror.example/a",
+                "http://mirror.example/a",
+            ),
+            (
+                "http://archive.org/download/item/a",
+                "https://archive.org/download/item/a",
+                "https://archive.org/download/item/a",
+            ),
+        ];
+
+        for (current_str, location, expected) in cases {
+            let current = Url::parse(current_str).unwrap();
+            let resolved = resolve_redirect_target(&current, location)
+                .unwrap_or_else(|err| panic!("{current_str} -> {location} failed: {err}"));
+            assert_eq!(resolved.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn test_resolve_redirect_target_rejects_invalid_and_unsupported_locations() {
+        let current = Url::parse("https://archive.org/download/item/a").unwrap();
+
+        for (location, expected_msg) in [
+            ("", "empty Location"),
+            ("   ", "empty Location"),
+            ("file:///etc/passwd", "Unsupported redirect scheme"),
+            (
+                "ftp://archive.org/download/item/a",
+                "Unsupported redirect scheme",
+            ),
+            ("http://[::1", "Invalid redirect Location"),
+        ] {
+            let err = resolve_redirect_target(&current, location).unwrap_err();
+            assert!(
+                matches!(err, IaGetError::Network(_)),
+                "location '{location}': expected Network error, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains(expected_msg),
+                "location '{location}': expected '{expected_msg}' in '{err}'"
+            );
+        }
     }
 }

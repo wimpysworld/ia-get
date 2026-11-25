@@ -11,13 +11,10 @@ use ia_get::archive_metadata::{parse_xml_files, XmlFiles};
 use ia_get::constants::USER_AGENT;
 use ia_get::downloader;
 use ia_get::utils::{create_spinner, format_size, sanitize_filename, validate_archive_url};
-use ia_get::{IaGetError, Result};
+use ia_get::{CookieSource, IaGetError, Result};
 use indicatif::ProgressStyle;
-use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
+use reqwest::header::{HeaderMap, COOKIE};
 use reqwest::{Client, Url};
-use std::fs;
-use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Extended timeout for large file downloads (10 minutes for connection, no read timeout)
 const CONNECTION_TIMEOUT_SECS: u64 = 600;
@@ -26,25 +23,28 @@ const CONNECTION_TIMEOUT_SECS: u64 = 600;
 async fn is_url_accessible_with_policy(
     url: &Url,
     client: &Client,
-    cookie_input: Option<&str>,
+    cookie_source: Option<&CookieSource>,
     policy: &downloader::RetryPolicy,
     signal: &downloader::ShutdownSignal,
 ) -> Result<()> {
-    let cookie_header = cookie_header_value(cookie_input, url)?;
-
     let _response = downloader::send_with_retry(
+        url,
         policy,
         signal,
-        || {
+        |target_url| {
             let mut request = client
-                .head(url.clone())
+                .head(target_url.clone())
                 .timeout(std::time::Duration::from_secs(60));
-            if let Some(cookie_header) = cookie_header.as_ref() {
+            if let Some(cookie_header) = cookie_source
+                .map(|source| source.header_value_for_url(target_url))
+                .transpose()?
+                .flatten()
+            {
                 let mut headers = HeaderMap::new();
-                headers.insert(COOKIE, cookie_header.clone());
+                headers.insert(COOKIE, cookie_header);
                 request = request.headers(headers);
             }
-            request
+            Ok(request)
         },
         |_| {},
     )
@@ -57,13 +57,13 @@ async fn is_url_accessible_with_policy(
 async fn is_url_accessible(
     url: &Url,
     client: &Client,
-    cookie_input: Option<&str>,
+    cookie_source: Option<&CookieSource>,
     signal: &downloader::ShutdownSignal,
 ) -> Result<()> {
     is_url_accessible_with_policy(
         url,
         client,
-        cookie_input,
+        cookie_source,
         &downloader::RetryPolicy::default(),
         signal,
     )
@@ -99,135 +99,15 @@ fn get_xml_url(original_url: &str) -> String {
     format!("{}/{}_files.xml", download_url_base, identifier)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NetscapeCookie {
-    domain: String,
-    include_subdomains: bool,
-    path: String,
-    secure: bool,
-    expires: Option<u64>,
-    name: String,
-    value: String,
-}
-
-/// Builds an HTTP Cookie header value from a raw cookie string or cookies.txt path.
-fn cookie_header_from_input(input: &str, url: &Url) -> Result<String> {
-    if Path::new(input).is_file() {
-        let cookie_file = fs::read_to_string(input)?;
-        cookie_header_from_netscape_file(&cookie_file, url)
-    } else {
-        Ok(input.trim().to_string())
-    }
-}
-
-fn parse_netscape_cookie(line: &str) -> Option<NetscapeCookie> {
-    let line = line.trim();
-    let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
-
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-
-    let fields = line.split('\t').collect::<Vec<_>>();
-    if fields.len() < 7 {
-        return None;
-    }
-
-    let expires = match fields[4].parse::<u64>().unwrap_or(0) {
-        0 => None,
-        value => Some(value),
-    };
-
-    Some(NetscapeCookie {
-        domain: fields[0].trim_start_matches('.').to_ascii_lowercase(),
-        include_subdomains: fields[1].eq_ignore_ascii_case("TRUE"),
-        path: fields[2].to_string(),
-        secure: fields[3].eq_ignore_ascii_case("TRUE"),
-        expires,
-        name: fields[5].to_string(),
-        value: fields[6].to_string(),
-    })
-}
-
-fn cookie_domain_matches(cookie: &NetscapeCookie, url: &Url) -> bool {
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-
-    let host = host.to_ascii_lowercase();
-    host == cookie.domain
-        || (cookie.include_subdomains && host.ends_with(&format!(".{}", cookie.domain)))
-}
-
-fn cookie_path_matches(cookie: &NetscapeCookie, url: &Url) -> bool {
-    let cookie_path = if cookie.path.is_empty() {
-        "/"
-    } else {
-        &cookie.path
-    };
-    let request_path = url.path();
-
-    request_path == cookie_path
-        || request_path
-            .strip_prefix(cookie_path)
-            .is_some_and(|remainder| cookie_path.ends_with('/') || remainder.starts_with('/'))
-}
-
-fn cookie_applies_to_url(cookie: &NetscapeCookie, url: &Url, now: u64) -> bool {
-    if let Some(expires) = cookie.expires {
-        if expires <= now {
-            return false;
-        }
-    }
-
-    if cookie.secure && url.scheme() != "https" {
-        return false;
-    }
-
-    cookie_domain_matches(cookie, url) && cookie_path_matches(cookie, url)
-}
-
-/// Parses Netscape cookies.txt content into an HTTP Cookie header value.
-fn cookie_header_from_netscape_file(content: &str, url: &Url) -> Result<String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| ia_get::IaGetError::FileSystem(e.to_string()))?
-        .as_secs();
-
-    let cookies = content
-        .lines()
-        .filter_map(parse_netscape_cookie)
-        .filter(|cookie| cookie_applies_to_url(cookie, url, now))
-        .map(|cookie| format!("{}={}", cookie.name, cookie.value))
-        .collect::<Vec<_>>();
-
-    Ok(cookies.join("; "))
-}
-
-fn cookie_header_value(cookie_input: Option<&str>, url: &Url) -> Result<Option<HeaderValue>> {
-    let Some(cookie_input) = cookie_input else {
-        return Ok(None);
-    };
-
-    let cookie_header = cookie_header_from_input(cookie_input, url)?;
-    if cookie_header.is_empty() {
-        return Ok(None);
-    }
-
-    let value = HeaderValue::from_str(&cookie_header)
-        .map_err(|e| ia_get::IaGetError::Network(format!("Invalid cookie header: {}", e)))?;
-    Ok(Some(value))
-}
-
 /// Fetches and parses XML metadata from an already-resolved XML URL with an explicit retry policy.
 async fn fetch_xml_metadata_from_url(
     base_url: reqwest::Url,
     client: &Client,
     spinner: &indicatif::ProgressBar,
-    cookie_input: Option<&str>,
+    cookie_source: Option<&CookieSource>,
     policy: &downloader::RetryPolicy,
     signal: &downloader::ShutdownSignal,
-) -> Result<(XmlFiles, reqwest::Url, Option<String>)> {
+) -> Result<(XmlFiles, reqwest::Url)> {
     let xml_url = base_url.as_str();
     spinner.set_message(format!(
         "{} Accessing XML metadata: {}",
@@ -235,14 +115,9 @@ async fn fetch_xml_metadata_from_url(
         xml_url.bold()
     ));
 
-    let download_cookie_header = cookie_input
-        .map(|input| cookie_header_from_input(input, &base_url))
-        .transpose()?
-        .filter(|header| !header.is_empty());
-
     // Check XML URL accessibility
     if let Err(e) =
-        is_url_accessible_with_policy(&base_url, client, cookie_input, policy, signal).await
+        is_url_accessible_with_policy(&base_url, client, cookie_source, policy, signal).await
     {
         spinner.finish_with_message(format!(
             "{} XML metadata not accessible: {}",
@@ -258,25 +133,22 @@ async fn fetch_xml_metadata_from_url(
         "Parsing archive metadata...".bold()
     ));
 
-    let cookie_header = download_cookie_header
-        .as_deref()
-        .map(|header| {
-            HeaderValue::from_str(header)
-                .map_err(|e| ia_get::IaGetError::Network(format!("Invalid cookie header: {}", e)))
-        })
-        .transpose()?;
-
     let xml_content = downloader::fetch_text_with_retry(
+        &base_url,
         policy,
         signal,
-        || {
-            let mut request = client.get(base_url.clone());
-            if let Some(cookie_header) = cookie_header.as_ref() {
+        |target_url| {
+            let mut request = client.get(target_url.clone());
+            if let Some(cookie_header) = cookie_source
+                .map(|source| source.header_value_for_url(target_url))
+                .transpose()?
+                .flatten()
+            {
                 let mut headers = HeaderMap::new();
-                headers.insert(COOKIE, cookie_header.clone());
+                headers.insert(COOKIE, cookie_header);
                 request = request.headers(headers);
             }
-            request
+            Ok(request)
         },
         |event| {
             spinner.set_message(format!(
@@ -294,7 +166,7 @@ async fn fetch_xml_metadata_from_url(
     // Parse XML content with improved error handling
     let files = parse_xml_files(&xml_content)?;
 
-    Ok((files, base_url, download_cookie_header))
+    Ok((files, base_url))
 }
 
 /// Fetches and parses XML metadata from archive.org
@@ -306,18 +178,18 @@ async fn fetch_xml_metadata_from_url(
 /// * `details_url` - The original archive.org details URL
 /// * `client` - HTTP client for requests
 /// * `spinner` - Progress spinner to update during processing
-/// * `cookie_input` - Optional cookie string or cookies.txt path
+/// * `cookie_source` - Optional parsed cookie source evaluated per request URL
 /// * `signal` - Shared shutdown signal for immediate Ctrl+C cancellation
 ///
 /// # Returns
-/// Tuple of (XmlFiles, base_url, download_cookie_header) for download processing
+/// Tuple of (XmlFiles, base_url) for download processing
 async fn fetch_xml_metadata(
     details_url: &str,
     client: &Client,
     spinner: &indicatif::ProgressBar,
-    cookie_input: Option<&str>,
+    cookie_source: Option<&CookieSource>,
     signal: &downloader::ShutdownSignal,
-) -> Result<(XmlFiles, reqwest::Url, Option<String>)> {
+) -> Result<(XmlFiles, reqwest::Url)> {
     let xml_url = get_xml_url(details_url);
     let base_url = reqwest::Url::parse(&xml_url)?;
 
@@ -325,7 +197,7 @@ async fn fetch_xml_metadata(
         base_url,
         client,
         spinner,
-        cookie_input,
+        cookie_source,
         &downloader::RetryPolicy::default(),
         signal,
     )
@@ -438,10 +310,16 @@ struct Cli {
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
+    let cookie_source = cli
+        .cookies
+        .as_deref()
+        .map(CookieSource::from_input)
+        .transpose()?;
+
     // Create a client with extended timeouts for large file downloads
     // Connection timeout is set high, but no read timeout since large files
     // may take a long time to transfer
-    let client = Client::builder()
+    let client = downloader::http_client_builder()
         .user_agent(USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(CONNECTION_TIMEOUT_SECS))
         .pool_idle_timeout(std::time::Duration::from_secs(90))
@@ -464,7 +342,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Check URL accessibility
     if let Err(e) =
-        is_url_accessible(&details_url, &client, cli.cookies.as_deref(), &shutdown).await
+        is_url_accessible(&details_url, &client, cookie_source.as_ref(), &shutdown).await
     {
         spinner.finish_with_message(format!(
             "{} Archive.org URL not accessible: {}",
@@ -475,11 +353,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
 
     // Fetch and parse XML metadata in one operation
-    let (files, base_url, download_cookie_header) = fetch_xml_metadata(
+    let (files, base_url) = fetch_xml_metadata(
         &cli.url,
         &client,
         &spinner,
-        cli.cookies.as_deref(),
+        cookie_source.as_ref(),
         &shutdown,
     )
     .await?;
@@ -547,13 +425,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Download all files with integrated signal handling
     let total_files = download_data.len();
-    let summary = downloader::download_files(
-        &client,
-        download_data,
-        total_files,
-        download_cookie_header.as_deref(),
-    )
-    .await;
+    let summary =
+        downloader::download_files(&client, download_data, total_files, cookie_source.as_ref())
+            .await;
 
     batch_exit_result(&summary, total_files)?;
 
@@ -605,77 +479,6 @@ mod tests {
         assert_eq!(
             get_xml_url("https://archive.org/details/another-item_v2.0/"), // With trailing slash
             "https://archive.org/download/another-item_v2.0/another-item_v2.0_files.xml"
-        );
-    }
-
-    fn cookie_test_url(path: &str) -> Url {
-        Url::parse(&format!("https://archive.org{path}")).unwrap()
-    }
-
-    #[test]
-    fn cookie_header_accepts_raw_cookie_string() {
-        assert_eq!(
-            cookie_header_from_input(
-                "logged-in-user=yes; logged-in-sig=abc123",
-                &cookie_test_url("/download/item/item_files.xml"),
-            )
-            .unwrap(),
-            "logged-in-user=yes; logged-in-sig=abc123"
-        );
-    }
-
-    #[test]
-    fn cookie_header_parses_netscape_cookie_file_content() {
-        let cookies = "# Netscape HTTP Cookie File\n\
-.archive.org\tTRUE\t/\tFALSE\t2145916800\tlogged-in-user\tyes\n\
-archive.org\tFALSE\t/\tTRUE\t2145916800\tlogged-in-sig\tabc123\n";
-
-        assert_eq!(
-            cookie_header_from_netscape_file(
-                cookies,
-                &cookie_test_url("/download/item/item_files.xml")
-            )
-            .unwrap(),
-            "logged-in-user=yes; logged-in-sig=abc123"
-        );
-    }
-
-    #[test]
-    fn cookie_header_respects_domain_and_path_scoping() {
-        let cookies = "# Netscape HTTP Cookie File\n\
-.archive.org\tTRUE\t/download\tFALSE\t2145916800\tdownload-root\tyes\n\
-archive.org\tFALSE\t/account\tFALSE\t2145916800\taccount-only\tnope\n\
-example.com\tFALSE\t/download\tFALSE\t2145916800\twrong-domain\tnope\n\
-archive.org\tFALSE\t/download/private\tFALSE\t2145916800\tprivate-only\tsecret\n";
-
-        assert_eq!(
-            cookie_header_from_netscape_file(cookies, &cookie_test_url("/download/item/file.zip"))
-                .unwrap(),
-            "download-root=yes"
-        );
-
-        assert_eq!(
-            cookie_header_from_netscape_file(
-                cookies,
-                &cookie_test_url("/download/private/file.zip")
-            )
-            .unwrap(),
-            "download-root=yes; private-only=secret"
-        );
-    }
-
-    #[test]
-    fn cookie_header_ignores_expired_netscape_cookies() {
-        let cookies = "archive.org\tFALSE\t/\tFALSE\t1\told\tvalue\n\
-archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
-
-        assert_eq!(
-            cookie_header_from_netscape_file(
-                cookies,
-                &cookie_test_url("/download/item/item_files.xml")
-            )
-            .unwrap(),
-            "current=value"
         );
     }
 
@@ -731,7 +534,7 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
     }
 
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Mutex;
@@ -739,6 +542,16 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
     #[derive(Debug, Clone)]
     struct CapturedRequest {
         request_line: String,
+        headers: Vec<(String, String)>,
+    }
+
+    impl CapturedRequest {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        }
     }
 
     struct MockResponse {
@@ -773,6 +586,7 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
     }
 
     struct MockHttpServer {
+        host: &'static str,
         addr: std::net::SocketAddr,
         requests: Arc<Mutex<Vec<CapturedRequest>>>,
         handle: Option<tokio::task::JoinHandle<()>>,
@@ -783,6 +597,21 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind mock metadata server");
+            Self::start_with_listener(listener, "127.0.0.1", responses)
+        }
+
+        async fn start_on_localhost(responses: Vec<MockResponse>) -> Self {
+            let listener = TcpListener::bind(("localhost", 0))
+                .await
+                .expect("bind localhost mock metadata server");
+            Self::start_with_listener(listener, "localhost", responses)
+        }
+
+        fn start_with_listener(
+            listener: TcpListener,
+            host: &'static str,
+            responses: Vec<MockResponse>,
+        ) -> Self {
             let addr = listener.local_addr().expect("mock server local_addr");
             let requests = Arc::new(Mutex::new(Vec::new()));
             let requests_clone = Arc::clone(&requests);
@@ -806,6 +635,7 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
             });
 
             Self {
+                host,
                 addr,
                 requests,
                 handle: Some(handle),
@@ -813,7 +643,13 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
         }
 
         fn url(&self, path: &str) -> Url {
-            Url::parse(&format!("http://{}{}", self.addr, path)).expect("valid mock URL")
+            Url::parse(&format!(
+                "http://{}:{}{}",
+                self.host,
+                self.addr.port(),
+                path
+            ))
+            .expect("valid mock URL")
         }
 
         fn requests_handle(&self) -> Arc<Mutex<Vec<CapturedRequest>>> {
@@ -863,9 +699,19 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
             .position(|w| w == b"\r\n\r\n")
             .unwrap_or(buf.len());
         let header_text = String::from_utf8_lossy(&buf[..header_end]);
-        let request_line = header_text.split("\r\n").next()?.to_string();
+        let mut lines = header_text.split("\r\n");
+        let request_line = lines.next()?.to_string();
+        let mut headers = Vec::new();
+        for line in lines {
+            if let Some((name, value)) = line.split_once(':') {
+                headers.push((name.trim().to_string(), value.trim().to_string()));
+            }
+        }
 
-        Some(CapturedRequest { request_line })
+        Some(CapturedRequest {
+            request_line,
+            headers,
+        })
     }
 
     async fn write_mock_response(socket: &mut TcpStream, response: MockResponse, is_head: bool) {
@@ -949,7 +795,7 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
         ])
         .await;
 
-        let client = Client::new();
+        let client = downloader::http_client_builder().build().unwrap();
         let signal = downloader::ShutdownSignal::new();
         let policy = downloader::RetryPolicy {
             max_retries: 2,
@@ -997,7 +843,7 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
         ])
         .await;
 
-        let client = Client::new();
+        let client = downloader::http_client_builder().build().unwrap();
         let signal = downloader::ShutdownSignal::new();
         let policy = downloader::RetryPolicy {
             max_retries: 2,
@@ -1031,7 +877,7 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
 
     #[tokio::test]
     async fn is_url_accessible_fails_fast_on_403_and_404() {
-        let client = Client::new();
+        let client = downloader::http_client_builder().build().unwrap();
         let signal = downloader::ShutdownSignal::new();
         let slow_policy = downloader::RetryPolicy {
             max_retries: 3,
@@ -1101,7 +947,7 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
         ])
         .await;
 
-        let client = Client::new();
+        let client = downloader::http_client_builder().build().unwrap();
         let spinner = indicatif::ProgressBar::hidden();
         let signal = downloader::ShutdownSignal::new();
         let policy = downloader::RetryPolicy {
@@ -1112,7 +958,7 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
         };
         let xml_url = server.url("/download/item/item_files.xml");
 
-        let (files, returned_url, cookie) =
+        let (files, returned_url) =
             fetch_xml_metadata_from_url(xml_url.clone(), &client, &spinner, None, &policy, &signal)
                 .await
                 .expect("XML GET 503 should retry and parse valid XML");
@@ -1129,7 +975,6 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
             .request_line
             .starts_with("GET /download/item/item_files.xml "));
         assert_eq!(returned_url, xml_url);
-        assert_eq!(cookie, None);
         assert_eq!(files.files.len(), 1);
         assert_eq!(files.files[0].name, "issue01.pdf");
         assert_eq!(files.files[0].size, Some(4096));
@@ -1151,7 +996,7 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
         ])
         .await;
 
-        let client = Client::new();
+        let client = downloader::http_client_builder().build().unwrap();
         let spinner = indicatif::ProgressBar::hidden();
         let signal = downloader::ShutdownSignal::new();
         let policy = downloader::RetryPolicy {
@@ -1203,7 +1048,7 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
         ])
         .await;
 
-        let client = Client::new();
+        let client = downloader::http_client_builder().build().unwrap();
         let signal = downloader::ShutdownSignal::new();
         let policy = downloader::RetryPolicy {
             max_retries: 3,
@@ -1266,7 +1111,7 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
         ])
         .await;
 
-        let client = Client::new();
+        let client = downloader::http_client_builder().build().unwrap();
         let spinner = indicatif::ProgressBar::hidden();
         let signal = downloader::ShutdownSignal::new();
         let policy = downloader::RetryPolicy {
@@ -1402,5 +1247,259 @@ archive.org\tFALSE\t/\tFALSE\t2145916800\tcurrent\tvalue\n";
             batch_exit_result(&interrupted_after_failure, 3).unwrap_err(),
             IaGetError::Interrupted
         ));
+    }
+
+    struct TempCookieFile(std::path::PathBuf);
+
+    impl TempCookieFile {
+        fn write(label: &str, content: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "ia-get-main-cookies-{}-{}-{}.txt",
+                std::process::id(),
+                label,
+                id
+            ));
+            std::fs::write(&path, content).expect("write temp cookies.txt");
+            Self(path)
+        }
+
+        fn as_str(&self) -> &str {
+            self.0.to_str().expect("valid UTF-8 temp path")
+        }
+    }
+
+    impl Drop for TempCookieFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn is_url_accessible_preserves_head_and_strips_cookie_across_cross_host_redirect() {
+        let target_server = MockHttpServer::start_on_localhost(vec![MockResponse::ok(b"")]).await;
+        let redirect_url = target_server.url("/details/redirected-item");
+        let origin_server = MockHttpServer::start(vec![MockResponse::with_headers(
+            "302 Found",
+            vec![
+                ("Location", redirect_url.to_string()),
+                ("Content-Length", "0".to_string()),
+            ],
+            b"",
+        )])
+        .await;
+
+        let cookie_source =
+            CookieSource::from_netscape_str("127.0.0.1\tFALSE\t/\tFALSE\t0\tauth\tsecret\n");
+        let client = downloader::http_client_builder().build().unwrap();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy::default();
+
+        is_url_accessible_with_policy(
+            &origin_server.url("/details/item"),
+            &client,
+            Some(&cookie_source),
+            &policy,
+            &signal,
+        )
+        .await
+        .expect("HEAD across cross-host 302 redirect should succeed");
+
+        let origin_requests = origin_server.finish().await;
+        let target_requests = target_server.finish().await;
+        assert_eq!(origin_requests.len(), 1);
+        assert!(origin_requests[0]
+            .request_line
+            .starts_with("HEAD /details/item "));
+        assert_eq!(origin_requests[0].header("cookie"), Some("auth=secret"));
+
+        assert_eq!(target_requests.len(), 1);
+        assert!(target_requests[0]
+            .request_line
+            .starts_with("HEAD /details/redirected-item "));
+        assert_eq!(
+            target_requests[0].header("cookie"),
+            None,
+            "redirected HEAD to non-matching host must strip Cookie header"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_xml_metadata_rescopes_path_cookies_across_redirects_and_preserves_base_url() {
+        let xml_body = br#"<files>
+            <file name="issue01.pdf" source="original">
+                <size>2048</size>
+                <md5>abcdef0123456789abcdef0123456789</md5>
+            </file>
+        </files>"#;
+
+        let server = MockHttpServer::start(vec![
+            MockResponse::with_headers(
+                "302 Found",
+                vec![
+                    ("Location", "/download/public/item_files.xml".to_string()),
+                    ("Content-Length", "0".to_string()),
+                ],
+                b"",
+            ),
+            MockResponse::ok(b""),
+            MockResponse::with_headers(
+                "302 Found",
+                vec![
+                    ("Location", "/download/public/item_files.xml".to_string()),
+                    ("Content-Length", "0".to_string()),
+                ],
+                b"",
+            ),
+            MockResponse::ok(xml_body),
+        ])
+        .await;
+
+        let cookie_file = TempCookieFile::write(
+            "path-scope",
+            concat!(
+                "# Netscape HTTP Cookie File\n",
+                "127.0.0.1\tFALSE\t/\tFALSE\t0\troot\t1\n",
+                "127.0.0.1\tFALSE\t/download/private\tFALSE\t0\tprivate\t1\n",
+            ),
+        );
+        let cookie_source =
+            CookieSource::from_input(cookie_file.as_str()).expect("load temp cookies.txt");
+
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy::default();
+        let xml_url = server.url("/download/private/item_files.xml");
+
+        let (files, returned_url) = fetch_xml_metadata_from_url(
+            xml_url.clone(),
+            &client,
+            &spinner,
+            Some(&cookie_source),
+            &policy,
+            &signal,
+        )
+        .await
+        .expect("XML metadata HEAD and GET across redirects should succeed");
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0]
+            .request_line
+            .starts_with("HEAD /download/private/item_files.xml "));
+        assert_eq!(requests[0].header("cookie"), Some("private=1; root=1"));
+
+        assert!(requests[1]
+            .request_line
+            .starts_with("HEAD /download/public/item_files.xml "));
+        assert_eq!(requests[1].header("cookie"), Some("root=1"));
+
+        assert!(requests[2]
+            .request_line
+            .starts_with("GET /download/private/item_files.xml "));
+        assert_eq!(requests[2].header("cookie"), Some("private=1; root=1"));
+
+        assert!(requests[3]
+            .request_line
+            .starts_with("GET /download/public/item_files.xml "));
+        assert_eq!(requests[3].header("cookie"), Some("root=1"));
+
+        assert_eq!(
+            returned_url, xml_url,
+            "returned base_url must preserve the original XML URL"
+        );
+        assert_eq!(files.files.len(), 1);
+        assert_eq!(files.files[0].name, "issue01.pdf");
+        assert_eq!(files.files[0].size, Some(2048));
+        assert_eq!(
+            files.files[0].md5.as_deref(),
+            Some("abcdef0123456789abcdef0123456789")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_xml_metadata_reevaluates_cookie_expiry_across_get_retry() {
+        let xml_body = br#"<files>
+            <file name="archive.zip" source="original">
+                <size>1024</size>
+                <md5>0123456789abcdef0123456789abcdef</md5>
+            </file>
+        </files>"#;
+
+        let server = MockHttpServer::start(vec![
+            MockResponse::ok(b""),
+            MockResponse::with_headers(
+                "503 Service Unavailable",
+                vec![
+                    ("Retry-After", "2".to_string()),
+                    ("Content-Length", "4".to_string()),
+                ],
+                b"busy",
+            ),
+            MockResponse::ok(xml_body),
+        ])
+        .await;
+
+        let client = downloader::http_client_builder().build().unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let policy = downloader::RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_secs(10),
+            max_delay: Duration::from_secs(10),
+            max_retry_after: Duration::from_secs(5),
+        };
+        let xml_url = server.url("/download/item/item_files.xml");
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after UNIX_EPOCH")
+            .as_secs();
+        let cookie_source = CookieSource::from_netscape_str(&format!(
+            "127.0.0.1\tFALSE\t/\tFALSE\t{}\tshort\ttemp\n\
+             127.0.0.1\tFALSE\t/\tFALSE\t{}\tlong\tkeep\n",
+            now + 2,
+            now + 3600
+        ));
+
+        let (files, returned_url) = fetch_xml_metadata_from_url(
+            xml_url.clone(),
+            &client,
+            &spinner,
+            Some(&cookie_source),
+            &policy,
+            &signal,
+        )
+        .await
+        .expect("XML GET retry after 503 should succeed with re-evaluated cookies");
+
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0]
+            .request_line
+            .starts_with("HEAD /download/item/item_files.xml "));
+        assert_eq!(requests[0].header("cookie"), Some("short=temp; long=keep"));
+
+        assert!(requests[1]
+            .request_line
+            .starts_with("GET /download/item/item_files.xml "));
+        assert_eq!(requests[1].header("cookie"), Some("short=temp; long=keep"));
+
+        assert!(requests[2]
+            .request_line
+            .starts_with("GET /download/item/item_files.xml "));
+        assert_eq!(
+            requests[2].header("cookie"),
+            Some("long=keep"),
+            "expired short-lived cookie must be omitted on XML GET retry"
+        );
+
+        assert_eq!(returned_url, xml_url);
+        assert_eq!(files.files.len(), 1);
+        assert_eq!(files.files[0].name, "archive.zip");
     }
 }
