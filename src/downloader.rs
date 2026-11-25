@@ -2386,20 +2386,16 @@ const MAX_PROBE_TOKEN_BYTES: u64 = 128;
 
 /// Returns `true` when `name` is a single normal path component safe to probe on the host OS.
 fn is_probable_component_name(name: &str) -> bool {
-    let mut comps = Path::new(name).components();
-    if !matches!(
-        (comps.next(), comps.next()),
-        (Some(Component::Normal(_)), None)
-    ) {
-        return false;
-    }
-
     #[cfg(windows)]
     if is_windows_reserved_probe_name(name) {
         return false;
     }
 
-    true
+    let mut comps = Path::new(name).components();
+    matches!(
+        (comps.next(), comps.next()),
+        (Some(Component::Normal(_)), None)
+    )
 }
 
 /// Returns `true` when `name` is pure ASCII without trailing dots or spaces, so ASCII case
