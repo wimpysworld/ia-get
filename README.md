@@ -62,7 +62,7 @@ Read the full guides on the wiki:
 
 # Demo 🧑‍💻
 
-<div align="center"><img alt="ia-get demo" src="pages/demo.webp" width="872" height="512" /></div>
+<div align="center"><img alt="ia-get demo" src="pages/demo.webp" width="872" height="536" /></div>
 
 # Why? 🤔💭
 

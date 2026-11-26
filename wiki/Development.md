@@ -11,7 +11,7 @@ The flake development shell provides:
 - Rust toolchain (`rustc`, `cargo`, `rustfmt`, `clippy`, `rust-analyzer`)
 - `just`, `actionlint`, `cargo-audit`, `cargo-edit`, `cargo-watch`
 - `cargo-zigbuild`, `goreleaser`, `zig`, `gh`
-- `tailor` (on platforms with a Tailor package), `miniserve`, `ntrecord`, and `ffmpeg-headless`
+- `tailor` (on platforms with a Tailor package), `miniserve`, `ntrecord`, `fira-code`, and `ffmpeg-headless`
 
 Plain `cargo` commands also work outside Nix if you have a local Rust toolchain installed.
 
