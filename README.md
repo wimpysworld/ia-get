@@ -5,7 +5,7 @@
 </h1>
 
 <p align="center"><b>File downloader for archive.org</b></p>
-<p align="center"><a href="https://ia-get.wimpys.world">Project website</a></p>
+<p align="center"><a href="https://ia-get.wimpys.world">Project website</a> | <a href="https://github.com/wimpysworld/ia-get/wiki">Documentation</a></p>
 <p align="center">
 <img alt="GitHub all releases" src="https://img.shields.io/github/downloads/wimpysworld/ia-get/total?logo=github&label=Downloads">
 </p>
@@ -34,152 +34,41 @@ Each repository page gives the setup steps for installing and updating ia-get.
 bin install github.com/wimpysworld/ia-get
 ```
 
-# Usage 📖
+# Features
 
-`ia-get` accepts an [archive.org](https://archive.org) details URL to download every file in an item, or a direct download URL to download one file.
-`ia-get` fetches the item's XML metadata and saves files to the current working directory.
+- Downloads full items from `/details/<identifier>` URLs or single files from `/download/<identifier>/<path>` URLs, and keeps the original directory structure.
+- Filters downloads, `--list` output, and `--check` runs with repeatable `-f`/`--filter <GLOB>` patterns, including `!` exclusions.
+- Stages downloads in `.part` files, resumes partial transfers with HTTP range validation, verifies MD5 hashes, and renames finished files atomically.
+- Verifies existing local directories in read-only `--check` mode without downloading or modifying files.
+- Retries transient errors with exponential backoff and `Retry-After` handling, and caps bandwidth with `--limit-rate`.
+- Saves files into a chosen directory with `-o`/`--output-dir` and checks free disk space on the destination volume before transfers start.
+- Keeps writes inside the destination directory, refuses symlinks and non-regular files, sanitises unsafe Windows filenames, and rejects path collisions before downloading.
+- Supports scoped browser cookies (`-b`/`--cookies`) across redirects and honours standard proxy environment variables automatically.
+- Writes plain-text diagnostic logs to `stderr` with `-v`/`--verbose` while progress bars stay on `stdout`.
+- Available for Linux, macOS, and Windows.
+
+# Quick start
 
 ```shell
 ia-get https://archive.org/details/<identifier>
 ia-get https://archive.org/download/<identifier>/<path>
-```
-
-For `/download/<identifier>/<path>` URLs, `ia-get` strips query strings and fragments, percent-decodes the path, and fetches `<identifier>_files.xml` to match the file's size and MD5 metadata.
-If that file is absent from the XML metadata, `ia-get` exits with an error.
-Otherwise, `ia-get` downloads only that file and keeps its relative path in the output directory.
-
-`ia-get` downloads each file into `<file>.part`.
-When a `.part` file exists, `ia-get` sends a range request and validates HTTP `200`, `206`, and `416` responses plus the `Content-Range` header.
-If the server returns HTTP `200` or an invalid range response, `ia-get` restarts the download from byte 0.
-`ia-get` verifies the MD5 hash when archive.org provides one, and renames the `.part` file to the final path atomically only after verification succeeds.
-
-All downloads stay inside the target output directory (the current working directory by default).
-`ia-get` refuses symlinks, paths outside that directory, and non-regular files such as directories or named pipes (FIFOs).
-For cross-platform safety, `ia-get` sanitises invalid characters, dot segments (`.` and `..`), and trailing spaces or dots in path components.
-It also renames reserved device names on Windows (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `CLOCK$`, `COM0`-`COM9`, `COM¹`-`COM³`, `LPT0`-`LPT9`, and `LPT¹`-`LPT³`).
-This check ignores case and matches reserved names with or without extensions, even with trailing spaces or dots before an extension.
-
-Before any file transfer starts, `ia-get` checks free space on the destination volume against the remaining known bytes of the selected files.
-This check deducts verified local files and resumable `.part` files, and ignores entries with unknown sizes.
-When free space is insufficient, `ia-get` stops before any file request and prints an error with the required and available space.
-`--list` and `--check` skip this check.
-
-For both metadata fetches and file downloads, `ia-get` retries transient transport errors and HTTP `408`, `429`, and `5xx` responses up to 3 times.
-Retries use exponential backoff with jitter, or honour `Retry-After` headers (delta-seconds or HTTP-date) capped at 60 seconds.
-Other `4xx` errors fail immediately, and Ctrl+C interrupts retry waits promptly.
-
-When a file fails to download or fails MD5 verification, `ia-get` prints a warning and continues with the remaining files.
-At the end of a run, `ia-get` prints a summary with `ok`, `skipped`, and `failed` counts and lists any failed files.
-If any file fails or Ctrl+C interrupts the run, `ia-get` exits with a non-zero status.
-
-Save files to a chosen directory with `-o` or `--output-dir <DIR>`.
-`ia-get` creates missing directories when a download starts, and defaults to the current working directory when you omit this option.
-`ia-get` rejects empty paths, broken symlinks, and existing non-directory paths, and keeps every downloaded file inside that directory.
-When you pass `--list` or `--check`, `ia-get` does not create the output directory.
-
-```shell
-ia-get -o ./downloads https://archive.org/details/<identifier>
-ia-get --output-dir /tmp/archive https://archive.org/details/<identifier>
-```
-
-Pass cookies for archive.org items that require a logged-in session.
-`--cookies`/`-b` accepts either a raw `Cookie` header or a Netscape `cookies.txt` file exported from your browser.
-Raw cookie strings attach only to HTTPS requests for `archive.org` and its subdomains.
-For `cookies.txt` files, `ia-get` matches host, path (longest path first per RFC 6265), the `Secure` flag, and live expiry on every request and retry.
-`ia-get` follows up to 10 redirects manually and rejects redirect loops and HTTPS-to-HTTP downgrades.
-`ia-get` re-evaluates cookies on every hop so that credentials never leak to unrelated hosts or mismatched paths.
-
-```shell
-ia-get --cookies cookies.txt https://archive.org/details/<identifier>
-ia-get -b 'logged-in-user=...; logged-in-sig=...' https://archive.org/details/<identifier>
-```
-
-Preview the files first with `--list` or `-l`.
-For a details URL, `ia-get` prints the names and sizes from archive.org metadata and does not download files.
-For a direct download URL, `ia-get` prints only the matched file and its size.
-If archive.org does not provide a size for an entry, `ia-get` reports it as `unknown` and excludes it from the total known size.
-
-```shell
 ia-get --list https://archive.org/details/<identifier>
-ia-get -l https://archive.org/details/<identifier>
-ia-get --list https://archive.org/download/<identifier>/<path>
-```
-
-Filter files by glob pattern with `-f` or `--filter <GLOB>`.
-Repeat this option to combine patterns.
-Prefix a pattern with `!` to exclude files, or use `\!` for a literal leading `!`.
-Positive patterns select files that match any positive pattern, and `!` patterns always exclude files that match them.
-Patterns match original names from archive metadata without leading `/`, and `*` crosses `/` so `-f '*.pdf'` matches nested files too.
-This option works with downloads, `--list`, and `--check`.
-`ia-get` exits with an error if a pattern is invalid or matches zero files.
-
-```shell
+ia-get -o ./downloads https://archive.org/details/<identifier>
 ia-get -f '*.pdf' https://archive.org/details/<identifier>
-ia-get -f '!*.torrent' https://archive.org/details/<identifier>
-ia-get -f '*.cbz' -f '!*thumb*' https://archive.org/details/<identifier>
-ia-get --list -f '*.pdf' https://archive.org/details/<identifier>
-```
-
-Verify an existing local directory against archive.org metadata with `--check`.
-This mode is read-only, makes zero writes, and fails if the target directory does not exist.
-`ia-get` checks file presence, leftover `.part` files, safe regular-file targets, byte sizes, and MD5 hashes when metadata provides them.
-`ia-get` prints a summary and exits with status 0 only when all checked files pass without interruption.
-`--check` works with `-o`/`--output-dir`, `-f`/`--filter`, `-b`/`--cookies`, and `/download/<identifier>/<path>` URLs, and conflicts with `--list`.
-
-```shell
-ia-get --check https://archive.org/details/<identifier>
 ia-get --check -o ./downloads https://archive.org/details/<identifier>
-ia-get --check -o ./downloads -f '*.pdf' https://archive.org/details/<identifier>
-ia-get --check https://archive.org/download/<identifier>/<path>
 ```
 
-Limit download bandwidth with `--limit-rate <RATE>`.
-`<RATE>` accepts a positive whole number in bytes per second, or a case-insensitive binary (1024-based) suffix: `B`, `K`, `KB`, `M`, `MB`, `G`, or `GB`.
-`ia-get` rejects `0`, negative or signed values, decimals, whitespace, unknown suffixes, and overflowing values before any transfer starts.
-Downloads run unthrottled when you omit this option.
-Ctrl+C interrupts throttle waits promptly and leaves the `.part` file ready to resume.
+Read the full guides on the wiki:
 
-```shell
-ia-get --limit-rate 500K https://archive.org/details/<identifier>
-ia-get --limit-rate 2M https://archive.org/details/<identifier>
-ia-get --limit-rate 1024 https://archive.org/download/<identifier>/<path>
-```
+- [Usage](https://github.com/wimpysworld/ia-get/wiki/Usage) for all options, glob filtering, bandwidth limits, and verbose logging.
+- [Authentication and Networking](https://github.com/wimpysworld/ia-get/wiki/Authentication-and-Networking) for cookies, redirect handling, proxies, and retries.
+- [Reliability and Safety](https://github.com/wimpysworld/ia-get/wiki/Reliability-and-Safety) for `.part` resume staging, disk-space checks, filename sanitisation, and collision validation.
 
-Write diagnostic logs to `stderr` with `-v` or `--verbose`.
-Progress bars and spinners draw to `stdout`, so `stderr` stays clean when you redirect it to a file.
-Without `-v`, `ia-get` writes no verbose diagnostic lines to `stderr`.
-With `-v`, `ia-get` writes plain-text lines without ANSI escape codes for HTTP requests, statuses, redirect hops, and retry delays (`retry-after` or `backoff`).
-These logs also record per-file skip, failure, and verification reasons, plus run summaries.
-`ia-get` redacts embedded credentials in logged URLs and logs only `cookies=yes` or `cookies=no`, never `Cookie` header names or values.
+# Demo 🧑‍💻
 
-```shell
-ia-get -v https://archive.org/details/<identifier> 2> ia-get.log
-ia-get --verbose --check https://archive.org/details/<identifier> 2> check.log
-```
+<div align="center"><img alt="ia-get demo" src="assets/ia-get.gif" width="1024" /></div>
 
-`ia-get` honours the `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` environment variables automatically.
-Lowercase names take precedence over uppercase names, and scheme-specific variables (`HTTP_PROXY`, `HTTPS_PROXY`) take precedence over `ALL_PROXY`.
-Supported proxy schemes are `http://`, `https://`, `socks4://`, `socks4a://`, `socks5://`, and `socks5h://`.
-`ia-get` rejects malformed proxy URLs before any request starts and redacts embedded credentials in error messages.
-
-```shell
-HTTPS_PROXY=http://proxy.example:8080 ia-get https://archive.org/details/<identifier>
-ALL_PROXY=socks5h://127.0.0.1:1080 NO_PROXY=localhost,127.0.0.1 ia-get https://archive.org/details/<identifier>
-```
-
-## Options
-
-| Option | Description |
-| --- | --- |
-| `-o`, `--output-dir <DIR>` | Directory for downloaded files or `--check` (defaults to the current working directory). |
-| `-b`, `--cookies <COOKIES>` | Send a raw `Cookie` header or load cookies from a Netscape `cookies.txt` file. |
-| `-l`, `--list` | List files and sizes from archive metadata XML and exit. |
-| `--check` | Verify local files against archive metadata without downloading or modifying files (conflicts with `--list`). |
-| `-f`, `--filter <GLOB>` | Filter files by glob pattern (repeatable, prefix with `!` to exclude). |
-| `--limit-rate <RATE>` | Limit download bandwidth (raw bytes per second or `B`, `K`/`KB`, `M`/`MB`, `G`/`GB` in 1024-byte units). |
-| `-v`, `--verbose` | Write plain-text diagnostic logs to `stderr` while progress output stays on `stdout`. |
-
-## Why? 🤔💭
+# Why? 🤔💭
 
 I wanted to download high-quality scans of [ZZap!64 magazine](https://en.wikipedia.org/wiki/Zzap!64) and some read-only memory from archive.org.
 Archives of this type often include many large files, torrents are not always provided and when they are available they do not index all the available files in the archive.
@@ -187,62 +76,10 @@ Archives of this type often include many large files, torrents are not always pr
 Archive.org publishes XML documents for every page that indexes every file available.
 So I co-authored `ia-get` to automate the download process.
 
-### Features ✨
-
-- 🎯 Downloads full items from `/details/<identifier>` URLs or single files from `/download/<identifier>/<path>` URLs
-- 🔍 Filters downloads, `--list` output, and `--check` runs with repeatable `-f`/`--filter <GLOB>` patterns, including `!` exclusions
-- 🔽 Retries transient errors on metadata and file downloads with exponential backoff, jitter, `Retry-After` support, and prompt Ctrl+C interruption
-- 🚦 Limits download bandwidth with `--limit-rate <RATE>` (bytes per second or 1024-based `B`, `K`/`KB`, `M`/`MB`, `G`/`GB` suffixes) with prompt Ctrl+C interruption
-- 🌳 Preserves the original directory structure
-- 📁 Saves downloads to a chosen directory with `-o`/`--output-dir <DIR>` and creates missing directories automatically
-- 💾 Checks free disk space on the destination volume before downloads start, deducts verified files and resumable `.part` files, and ignores unknown sizes
-- 🛡️ Keeps downloads inside the target output directory, refuses symlinks and non-regular files, and sanitises unsafe paths and reserved device names on Windows
-- 🔄 Stages downloads in `.part` files, resumes partial transfers, and validates HTTP range responses
-- 🔏 Verifies MD5 hashes and renames `.part` files atomically only after verification succeeds
-- ✅ Verifies existing local directories in read-only `--check` mode for file presence, leftover `.part` files, sizes, and MD5 hashes
-- 📋 Continues past individual file failures, prints a batch summary, and exits with a non-zero status on failed or interrupted runs
-- 📝 Writes plain-text diagnostic logs to `stderr` with `-v`/`--verbose` (requests, redirects, retries, file outcomes, and summaries) while progress draws to `stdout`
-- 🍪 Scopes cookies per request and redirect hop, checks live expiry, and rejects redirect loops and HTTPS-to-HTTP downgrades
-- 🌐 Honours `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` for HTTP, HTTPS, and SOCKS4/4a/5/5h proxies, and rejects malformed URLs
-- 🌱 Can be run multiple times to update existing downloads
-- 📊 Gets all the metadata for the archive
-- 📦️ Available for **Linux** 🐧 **macOS** 🍏 and **Windows** 🪟
-
-### Sharing is caring 🤝
+## Sharing is caring 🤝
 
 You can use `ia-get` to download files from archive.org, including all the metadata and the `.torrent` file, if there is one.
-You can the start seeding the torrent using a pristine copy of the archive, and a complete file set.
-
-# Demo 🧑‍💻
-
-<div align="center"><img alt="ia-get demo" src="assets/ia-get.gif" width="1024" /></div>
-
-# Development 🏗️
-
-Such as it is.
-
-```shell
-cargo build
-```
-
-## Unit Tests 🧪
-
-You can run the built-in unit tests with:
-
-```shell
-cargo test
-```
-
-This will run tests that verify URL pattern validation and other core functionality.
-
-## Manual Tests 🤞
-
-I used these commands to test `ia-get` during development.
-
-```shell
-ia-get https://archive.org/details/deftributetozzap64
-ia-get https://archive.org/details/zzapp_64_issue_001_600dpi
-```
+You can then start seeding the torrent using a pristine copy of the archive, and a complete file set.
 
 # A.I. Driven Development 🤖
 
@@ -261,7 +98,12 @@ I discussed that process, its successes, and drawbacks. In a future episode, we 
 
 Since that initial MVP, I used [Unfold.ai](https://unfoldai.io/) to add features and improve the code 🧑‍💻.
 All commits from October 27, 2023, until the end of December 2023 that were AI co-authored have full details of the AI contribution in the commit messages.
-Linux Matters listner [Daniel Dewberry](https://github.com/DanielDewberry) submitted a [*"peer review"* of ia-get](https://github.com/wimpysworld/ia-get/issues/7) in January 2024.
+Linux Matters listener [Daniel Dewberry](https://github.com/DanielDewberry) submitted a [*"peer review"* of ia-get](https://github.com/wimpysworld/ia-get/issues/7) in January 2024.
 The project had little development activity until May 2025, when I incorporated the improvements Daniel had suggested.
 
 I've picked up some Rust along the way, and some of the refactoring and redesign comes directly from my brain 🧠 and some assistance from GitHub CoPilot using Claude Sonnet 3.7 and Gemini Pro 2.5.
+
+# Documentation and development
+
+See the [Wiki](https://github.com/wimpysworld/ia-get/wiki) for detailed guides and command reference.
+See the [Development](https://github.com/wimpysworld/ia-get/wiki/Development) page for building, testing, and contributing.

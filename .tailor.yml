@@ -4,7 +4,7 @@ license: MIT
 repository:
   description: File downloader for archive.org ⬇️
   homepage: https://ia-get.wimpys.world
-  has_wiki: false
+  has_wiki: true
   has_discussions: false
   has_projects: false
   has_issues: true

@@ -1,0 +1,134 @@
+# Usage
+
+`ia-get` downloads files from [archive.org](https://archive.org) using each item's XML file index.
+
+## Supported URL formats
+
+`ia-get` accepts an archive.org details URL to download every file in an item, or a direct download URL to download one file.
+
+```shell
+ia-get https://archive.org/details/<identifier>
+ia-get https://archive.org/download/<identifier>/<path>
+```
+
+For `/download/<identifier>/<path>` URLs, `ia-get` strips query strings and fragments, percent-decodes the UTF-8 path, and fetches `<identifier>_files.xml` to match the file's size and MD5 metadata.
+If that file is absent from the XML metadata, `ia-get` exits with a `FileNotFound` error.
+Otherwise, `ia-get` downloads only that file and keeps its relative path inside the output directory.
+
+## Options
+
+| Option | Description |
+| --- | --- |
+| `-o`, `--output-dir <DIR>` | Directory for downloaded files or `--check` (defaults to the current working directory). |
+| `-b`, `--cookies <COOKIES>` | Send a raw `Cookie` header or load cookies from a Netscape `cookies.txt` file. |
+| `-l`, `--list` | List files and sizes from archive metadata XML and exit. |
+| `--check` | Verify local files against archive metadata without downloading or modifying files (conflicts with `--list`). |
+| `-f`, `--filter <GLOB>` | Filter files by glob pattern (repeatable, prefix with `!` to exclude). |
+| `--limit-rate <RATE>` | Limit download bandwidth (raw bytes per second or `B`, `K`/`KB`, `M`/`MB`, `G`/`GB` in 1024-byte units). |
+| `-v`, `--verbose` | Write plain-text diagnostic logs to `stderr` while progress output stays on `stdout`. |
+
+## Output directories
+
+Save files to a chosen directory with `-o` or `--output-dir <DIR>`.
+When you omit this option, `ia-get` uses the current working directory.
+
+`ia-get` creates missing directories when a download starts, and keeps every downloaded file inside that directory.
+It rejects empty paths, broken symlinks, and existing non-directory paths.
+When you pass `--list` or `--check`, `ia-get` does not create the output directory.
+
+```shell
+ia-get -o ./downloads https://archive.org/details/<identifier>
+ia-get --output-dir /tmp/archive https://archive.org/details/<identifier>
+```
+
+## Listing files
+
+Preview the files in an item without downloading them with `-l` or `--list`.
+For a details URL, `ia-get` prints the names and sizes from archive.org metadata.
+For a direct download URL, `ia-get` prints only the matched file and its size.
+
+If archive.org does not provide a size for an entry, `ia-get` reports it as `unknown` and excludes it from the total known size.
+
+```shell
+ia-get --list https://archive.org/details/<identifier>
+ia-get -l https://archive.org/details/<identifier>
+ia-get --list https://archive.org/download/<identifier>/<path>
+```
+
+## Filtering files
+
+Filter files by glob pattern with `-f` or `--filter <GLOB>`.
+Repeat this option to combine patterns.
+
+- Prefix a pattern with `!` to exclude matching files.
+- Prefix a pattern with `\!` to match a literal leading `!`.
+- Positive patterns select files that match any positive pattern, and `!` patterns always exclude matching files.
+- Patterns match original names from archive metadata without a leading `/`.
+- `*` crosses `/`, so `-f '*.pdf'` matches files in nested subdirectories too.
+
+This option works with downloads, `--list`, and `--check`.
+`ia-get` exits with an error if a pattern is invalid or matches zero files.
+
+```shell
+ia-get -f '*.pdf' https://archive.org/details/<identifier>
+ia-get -f '!*.torrent' https://archive.org/details/<identifier>
+ia-get -f '*.cbz' -f '!*thumb*' https://archive.org/details/<identifier>
+ia-get --list -f '*.pdf' https://archive.org/details/<identifier>
+```
+
+## Verifying local files
+
+Verify an existing local directory against archive.org metadata with `--check`.
+This mode is read-only, makes zero writes, and fails if the target directory does not exist.
+
+`ia-get` checks file presence, leftover `.part` files, safe regular-file targets, byte sizes, and MD5 hashes when metadata provides them.
+At the end of the run, `ia-get` prints a summary and exits with status `0` only when all checked files pass without interruption.
+
+`--check` works with `-o`/`--output-dir`, `-f`/`--filter`, `-b`/`--cookies`, and `/download/<identifier>/<path>` URLs.
+`--check` conflicts with `--list`.
+
+```shell
+ia-get --check https://archive.org/details/<identifier>
+ia-get --check -o ./downloads https://archive.org/details/<identifier>
+ia-get --check -o ./downloads -f '*.pdf' https://archive.org/details/<identifier>
+ia-get --check https://archive.org/download/<identifier>/<path>
+```
+
+## Limiting bandwidth
+
+Cap download speed with `--limit-rate <RATE>`.
+`<RATE>` accepts a positive whole number in bytes per second, or a case-insensitive binary (1024-based) suffix: `B`, `K`, `KB`, `M`, `MB`, `G`, or `GB`.
+
+`ia-get` rejects `0`, negative or signed values, decimals, whitespace, unknown suffixes, and overflowing values before any transfer starts.
+Downloads run unthrottled when you omit this option.
+Ctrl+C interrupts throttle waits promptly and leaves the `.part` file ready to resume.
+
+```shell
+ia-get --limit-rate 500K https://archive.org/details/<identifier>
+ia-get --limit-rate 2M https://archive.org/details/<identifier>
+ia-get --limit-rate 1024 https://archive.org/download/<identifier>/<path>
+```
+
+## Verbose logging
+
+Write diagnostic logs to `stderr` with `-v` or `--verbose`.
+Progress bars and spinners draw to `stdout`, so `stderr` stays clean when you redirect it to a file.
+Without `-v`, `ia-get` writes no verbose diagnostic lines to `stderr`.
+
+With `-v`, `ia-get` writes plain-text lines without ANSI escape codes for:
+
+- HTTP requests, statuses, redirect hops, and retry delays (`retry-after` or `backoff`)
+- Per-file skip, failure, and verification reasons
+- Run summaries
+
+`ia-get` redacts embedded credentials in logged URLs and logs only `cookies=yes` or `cookies=no`, never `Cookie` header names or values.
+
+```shell
+ia-get -v https://archive.org/details/<identifier> 2> ia-get.log
+ia-get --verbose --check https://archive.org/details/<identifier> 2> check.log
+```
+
+## Related guides
+
+- [Authentication and Networking](Authentication-and-Networking) for cookies, redirects, proxies, and retries.
+- [Reliability and Safety](Reliability-and-Safety) for resume staging, disk-space checks, filename sanitisation, and collision validation.
