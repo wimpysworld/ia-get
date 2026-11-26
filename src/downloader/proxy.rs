@@ -279,7 +279,7 @@ mod tests {
         err: IaGetError,
         expected_var: &str,
         expected_value: Option<&str>,
-        forbidden_secrets: &[&str],
+        forbidden_tokens: &[&str],
         expect_redacted: bool,
         context: &str,
     ) {
@@ -300,14 +300,14 @@ mod tests {
                         "{context}: expected redaction marker in Display: {rendered}"
                     );
                 }
-                for secret in forbidden_secrets {
+                for token in forbidden_tokens {
                     assert!(
-                        !value.contains(secret),
-                        "{context}: secret '{secret}' leaked in value: {value}"
+                        !value.contains(token),
+                        "{context}: forbidden credential token leaked in value"
                     );
                     assert!(
-                        !rendered.contains(secret),
-                        "{context}: secret '{secret}' leaked in Display: {rendered}"
+                        !rendered.contains(token),
+                        "{context}: forbidden credential token leaked in Display"
                     );
                 }
             }
@@ -566,15 +566,15 @@ mod tests {
             ),
         ];
 
-        for (var_name, raw, expected_redacted, secrets) in invalid_cases {
+        for (var_name, raw, expected_redacted, forbidden_tokens) in invalid_cases {
             let err = proxy_config_from_vars(&[(var_name, raw)])
                 .expect_err(&format!("expected '{raw}' to fail"));
             assert_invalid_proxy(
                 err,
                 var_name,
                 expected_redacted,
-                secrets,
-                !secrets.is_empty(),
+                forbidden_tokens,
+                !forbidden_tokens.is_empty(),
                 raw,
             );
         }

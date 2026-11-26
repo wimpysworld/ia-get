@@ -1140,10 +1140,10 @@ mod tests {
             let parsed = Url::parse(raw).unwrap();
             let sanitized = sanitize_url_for_log(&parsed);
             assert_eq!(sanitized, *expected, "raw: {raw}");
-            for secret in *forbidden {
+            for token in *forbidden {
                 assert!(
-                    !sanitized.contains(secret),
-                    "secret {secret:?} leaked in {sanitized:?}"
+                    !sanitized.contains(token),
+                    "forbidden token leaked in sanitized URL"
                 );
             }
         }
