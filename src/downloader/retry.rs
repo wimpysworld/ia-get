@@ -294,6 +294,44 @@ pub(super) fn compute_retry_delay_with_source(
     )
 }
 
+/// Builds an actionable [`IaGetError::Network`] diagnostic for an HTTP failure status.
+pub(super) fn http_status_error(
+    status: StatusCode,
+    has_cookies: bool,
+    retries_exhausted: bool,
+) -> IaGetError {
+    let detail = match status {
+        StatusCode::UNAUTHORIZED => {
+            if has_cookies {
+                "authentication required; supplied session/cookies may have expired or be invalid"
+            } else {
+                "authentication required; supply cookies with -b/--cookies"
+            }
+        }
+        StatusCode::FORBIDDEN => {
+            if has_cookies {
+                "access restricted (lending-only item or account access limit)"
+            } else {
+                "access restricted (login, lending-only, or restricted item); try supplying cookies with -b/--cookies"
+            }
+        }
+        StatusCode::NOT_FOUND => {
+            "item or file not found on archive.org (it may have been removed, dark, or renamed)"
+        }
+        StatusCode::TOO_MANY_REQUESTS if retries_exhausted => {
+            "archive.org remained rate-limited after retries; please retry later"
+        }
+        _ if retries_exhausted
+            && (status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT) =>
+        {
+            "archive.org remained unavailable after retries; please retry later"
+        }
+        _ => return IaGetError::Network(format!("HTTP error {status}")),
+    };
+
+    IaGetError::Network(format!("HTTP error {status}: {detail}"))
+}
+
 enum AttemptOutcome {
     Ready(Response),
     Retry {
@@ -303,10 +341,12 @@ enum AttemptOutcome {
     },
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_attempt<F>(
     initial_url: &Url,
     build_request: &mut F,
     retry_count: u32,
+    has_cookies: bool,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
     logger: &VerboseLogger,
@@ -331,10 +371,7 @@ where
                             status
                         ),
                     );
-                    return match response.error_for_status() {
-                        Ok(resp) => Ok(AttemptOutcome::Ready(resp)),
-                        Err(err) => Err(err.without_url().into()),
-                    };
+                    return Err(http_status_error(status, has_cookies, true));
                 }
 
                 let retry_after = response
@@ -354,10 +391,9 @@ where
                     delay_source,
                     reason,
                 })
+            } else if status.is_client_error() || status.is_server_error() {
+                Err(http_status_error(status, has_cookies, false))
             } else {
-                let response = response
-                    .error_for_status()
-                    .map_err(reqwest::Error::without_url)?;
                 Ok(AttemptOutcome::Ready(response))
             }
         }
@@ -428,57 +464,6 @@ where
     sleep_interruptible(delay, signal).await
 }
 
-/// Sends an HTTP request with retries and diagnostic logging on transient transport errors and
-/// retryable HTTP statuses, following redirects manually per attempt and honouring `Retry-After`
-/// headers and `ShutdownSignal`.
-pub async fn send_with_retry_with_logger<F, H>(
-    initial_url: &Url,
-    policy: &RetryPolicy,
-    signal: &ShutdownSignal,
-    logger: &VerboseLogger,
-    mut build_request: F,
-    mut on_retry: H,
-) -> Result<Response>
-where
-    F: FnMut(&Url) -> Result<RequestBuilder>,
-    H: FnMut(&RetryEvent<'_>),
-{
-    let mut retry_count: u32 = 0;
-
-    loop {
-        match send_attempt(
-            initial_url,
-            &mut build_request,
-            retry_count,
-            policy,
-            signal,
-            logger,
-        )
-        .await?
-        {
-            AttemptOutcome::Ready(response) => return Ok(response),
-            AttemptOutcome::Retry {
-                delay,
-                delay_source,
-                reason,
-            } => {
-                log_and_wait_retry(
-                    &mut retry_count,
-                    policy,
-                    initial_url,
-                    delay,
-                    delay_source,
-                    &reason,
-                    signal,
-                    logger,
-                    &mut on_retry,
-                )
-                .await?;
-            }
-        }
-    }
-}
-
 enum BoundedReadError {
     Transport(reqwest::Error),
     Fatal(IaGetError),
@@ -522,8 +507,10 @@ async fn read_response_text_bounded(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_text_with_retry_and_limit<F, H>(
     initial_url: &Url,
+    has_cookies: bool,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
     logger: &VerboseLogger,
@@ -542,6 +529,7 @@ where
             initial_url,
             &mut build_request,
             retry_count,
+            has_cookies,
             policy,
             signal,
             logger,
@@ -617,8 +605,10 @@ where
 /// attempt and honouring `Retry-After` and `ShutdownSignal`.
 ///
 /// Rejects responses larger than [`MAX_METADATA_XML_BYTES`].
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch_text_with_retry_with_logger<F, H>(
     initial_url: &Url,
+    has_cookies: bool,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
     logger: &VerboseLogger,
@@ -631,6 +621,7 @@ where
 {
     fetch_text_with_retry_and_limit(
         initial_url,
+        has_cookies,
         policy,
         signal,
         logger,
@@ -1017,6 +1008,7 @@ mod tests {
         let meta_url = server.parsed_url("/meta.xml");
         let body = fetch_text_with_retry_with_logger(
             &meta_url,
+            false,
             &policy,
             &signal,
             &logger,
@@ -1047,8 +1039,9 @@ mod tests {
             MockServer::start(vec![MockResponse::status("404 Not Found", b"missing")]).await;
         let mut retry_calls = 0;
         let missing_url = server_404.parsed_url("/missing");
-        let err = send_with_retry_with_logger(
+        let err = fetch_text_with_retry_with_logger(
             &missing_url,
+            false,
             &policy,
             &signal,
             &logger,
@@ -1060,6 +1053,10 @@ mod tests {
         assert_eq!(server_404.finish().await.len(), 1);
         assert_eq!(retry_calls, 0);
         assert!(matches!(err, IaGetError::Network(_)));
+        assert!(
+            err.to_string().contains("not found on archive.org"),
+            "unexpected 404 message: {err}"
+        );
 
         // Exhausting max_retries on persistent 503 returns error
         let small_policy = fast_retry_policy(2);
@@ -1071,8 +1068,9 @@ mod tests {
         .await;
         let mut attempts = Vec::new();
         let down_url = server_503.parsed_url("/down");
-        let err = send_with_retry_with_logger(
+        let err = fetch_text_with_retry_with_logger(
             &down_url,
+            false,
             &small_policy,
             &signal,
             &logger,
@@ -1084,6 +1082,10 @@ mod tests {
         assert_eq!(server_503.finish().await.len(), 3);
         assert_eq!(attempts, vec![1, 2]);
         assert!(matches!(err, IaGetError::Network(_)));
+        assert!(
+            err.to_string().contains("unavailable after retries"),
+            "unexpected exhausted 503 message: {err}"
+        );
 
         // Triggering ShutdownSignal during retry sleep aborts immediately
         let server_cancel = MockServer::start(vec![MockResponse::retry_after(
@@ -1096,8 +1098,9 @@ mod tests {
         let trigger_signal = cancel_signal.clone();
         let start = std::time::Instant::now();
         let rate_limited_url = server_cancel.parsed_url("/rate-limited");
-        let err = send_with_retry_with_logger(
+        let err = fetch_text_with_retry_with_logger(
             &rate_limited_url,
+            false,
             &slow_retry_policy(2),
             &cancel_signal,
             &logger,
@@ -1269,6 +1272,7 @@ mod tests {
         let exact_url = exact_server.parsed_url("/exact.xml");
         let text = fetch_text_with_retry_and_limit(
             &exact_url,
+            false,
             &policy,
             &signal,
             &logger,
@@ -1287,6 +1291,7 @@ mod tests {
         let mut cl_retries = 0;
         let err = fetch_text_with_retry_and_limit(
             &cl_url,
+            false,
             &policy,
             &signal,
             &logger,
@@ -1315,6 +1320,7 @@ mod tests {
         let mut stream_retries = 0;
         let err = fetch_text_with_retry_and_limit(
             &stream_url,
+            false,
             &policy,
             &signal,
             &logger,

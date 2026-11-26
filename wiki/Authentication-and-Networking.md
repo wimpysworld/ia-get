@@ -19,6 +19,14 @@ ia-get -b 'logged-in-user=...; logged-in-sig=...' https://archive.org/details/<i
 
 When verbose logging (`-v`) is active, `ia-get` logs only `cookies=yes` or `cookies=no` and never prints cookie names or values.
 
+### Private files
+
+Archive.org marks restricted files with `<private>` in `_files.xml`.
+When you download without `-b` or `--cookies`, `ia-get` skips private files and prints a warning.
+If no public files remain, `ia-get` fails fast with a `-b`/`--cookies` hint.
+When you pass `-b` or `--cookies`, `ia-get` downloads private files normally.
+`--check` still verifies all selected files, including private files.
+
 ## Redirect handling
 
 `ia-get` follows HTTP redirects manually instead of relying on automatic client redirects.
@@ -54,6 +62,7 @@ For both metadata fetches and file downloads, `ia-get` retries transient transpo
 
 - Retry waits use exponential backoff with jitter.
 - When a response includes an RFC 9110 `Retry-After` header (delta-seconds or HTTP-date), `ia-get` honours that delay up to a 60-second cap.
+- Stalled download streams time out after 60 seconds of inactivity per chunk, and `ia-get` retries and resumes from the `.part` file.
 - Other `4xx` responses fail immediately without retrying.
 - Pressing Ctrl+C interrupts retry waits promptly.
 
@@ -89,4 +98,5 @@ When you pass `--limit-rate`, `ia-get` caps total aggregate bandwidth across all
 ### Internet Archive automated access guidelines
 
 The 4-permit ceiling, sequential transfer of large files, and automatic `429` and `503` backoff comply with Internet Archive's wishes and [automated access guidelines](https://archive.org/developers/bots.html).
+`ia-get` also sends the `User-Agent` header `ia-get/<version> (+https://github.com/wimpysworld/ia-get)` and fetches `_files.xml` directly with `GET`, without preflight `HEAD` requests.
 For multi-terabyte archives of multi-gigabyte files, use the item's `.torrent` file (BitTorrent with webseeds) instead of overloading archive.org HTTP datanodes.

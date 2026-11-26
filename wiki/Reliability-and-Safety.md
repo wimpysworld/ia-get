@@ -7,6 +7,9 @@ This guide explains how `ia-get` stages files, resumes downloads, checks disk sp
 `ia-get` writes every download into a `<file>.part` staging file first.
 When archive.org provides an MD5 hash, `ia-get` verifies the completed `.part` file and renames it to the final path atomically only after verification succeeds.
 
+When a destination file already exists on disk and archive metadata provides an expected size, `ia-get` compares the local size first.
+If the sizes differ, `ia-get` skips MD5 hashing and re-downloads the file immediately.
+
 When a `.part` file already exists, `ia-get` sends an HTTP `Range` request and validates HTTP `200`, `206`, and `416` responses plus the `Content-Range` header:
 
 - **HTTP `206` with valid `Content-Range`**: appends the remaining bytes to the `.part` file.

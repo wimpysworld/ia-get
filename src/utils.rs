@@ -41,11 +41,6 @@ impl ArchiveUrl {
         }
     }
 
-    /// Returns the canonical details page URL for this item.
-    pub fn details_url(&self) -> String {
-        format!("https://archive.org/details/{}", self.identifier())
-    }
-
     /// Returns the XML metadata URL for this item.
     pub fn xml_url(&self) -> String {
         let identifier = self.identifier();
@@ -954,11 +949,6 @@ mod tests {
             );
             assert_eq!(parsed.identifier(), expected_id, "url: {url:?}");
             assert_eq!(
-                parsed.details_url(),
-                format!("https://archive.org/details/{expected_id}"),
-                "url: {url:?}"
-            );
-            assert_eq!(
                 parsed.xml_url(),
                 format!("https://archive.org/download/{expected_id}/{expected_id}_files.xml"),
                 "url: {url:?}"
@@ -1028,11 +1018,6 @@ mod tests {
                 "url: {url:?}"
             );
             assert_eq!(parsed.identifier(), expected_id, "url: {url:?}");
-            assert_eq!(
-                parsed.details_url(),
-                format!("https://archive.org/details/{expected_id}"),
-                "url: {url:?}"
-            );
             assert_eq!(
                 parsed.xml_url(),
                 format!("https://archive.org/download/{expected_id}/{expected_id}_files.xml"),

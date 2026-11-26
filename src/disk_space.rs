@@ -26,9 +26,18 @@ fn has_verified_final_file(
     signal: &ShutdownSignal,
 ) -> Result<bool> {
     let rel_path = Path::new(&item.file_path);
-    let Ok(Some(_)) = downloader::inspect_contained_regular_file(canonical_root, rel_path) else {
+    let Ok(Some((_, metadata))) =
+        downloader::inspect_contained_regular_file(canonical_root, rel_path)
+    else {
         return Ok(false);
     };
+
+    if item
+        .expected_size
+        .is_some_and(|expected| metadata.len() != expected)
+    {
+        return Ok(false);
+    }
 
     let Some(expected_hash) = item.expected_md5.as_deref() else {
         return Ok(true);
@@ -228,8 +237,10 @@ mod tests {
         let good_md5 = md5_hex(good_bytes);
         sandbox.write("verified.bin", good_bytes);
 
-        // Final file without expected MD5 -> trusted as complete -> 0 remaining
+        // Final file without expected MD5: matching or unknown size trusts as complete,
+        // while a size mismatch requires redownload.
         sandbox.write("no_md5.bin", b"present");
+        sandbox.write("no_md5_short.bin", b"bad");
 
         // Corrupt final files (short, equal-length, truncated) with and without `.part`
         sandbox.write("corrupt_no_part.bin", b"bad");
@@ -263,7 +274,12 @@ mod tests {
                 ),
                 0,
             ),
-            (planned("no_md5.bin", Some(500), None), 0),
+            (
+                planned("no_md5.bin", Some(b"present".len() as u64), None),
+                0,
+            ),
+            (planned("no_md5.bin", None, None), 0),
+            (planned("no_md5_short.bin", Some(500), None), 500),
             (
                 planned(
                     "corrupt_no_part.bin",

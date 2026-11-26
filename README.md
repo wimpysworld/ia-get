@@ -40,7 +40,7 @@ bin install github.com/wimpysworld/ia-get
 - Retries transient errors with exponential backoff and `Retry-After` handling, and caps total aggregate bandwidth across active transfers with `--limit-rate`.
 - Saves files into a chosen directory with `-o`/`--output-dir` and checks free disk space on the destination volume before transfers start.
 - Keeps writes inside the destination directory, refuses symlinks and non-regular files, sanitises unsafe Windows filenames, and rejects path collisions before downloading.
-- Supports scoped browser cookies (`-b`/`--cookies`) across redirects and honours standard proxy environment variables automatically.
+- Supports scoped browser cookies (`-b`/`--cookies`) across redirects, skips `<private>` archive files unless you pass cookies, and honours standard proxy environment variables automatically.
 - Writes plain-text diagnostic logs to `stderr` with `-v`/`--verbose` while progress bars stay on `stdout`.
 - Available for Linux, macOS, and Windows.
 

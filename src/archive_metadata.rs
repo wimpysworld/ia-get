@@ -28,6 +28,19 @@ pub struct XmlFile {
     pub name: String,
     pub size: Option<u64>,
     pub md5: Option<String>,
+    #[serde(default)]
+    pub private: Option<String>,
+}
+
+impl XmlFile {
+    /// Returns `true` when `<private>` metadata marks this file as `"true"` or `"1"`
+    /// (trimmed, ASCII case-insensitive).
+    pub fn is_private(&self) -> bool {
+        self.private.as_deref().is_some_and(|value| {
+            let trimmed = value.trim();
+            trimmed.eq_ignore_ascii_case("true") || trimmed == "1"
+        })
+    }
 }
 
 /// Truncates `content` to at most `max_bytes` on a valid UTF-8 character boundary.
@@ -158,5 +171,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_parse_xml_files_parses_private_tag_variants() {
+        let xml = r#"<files>
+  <file name="public.pdf"><size>10</size></file>
+  <file name="priv_true.pdf"><private>true</private></file>
+  <file name="priv_upper.pdf"><private>  TrUe  </private></file>
+  <file name="priv_one.pdf"><private> 1 </private></file>
+  <file name="pub_false.pdf"><private>false</private></file>
+  <file name="pub_zero.pdf"><private>0</private></file>
+  <file name="pub_empty.pdf"><private/></file>
+  <file name="pub_other.pdf"><private>yes</private></file>
+</files>"#;
+
+        let parsed = parse_xml_files(xml).expect("XML with <private> variants should parse");
+        let results: Vec<(&str, bool)> = parsed
+            .files
+            .iter()
+            .map(|f| (f.name.as_str(), f.is_private()))
+            .collect();
+        assert_eq!(
+            results,
+            vec![
+                ("public.pdf", false),
+                ("priv_true.pdf", true),
+                ("priv_upper.pdf", true),
+                ("priv_one.pdf", true),
+                ("pub_false.pdf", false),
+                ("pub_zero.pdf", false),
+                ("pub_empty.pdf", false),
+                ("pub_other.pdf", false),
+            ]
+        );
     }
 }
