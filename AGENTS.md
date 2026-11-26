@@ -33,13 +33,26 @@ Manual test URLs:
 
 ```
 src/
-├── main.rs              # CLI entry point (clap)
-├── lib.rs               # Library exports
-├── downloader.rs        # HTTP download logic with retry/resume
-├── archive_metadata.rs  # XML parsing for archive.org
-├── utils.rs             # Helpers (filename sanitisation, etc.)
-├── error.rs             # Custom error types
-└── constants.rs         # Timeouts, retries, etc.
+├── main.rs                  # CLI entry point (clap)
+├── lib.rs                   # Library exports
+├── downloader/
+│   ├── mod.rs               # Core download loop, range resume, rate limiting, batch orchestration
+│   ├── retry.rs             # Retry policy, backoff, Retry-After parsing, shutdown signal
+│   ├── proxy.rs             # Proxy configuration, validation, and redaction
+│   ├── redirect.rs          # Manual redirect handling and per-hop cookie scoping
+│   ├── fs_safety.rs         # Path containment, symlink-safe I/O, atomic .part promotion
+│   └── collision.rs         # Pre-write path collision detection and filesystem probing
+├── archive_metadata.rs      # XML parsing for archive.org
+├── cookie.rs                # Netscape cookies.txt and raw Cookie header scoping
+├── disk_space.rs            # Free-space estimation and pre-download checks
+├── filter.rs                # Include/exclude glob filtering
+├── verify.rs                # Offline MD5 verification (--check)
+├── utils.rs                 # Helpers (filename sanitisation, formatting, verbose logging)
+├── error.rs                 # Custom error types
+├── constants.rs             # Timeouts, retries, etc.
+└── test_support.rs          # Shared unit test helpers and mock HTTP server
+tests/
+└── cli_smoke.rs             # CLI integration smoke tests
 ```
 
 ## Dependencies
