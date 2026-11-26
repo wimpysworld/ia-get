@@ -2,7 +2,7 @@
 
 use crate::{IaGetError, Result};
 use colored::*;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::fmt;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
@@ -254,6 +254,7 @@ impl fmt::Debug for LogSink {
 #[derive(Clone, Debug)]
 pub struct VerboseLogger {
     sink: LogSink,
+    prefix: Option<Arc<str>>,
 }
 
 impl Default for VerboseLogger {
@@ -267,6 +268,7 @@ impl VerboseLogger {
     pub fn disabled() -> Self {
         Self {
             sink: LogSink::Disabled,
+            prefix: None,
         }
     }
 
@@ -274,6 +276,7 @@ impl VerboseLogger {
     pub fn stderr() -> Self {
         Self {
             sink: LogSink::Stderr,
+            prefix: None,
         }
     }
 
@@ -290,6 +293,25 @@ impl VerboseLogger {
     pub fn with_writer<W: Write + Send + 'static>(writer: W) -> Self {
         Self {
             sink: LogSink::Writer(Arc::new(Mutex::new(Box::new(writer)))),
+            prefix: None,
+        }
+    }
+
+    /// Returns a cloned logger that prefixes each message with `[<prefix>] `.
+    pub fn with_prefix(&self, prefix: impl AsRef<str>) -> Self {
+        let raw = prefix.as_ref();
+        let clean = if raw.contains(['\r', '\n']) {
+            raw.replace(['\r', '\n'], " ")
+        } else {
+            raw.to_string()
+        };
+        Self {
+            sink: self.sink.clone(),
+            prefix: if clean.is_empty() {
+                None
+            } else {
+                Some(Arc::from(clean))
+            },
         }
     }
 
@@ -313,7 +335,10 @@ impl VerboseLogger {
         } else {
             raw
         };
-        let line = format!("[verbose] {category}: {clean}\n");
+        let line = match &self.prefix {
+            Some(prefix) => format!("[verbose] {category}: [{prefix}] {clean}\n"),
+            None => format!("[verbose] {category}: {clean}\n"),
+        };
 
         match &self.sink {
             LogSink::Disabled => {}
@@ -371,6 +396,43 @@ pub fn create_progress_bar(
             .expect("Failed to set progress bar style")
             .progress_chars("▓▒░"),
     );
+
+    pb
+}
+
+/// Creates a progress bar attached to `multi` with the file `label` rendered via `{msg}`
+/// so concurrent active downloads remain distinguishable on TTYs and safe for brace characters.
+pub(crate) fn create_attached_progress_bar(
+    multi: &MultiProgress,
+    total: u64,
+    action: &str,
+    label: &str,
+    color: Option<&str>,
+    with_eta: bool,
+) -> ProgressBar {
+    let pb = multi.add(ProgressBar::new(total));
+    let color_str = color.unwrap_or("green/green");
+
+    let styled_action = if action.contains("├╼") || action.contains("╰╼") {
+        action
+            .replace("├╼", &"├╼".cyan().dimmed().to_string())
+            .replace("╰╼", &"╰╼".cyan().dimmed().to_string())
+    } else {
+        action.to_string()
+    };
+
+    let eta_suffix = if with_eta { " (ETA: {eta})" } else { "" };
+    let template = format!(
+        "{styled_action}{{elapsed_precise}} {{bar:32.{color_str}}} {{bytes}}/{{total_bytes}}{eta_suffix} {{msg}}"
+    );
+
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(&template)
+            .expect("Failed to set attached progress bar style")
+            .progress_chars("▓▒░"),
+    );
+    pb.set_message(label.to_string());
 
     pb
 }
@@ -1187,5 +1249,31 @@ mod tests {
                 "[verbose] download: line1 line2  line3 line4",
             ]
         );
+
+        let prefixed = enabled.with_prefix("nested/file{1}.bin\n");
+        prefixed.log("http", "-> GET https://archive.org/download/item/file.bin");
+        assert_eq!(
+            captured.lines().last().map(String::as_str),
+            Some(
+                "[verbose] http: [nested/file{1}.bin ] -> GET https://archive.org/download/item/file.bin"
+            )
+        );
+    }
+
+    #[test]
+    fn test_attached_progress_bar_handles_braces_in_label() {
+        let multi = MultiProgress::with_draw_target(progress_draw_target());
+        let pb = create_attached_progress_bar(
+            &multi,
+            256,
+            "╰╼ Downloading  ",
+            "book_{1984}_scan.pdf",
+            Some("green/green"),
+            true,
+        );
+        pb.set_position(128);
+        pb.finish_and_clear();
+        multi.remove(&pb);
+        let _ = multi.clear();
     }
 }

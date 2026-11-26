@@ -48,7 +48,7 @@ If distinctness cannot be proved on the destination filesystem, validation fails
 ## Batch error handling and exit codes
 
 When a file fails to download or fails MD5 verification, `ia-get` prints a warning and continues with the remaining files.
-At the end of a run, `ia-get` prints a summary with `ok`, `skipped`, and `failed` counts and lists any failed files.
+At the end of a run, `ia-get` prints a summary with `ok`, `skipped`, and `failed` counts and lists any failed files in original XML metadata order.
 
 `ia-get` exits with status `0` only when all selected files succeed without interruption.
 If any file fails or Ctrl+C interrupts the run, `ia-get` exits with a non-zero status.
