@@ -267,36 +267,7 @@ fn cookie_applies_to_url(cookie: &NetscapeCookie, url: &Url, now: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDirGuard(PathBuf);
-
-    impl TempDirGuard {
-        fn new(label: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!(
-                "ia-get-cookie-test-{}-{}-{}",
-                std::process::id(),
-                label,
-                id
-            ));
-            fs::create_dir_all(&dir).expect("create temp test dir");
-            Self(dir)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TempTestDir;
 
     fn url(s: &str) -> Url {
         Url::parse(s).expect("valid test URL")
@@ -304,80 +275,64 @@ mod tests {
 
     #[test]
     fn is_archive_org_host_accepts_apex_and_subdomains() {
-        assert!(is_archive_org_host(&url("https://archive.org/download/x")));
-        assert!(is_archive_org_host(&url("https://ARCHIVE.ORG/download/x")));
-        assert!(is_archive_org_host(&url(
-            "https://ia800100.us.archive.org/1/items/x"
-        )));
-        assert!(is_archive_org_host(&url("https://user:pass@archive.org/x")));
+        for valid in [
+            "https://archive.org/download/x",
+            "https://ARCHIVE.ORG/download/x",
+            "https://ia800100.us.archive.org/1/items/x",
+            "https://user:pass@archive.org/x",
+        ] {
+            assert!(is_archive_org_host(&url(valid)), "should accept {valid}");
+        }
     }
 
     #[test]
     fn is_archive_org_host_rejects_lookalikes_ips_and_malformed_domains() {
-        assert!(!is_archive_org_host(&url("https://notarchive.org/x")));
-        assert!(!is_archive_org_host(&url("https://archive.org.evil.com/x")));
-        assert!(!is_archive_org_host(&url("https://evil-archive.org/x")));
-        assert!(!is_archive_org_host(&url("https://.archive.org/x")));
-        assert!(!is_archive_org_host(&url("https://a..archive.org/x")));
-        assert!(!is_archive_org_host(&url("https://archive.org./x")));
-        assert!(!is_archive_org_host(&url("https://127.0.0.1/x")));
-        assert!(!is_archive_org_host(&url("https://[::1]/x")));
-        assert!(!is_archive_org_host(&url("https://archive.org@evil.com/x")));
+        for invalid in [
+            "https://notarchive.org/x",
+            "https://archive.org.evil.com/x",
+            "https://evil-archive.org/x",
+            "https://.archive.org/x",
+            "https://a..archive.org/x",
+            "https://archive.org./x",
+            "https://127.0.0.1/x",
+            "https://[::1]/x",
+            "https://archive.org@evil.com/x",
+        ] {
+            assert!(
+                !is_archive_org_host(&url(invalid)),
+                "should reject {invalid}"
+            );
+        }
     }
 
     #[test]
     fn raw_cookie_scoping_enforces_https_and_archive_org_host() {
         let source = CookieSource::from_raw("  logged-in-user=yes; logged-in-sig=abc123  ")
             .expect("valid raw cookie");
+        let expected = Some("logged-in-user=yes; logged-in-sig=abc123".to_string());
 
-        assert_eq!(
-            source.header_for_url_at(&url("https://archive.org/download/item"), 1_000),
-            Some("logged-in-user=yes; logged-in-sig=abc123".to_string())
-        );
-        assert_eq!(
-            source.header_for_url_at(&url("https://ia800100.us.archive.org/1/items/item"), 1_000),
-            Some("logged-in-user=yes; logged-in-sig=abc123".to_string())
-        );
-        assert_eq!(
-            source.header_for_url_at(&url("https://user:pass@archive.org/download/item"), 1_000),
-            Some("logged-in-user=yes; logged-in-sig=abc123".to_string())
-        );
+        let cases = [
+            ("https://archive.org/download/item", true),
+            ("https://ia800100.us.archive.org/1/items/item", true),
+            ("https://user:pass@archive.org/download/item", true),
+            // HTTP downgrade, lookalikes, IPs, userinfo spoofing, and non-HTTP schemes
+            ("http://archive.org/download/item", false),
+            ("http://ia800100.us.archive.org/1/items/item", false),
+            ("https://notarchive.org/download/item", false),
+            ("https://archive.org.evil.com/download/item", false),
+            ("https://127.0.0.1/download/item", false),
+            ("https://[::1]/download/item", false),
+            ("https://archive.org@evil.com/download/item", false),
+            ("ftp://archive.org/download/item", false),
+        ];
 
-        // HTTP downgrade must be rejected
-        assert_eq!(
-            source.header_for_url_at(&url("http://archive.org/download/item"), 1_000),
-            None
-        );
-        assert_eq!(
-            source.header_for_url_at(&url("http://ia800100.us.archive.org/1/items/item"), 1_000),
-            None
-        );
-
-        // Lookalikes, IPs, and userinfo spoofing must be rejected
-        assert_eq!(
-            source.header_for_url_at(&url("https://notarchive.org/download/item"), 1_000),
-            None
-        );
-        assert_eq!(
-            source.header_for_url_at(&url("https://archive.org.evil.com/download/item"), 1_000),
-            None
-        );
-        assert_eq!(
-            source.header_for_url_at(&url("https://127.0.0.1/download/item"), 1_000),
-            None
-        );
-        assert_eq!(
-            source.header_for_url_at(&url("https://[::1]/download/item"), 1_000),
-            None
-        );
-        assert_eq!(
-            source.header_for_url_at(&url("https://archive.org@evil.com/download/item"), 1_000),
-            None
-        );
-        assert_eq!(
-            source.header_for_url_at(&url("ftp://archive.org/download/item"), 1_000),
-            None
-        );
+        for (target, allowed) in cases {
+            assert_eq!(
+                source.header_for_url_at(&url(target), 1_000),
+                if allowed { expected.clone() } else { None },
+                "target: {target}"
+            );
+        }
     }
 
     #[test]
@@ -394,11 +349,12 @@ mod tests {
             None
         );
 
-        let err = CookieSource::from_raw("a=b\r\nX-Injected: yes").unwrap_err();
-        assert!(matches!(err, IaGetError::Network(_)));
-
-        let err_ctrl = CookieSource::from_raw("a=\x07").unwrap_err();
-        assert!(matches!(err_ctrl, IaGetError::Network(_)));
+        for invalid in ["a=b\r\nX-Injected: yes", "a=\x07"] {
+            assert!(
+                matches!(CookieSource::from_raw(invalid), Err(IaGetError::Network(_))),
+                "expected Network error for {invalid:?}"
+            );
+        }
     }
 
     #[test]
@@ -433,128 +389,97 @@ mod tests {
             parse_netscape_cookie("archive.org\tFALSE\t/\tFALSE\t-1\texpired\told").unwrap();
         assert_eq!(negative.expires, Some(0));
 
-        // Comments, blanks, malformed expiry, empty domain, empty name, too few fields are skipped
-        assert!(parse_netscape_cookie("").is_none());
-        assert!(parse_netscape_cookie("\r\n").is_none());
-        assert!(parse_netscape_cookie("# Netscape HTTP Cookie File").is_none());
-        assert!(parse_netscape_cookie("   # indented comment").is_none());
-        assert!(parse_netscape_cookie("#HttpOnly_").is_none());
-        assert!(
-            parse_netscape_cookie("archive.org\tFALSE\t/\tFALSE\tnotanint\tname\tval").is_none()
-        );
-        assert!(parse_netscape_cookie("archive.org\tFALSE\t/\tFALSE\t\tname\tval").is_none());
-        assert!(parse_netscape_cookie("\tTRUE\t/\tFALSE\t0\tname\tval").is_none());
-        assert!(parse_netscape_cookie(".\tTRUE\t/\tFALSE\t0\tname\tval").is_none());
-        assert!(parse_netscape_cookie("archive.org\tFALSE\t/\tFALSE\t0\t\tval").is_none());
-        assert!(parse_netscape_cookie("archive.org\tFALSE\t/\tFALSE\t0\tonlysix").is_none());
+        // Comments, blanks, malformed expiry, empty domain/name, and too few fields are skipped
+        for skipped in [
+            "",
+            "\r\n",
+            "# Netscape HTTP Cookie File",
+            "   # indented comment",
+            "#HttpOnly_",
+            "archive.org\tFALSE\t/\tFALSE\tnotanint\tname\tval",
+            "archive.org\tFALSE\t/\tFALSE\t\tname\tval",
+            "\tTRUE\t/\tFALSE\t0\tname\tval",
+            ".\tTRUE\t/\tFALSE\t0\tname\tval",
+            "archive.org\tFALSE\t/\tFALSE\t0\t\tval",
+            "archive.org\tFALSE\t/\tFALSE\t0\tonlysix",
+        ] {
+            assert!(
+                parse_netscape_cookie(skipped).is_none(),
+                "expected None for {skipped:?}"
+            );
+        }
     }
 
     #[test]
     fn netscape_domain_and_ip_matching() {
-        let apex_only = parse_netscape_cookie("archive.org\tFALSE\t/\tFALSE\t0\ta\t1").unwrap();
-        assert!(cookie_domain_matches(
-            &apex_only,
-            &url("https://archive.org/")
-        ));
-        assert!(!cookie_domain_matches(
-            &apex_only,
-            &url("https://sub.archive.org/")
-        ));
+        let cases = [
+            // Apex-only host cookie
+            ("archive.org", "FALSE", "https://archive.org/", true),
+            ("archive.org", "FALSE", "https://sub.archive.org/", false),
+            // Domain cookie with subdomains
+            (".archive.org", "TRUE", "https://archive.org/", true),
+            (
+                ".archive.org",
+                "TRUE",
+                "https://ia800100.us.archive.org/",
+                true,
+            ),
+            (".archive.org", "TRUE", "https://notarchive.org/", false),
+            (
+                ".archive.org",
+                "TRUE",
+                "https://archive.org.evil.com/",
+                false,
+            ),
+            (".archive.org", "TRUE", "https://.archive.org/", false),
+            // IPv4 exact match only, no suffix matching even with include_subdomains=true
+            ("127.0.0.1", "FALSE", "http://127.0.0.1/", true),
+            ("127.0.0.1", "FALSE", "http://127.0.0.2/", false),
+            ("0.0.1", "TRUE", "http://127.0.0.1/", false),
+            // IPv6 exact match with or without brackets and canonical comparison
+            ("::1", "FALSE", "http://[::1]/", true),
+            ("[::1]", "FALSE", "http://[::1]/", true),
+            ("[::1]", "FALSE", "http://[::2]/", false),
+            ("[2001:0DB8::0001]", "TRUE", "https://[2001:db8::1]/", true),
+        ];
 
-        let with_subs = parse_netscape_cookie(".archive.org\tTRUE\t/\tFALSE\t0\ta\t1").unwrap();
-        assert!(cookie_domain_matches(
-            &with_subs,
-            &url("https://archive.org/")
-        ));
-        assert!(cookie_domain_matches(
-            &with_subs,
-            &url("https://ia800100.us.archive.org/")
-        ));
-        assert!(!cookie_domain_matches(
-            &with_subs,
-            &url("https://notarchive.org/")
-        ));
-        assert!(!cookie_domain_matches(
-            &with_subs,
-            &url("https://archive.org.evil.com/")
-        ));
-        assert!(!cookie_domain_matches(
-            &with_subs,
-            &url("https://.archive.org/")
-        ));
-
-        // IPv4 exact match only, no suffix matching even with include_subdomains=true
-        let ipv4 = parse_netscape_cookie("127.0.0.1\tFALSE\t/\tFALSE\t0\tip4\t1").unwrap();
-        assert!(cookie_domain_matches(&ipv4, &url("http://127.0.0.1/")));
-        assert!(!cookie_domain_matches(&ipv4, &url("http://127.0.0.2/")));
-
-        let ipv4_suffix = parse_netscape_cookie("0.0.1\tTRUE\t/\tFALSE\t0\tbad\t1").unwrap();
-        assert!(!cookie_domain_matches(
-            &ipv4_suffix,
-            &url("http://127.0.0.1/")
-        ));
-
-        // IPv6 exact match with or without brackets and canonical comparison
-        let ipv6_bare = parse_netscape_cookie("::1\tFALSE\t/\tFALSE\t0\tip6\t1").unwrap();
-        let ipv6_bracketed = parse_netscape_cookie("[::1]\tFALSE\t/\tFALSE\t0\tip6b\t1").unwrap();
-        let ipv6_expanded =
-            parse_netscape_cookie("[2001:0DB8::0001]\tTRUE\t/\tFALSE\t0\tip6e\t1").unwrap();
-        assert!(cookie_domain_matches(&ipv6_bare, &url("http://[::1]/")));
-        assert!(cookie_domain_matches(
-            &ipv6_bracketed,
-            &url("http://[::1]/")
-        ));
-        assert!(!cookie_domain_matches(
-            &ipv6_bracketed,
-            &url("http://[::2]/")
-        ));
-        assert!(cookie_domain_matches(
-            &ipv6_expanded,
-            &url("https://[2001:db8::1]/")
-        ));
+        for (domain, include_sub, target, expected) in cases {
+            let line = format!("{domain}\t{include_sub}\t/\tFALSE\t0\ta\t1");
+            let cookie = parse_netscape_cookie(&line).unwrap();
+            assert_eq!(
+                cookie_domain_matches(&cookie, &url(target)),
+                expected,
+                "domain={domain:?}, include_sub={include_sub}, target={target}"
+            );
+        }
     }
 
     #[test]
     fn netscape_path_matching_follows_rfc6265_boundaries() {
-        let empty_path = parse_netscape_cookie("archive.org\tFALSE\t\tFALSE\t0\ta\t1").unwrap();
-        assert!(cookie_path_matches(
-            &empty_path,
-            &url("https://archive.org/download/file")
-        ));
+        let cases = [
+            ("", "https://archive.org/download/file", true),
+            ("/download", "https://archive.org/download", true),
+            ("/download", "https://archive.org/download/", true),
+            (
+                "/download",
+                "https://archive.org/download/item/file.zip",
+                true,
+            ),
+            ("/download", "https://archive.org/downloader/item", false),
+            ("/download/", "https://archive.org/download", false),
+            ("/download/", "https://archive.org/download/", true),
+            ("/download/", "https://archive.org/download/file.zip", true),
+        ];
 
-        let dir_no_slash =
-            parse_netscape_cookie("archive.org\tFALSE\t/download\tFALSE\t0\ta\t1").unwrap();
-        assert!(cookie_path_matches(
-            &dir_no_slash,
-            &url("https://archive.org/download")
-        ));
-        assert!(cookie_path_matches(
-            &dir_no_slash,
-            &url("https://archive.org/download/")
-        ));
-        assert!(cookie_path_matches(
-            &dir_no_slash,
-            &url("https://archive.org/download/item/file.zip")
-        ));
-        assert!(!cookie_path_matches(
-            &dir_no_slash,
-            &url("https://archive.org/downloader/item")
-        ));
-
-        let dir_with_slash =
-            parse_netscape_cookie("archive.org\tFALSE\t/download/\tFALSE\t0\ta\t1").unwrap();
-        assert!(!cookie_path_matches(
-            &dir_with_slash,
-            &url("https://archive.org/download")
-        ));
-        assert!(cookie_path_matches(
-            &dir_with_slash,
-            &url("https://archive.org/download/")
-        ));
-        assert!(cookie_path_matches(
-            &dir_with_slash,
-            &url("https://archive.org/download/file.zip")
-        ));
+        for (cookie_path, target, expected) in cases {
+            let line = format!("archive.org\tFALSE\t{cookie_path}\tFALSE\t0\ta\t1");
+            let cookie = parse_netscape_cookie(&line).unwrap();
+            assert_eq!(
+                cookie_path_matches(&cookie, &url(target)),
+                expected,
+                "cookie_path={cookie_path:?}, target={target}"
+            );
+        }
     }
 
     #[test]
@@ -590,29 +515,36 @@ mod tests {
         );
         let source = CookieSource::from_netscape_str(content);
 
-        // Before expiry on HTTPS: short_lived, session, and secure_only apply
-        assert_eq!(
-            source.header_for_url_at(&url("https://archive.org/download/x"), 999),
-            Some("short_lived=ok; session=alive; secure_only=https_only".to_string())
-        );
+        let cases = [
+            // Before expiry on HTTPS
+            (
+                "https://archive.org/download/x",
+                999,
+                Some("short_lived=ok; session=alive; secure_only=https_only"),
+            ),
+            // At exact expiry timestamp
+            (
+                "https://archive.org/download/x",
+                1000,
+                Some("session=alive; secure_only=https_only"),
+            ),
+            // Even at now = 0, negative expiry cookie is still expired; secure_only skipped on HTTP
+            (
+                "http://archive.org/download/x",
+                0,
+                Some("short_lived=ok; session=alive"),
+            ),
+            // Non-HTTP(S) schemes receive no cookies
+            ("ftp://archive.org/download/x", 0, None),
+        ];
 
-        // At exact expiry timestamp: short_lived is expired
-        assert_eq!(
-            source.header_for_url_at(&url("https://archive.org/download/x"), 1000),
-            Some("session=alive; secure_only=https_only".to_string())
-        );
-
-        // Even at now = 0, negative expiry cookie is still expired
-        assert_eq!(
-            source.header_for_url_at(&url("http://archive.org/download/x"), 0),
-            Some("short_lived=ok; session=alive".to_string())
-        );
-
-        // Non-HTTP(S) schemes receive no cookies
-        assert_eq!(
-            source.header_for_url_at(&url("ftp://archive.org/download/x"), 0),
-            None
-        );
+        for (target, now, expected) in cases {
+            assert_eq!(
+                source.header_for_url_at(&url(target), now).as_deref(),
+                expected,
+                "target={target}, now={now}"
+            );
+        }
     }
 
     #[test]
@@ -635,13 +567,11 @@ mod tests {
 
     #[test]
     fn from_input_disambiguates_file_directory_and_raw_cookie() {
-        let dir = TempDirGuard::new("from-input");
-        let cookie_file = dir.path().join("cookies.txt");
-        fs::write(
-            &cookie_file,
+        let dir = TempTestDir::new("cookie-from-input");
+        let cookie_file = dir.write(
+            "cookies.txt",
             "# Netscape HTTP Cookie File\n.archive.org\tTRUE\t/\tTRUE\t0\tlogged-in-user\tyes\n",
-        )
-        .expect("write cookie file");
+        );
 
         // File -> NetscapeFile
         let from_file =

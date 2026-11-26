@@ -4501,104 +4501,349 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{
+        fast_retry_policy, md5_hex, slow_retry_policy, CapturedLogs, CapturedRequest, MockResponse,
+        MockServer, TempTestDir,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Mutex;
 
-    #[test]
-    fn test_parse_content_range_valid_bytes() {
+    struct DownloadFixture {
+        dir: TempTestDir,
+        client: reqwest::Client,
+        signal: ShutdownSignal,
+    }
+
+    impl DownloadFixture {
+        fn new(prefix: &str) -> Self {
+            Self::with_client(prefix, http_client_builder().build().unwrap())
+        }
+
+        fn with_client(prefix: &str, client: reqwest::Client) -> Self {
+            Self {
+                dir: TempTestDir::new(prefix),
+                client,
+                signal: ShutdownSignal::new(),
+            }
+        }
+
+        fn path(&self) -> &Path {
+            self.dir.path()
+        }
+
+        fn join(&self, rel: impl AsRef<Path>) -> PathBuf {
+            self.dir.join(rel)
+        }
+
+        fn part_path(&self, rel: &str) -> PathBuf {
+            self.dir.part_path(rel)
+        }
+
+        fn write(&self, rel: impl AsRef<Path>, data: impl AsRef<[u8]>) -> PathBuf {
+            self.dir.write(rel, data)
+        }
+
+        fn write_part(&self, rel: &str, data: impl AsRef<[u8]>) -> PathBuf {
+            let path = self.part_path(rel);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create parent dirs for .part fixture");
+            }
+            fs::write(&path, data).expect("write .part fixture");
+            path
+        }
+
+        async fn download(
+            &self,
+            url: &str,
+            rel_path: &str,
+            expected_md5: Option<&str>,
+            cookie_source: Option<&CookieSource>,
+        ) -> Result<FileOutcome> {
+            download_single_file(
+                &self.client,
+                self.path(),
+                url,
+                rel_path,
+                expected_md5,
+                &self.signal,
+                cookie_source,
+            )
+            .await
+        }
+
+        async fn download_with_policy(
+            &self,
+            url: &str,
+            rel_path: &str,
+            expected_md5: Option<&str>,
+            cookie_source: Option<&CookieSource>,
+            policy: &RetryPolicy,
+        ) -> Result<FileOutcome> {
+            download_single_file_with_policy(
+                &self.client,
+                self.path(),
+                url,
+                rel_path,
+                expected_md5,
+                &self.signal,
+                cookie_source,
+                policy,
+            )
+            .await
+        }
+
+        fn assert_downloaded(&self, rel_path: &str, expected: &[u8]) {
+            assert_downloaded_file(self.path(), rel_path, expected);
+        }
+    }
+
+    fn assert_downloaded_file(dir: &Path, rel_path: &str, expected: &[u8]) {
         assert_eq!(
-            parse_content_range("bytes 0-99/1000"),
-            Some(ContentRange::Bytes {
-                start: 0,
-                end: 99,
-                complete_length: Some(1000),
-            })
+            fs::read(dir.join(rel_path)).unwrap(),
+            expected,
+            "unexpected downloaded bytes for '{rel_path}'"
         );
-        assert_eq!(
-            parse_content_range("bytes 0-0/1"),
-            Some(ContentRange::Bytes {
-                start: 0,
-                end: 0,
-                complete_length: Some(1),
-            })
-        );
-        assert_eq!(
-            parse_content_range("bytes 100-199/*"),
-            Some(ContentRange::Bytes {
-                start: 100,
-                end: 199,
-                complete_length: None,
-            })
-        );
-        assert_eq!(
-            parse_content_range("BYTES 50-50/51"),
-            Some(ContentRange::Bytes {
-                start: 50,
-                end: 50,
-                complete_length: Some(51),
-            })
-        );
-        assert_eq!(
-            parse_content_range("Bytes 10-20/*"),
-            Some(ContentRange::Bytes {
-                start: 10,
-                end: 20,
-                complete_length: None,
-            })
-        );
-        assert_eq!(
-            parse_content_range("  bytes 0-9/10  "),
-            Some(ContentRange::Bytes {
-                start: 0,
-                end: 9,
-                complete_length: Some(10),
-            })
-        );
-        assert_eq!(
-            parse_content_range(&format!("bytes 0-{}/{}", u64::MAX - 1, u64::MAX)),
-            Some(ContentRange::Bytes {
-                start: 0,
-                end: u64::MAX - 1,
-                complete_length: Some(u64::MAX),
-            })
-        );
-        assert_eq!(
-            parse_content_range(&format!("bytes {}-{}/*", u64::MAX, u64::MAX)),
-            Some(ContentRange::Bytes {
-                start: u64::MAX,
-                end: u64::MAX,
-                complete_length: None,
-            })
+        assert!(
+            !dir.join(part_file_path(rel_path)).exists(),
+            ".part file for '{rel_path}' should be promoted away"
         );
     }
 
-    #[test]
-    fn test_parse_content_range_valid_unsatisfied() {
-        assert_eq!(
-            parse_content_range("bytes */1234"),
-            Some(ContentRange::Unsatisfied {
-                complete_length: 1234,
-            })
-        );
-        assert_eq!(
-            parse_content_range("bytes */0"),
-            Some(ContentRange::Unsatisfied { complete_length: 0 })
-        );
-        assert_eq!(
-            parse_content_range("ByTeS */42"),
-            Some(ContentRange::Unsatisfied {
-                complete_length: 42,
-            })
-        );
-        assert_eq!(
-            parse_content_range(&format!("  bytes */{}  ", u64::MAX)),
-            Some(ContentRange::Unsatisfied {
-                complete_length: u64::MAX,
-            })
-        );
+    fn assert_path_collision(
+        err: IaGetError,
+        expected_local: &str,
+        expected_first: Option<&str>,
+        expected_second: Option<&str>,
+        reason_contains: Option<&str>,
+        context: &str,
+    ) {
+        match err {
+            IaGetError::PathCollision {
+                local_path,
+                first_entry,
+                second_entry,
+                reason,
+            } => {
+                assert_eq!(
+                    local_path, expected_local,
+                    "{context}: unexpected local_path"
+                );
+                if let Some(first) = expected_first {
+                    assert_eq!(first_entry, first, "{context}: unexpected first_entry");
+                }
+                if let Some(second) = expected_second {
+                    assert_eq!(second_entry, second, "{context}: unexpected second_entry");
+                }
+                if let Some(needle) = reason_contains {
+                    assert!(
+                        reason.contains(needle),
+                        "{context}: expected reason to contain '{needle}', got '{reason}'"
+                    );
+                }
+            }
+            other => panic!("{context}: expected PathCollision, got {other:?}"),
+        }
+    }
+
+    fn same_paths<'a>(paths: &[&'a str]) -> Vec<(&'a str, &'a str)> {
+        paths.iter().map(|&p| (p, p)).collect()
+    }
+
+    /// Independently observes whether `dir` treats `first` and `second` as equivalent names.
+    fn probe_host_dir_equivalent(dir: &Path, first: &str, second: &str) -> bool {
+        let first_path = dir.join(first);
+        let second_path = dir.join(second);
+        fs::write(&first_path, b"probe").expect("write host equivalence probe");
+        let equivalent = match fs::symlink_metadata(&second_path) {
+            Ok(_) => true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(err) => panic!("unexpected error probing host equivalence: {err}"),
+        };
+        let _ = fs::remove_file(&first_path);
+        equivalent
+    }
+
+    fn measure_host_dir_case_sensitivity(dir: &Path) -> PathCaseSensitivity {
+        if probe_host_dir_equivalent(dir, "host-case-probe-file.txt", "HOST-CASE-PROBE-FILE.TXT") {
+            PathCaseSensitivity::CaseInsensitive
+        } else {
+            PathCaseSensitivity::CaseSensitive
+        }
+    }
+
+    #[cfg(unix)]
+    fn with_readonly_dir<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct RestoreWritable<'a>(&'a Path);
+        impl Drop for RestoreWritable<'_> {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let _restore = RestoreWritable(dir);
+        f()
+    }
+
+    fn proxy_config_from_vars(vars: &[(&str, &str)]) -> Result<ProxyConfig> {
+        ProxyConfig::from_lookup(|name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_string())
+        })
+    }
+
+    fn proxy_client(vars: &[(&str, &str)]) -> reqwest::Client {
+        let config = proxy_config_from_vars(vars).unwrap();
+        http_client_builder_with_proxy(&config)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn assert_invalid_proxy(
+        err: IaGetError,
+        expected_var: &str,
+        expected_value: Option<&str>,
+        forbidden_secrets: &[&str],
+        expect_redacted: bool,
+        context: &str,
+    ) {
+        let rendered = err.to_string();
+        match err {
+            IaGetError::InvalidProxy { var, value, .. } => {
+                assert_eq!(var, expected_var, "{context}: unexpected var");
+                if let Some(expected) = expected_value {
+                    assert_eq!(value, expected, "{context}: unexpected redacted value");
+                }
+                if expect_redacted {
+                    assert!(
+                        value.contains("<redacted>@"),
+                        "{context}: expected redaction marker in value: {value}"
+                    );
+                    assert!(
+                        rendered.contains("<redacted>@"),
+                        "{context}: expected redaction marker in Display: {rendered}"
+                    );
+                }
+                for secret in forbidden_secrets {
+                    assert!(
+                        !value.contains(secret),
+                        "{context}: secret '{secret}' leaked in value: {value}"
+                    );
+                    assert!(
+                        !rendered.contains(secret),
+                        "{context}: secret '{secret}' leaked in Display: {rendered}"
+                    );
+                }
+            }
+            other => panic!("{context}: expected InvalidProxy, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_parse_content_range_rejects_invalid_headers() {
-        let invalid_cases = [
+    fn test_parse_content_range() {
+        let max_range = format!("bytes 0-{}/{}", u64::MAX - 1, u64::MAX);
+        let max_open = format!("bytes {}-{}/*", u64::MAX, u64::MAX);
+        let max_unsat = format!("  bytes */{}  ", u64::MAX);
+
+        let valid_cases: [(&str, ContentRange); 12] = [
+            (
+                "bytes 0-99/1000",
+                ContentRange::Bytes {
+                    start: 0,
+                    end: 99,
+                    complete_length: Some(1000),
+                },
+            ),
+            (
+                "bytes 0-0/1",
+                ContentRange::Bytes {
+                    start: 0,
+                    end: 0,
+                    complete_length: Some(1),
+                },
+            ),
+            (
+                "bytes 100-199/*",
+                ContentRange::Bytes {
+                    start: 100,
+                    end: 199,
+                    complete_length: None,
+                },
+            ),
+            (
+                "BYTES 50-50/51",
+                ContentRange::Bytes {
+                    start: 50,
+                    end: 50,
+                    complete_length: Some(51),
+                },
+            ),
+            (
+                "Bytes 10-20/*",
+                ContentRange::Bytes {
+                    start: 10,
+                    end: 20,
+                    complete_length: None,
+                },
+            ),
+            (
+                "  bytes 0-9/10  ",
+                ContentRange::Bytes {
+                    start: 0,
+                    end: 9,
+                    complete_length: Some(10),
+                },
+            ),
+            (
+                &max_range,
+                ContentRange::Bytes {
+                    start: 0,
+                    end: u64::MAX - 1,
+                    complete_length: Some(u64::MAX),
+                },
+            ),
+            (
+                &max_open,
+                ContentRange::Bytes {
+                    start: u64::MAX,
+                    end: u64::MAX,
+                    complete_length: None,
+                },
+            ),
+            (
+                "bytes */1234",
+                ContentRange::Unsatisfied {
+                    complete_length: 1234,
+                },
+            ),
+            (
+                "bytes */0",
+                ContentRange::Unsatisfied { complete_length: 0 },
+            ),
+            (
+                "ByTeS */42",
+                ContentRange::Unsatisfied {
+                    complete_length: 42,
+                },
+            ),
+            (
+                &max_unsat,
+                ContentRange::Unsatisfied {
+                    complete_length: u64::MAX,
+                },
+            ),
+        ];
+
+        for (header, expected) in valid_cases {
+            assert_eq!(parse_content_range(header), Some(expected), "{header:?}");
+        }
+
+        for invalid in [
             "",
             "bytes",
             "bytes ",
@@ -4633,263 +4878,230 @@ mod tests {
             "bytes  0-9/10",
             "bytes 0-9",
             "bytes /10",
-        ];
-
-        for header in invalid_cases {
-            assert_eq!(
-                parse_content_range(header),
-                None,
-                "expected None for header: {header:?}"
-            );
+        ] {
+            assert_eq!(parse_content_range(invalid), None, "header: {invalid:?}");
         }
     }
 
     #[test]
     fn test_compute_progress_total() {
-        assert_eq!(compute_progress_total(0, Some(500), None), 500);
-        assert_eq!(compute_progress_total(100, Some(400), Some(1000)), 1000);
-        assert_eq!(compute_progress_total(100, Some(400), None), 500);
-        assert_eq!(compute_progress_total(100, None, None), 100);
-        assert_eq!(compute_progress_total(0, None, None), 0);
-        assert_eq!(compute_progress_total(100, Some(u64::MAX), None), u64::MAX);
-        assert_eq!(compute_progress_total(u64::MAX, Some(1), None), u64::MAX);
-        assert_eq!(
-            compute_progress_total(u64::MAX, Some(u64::MAX), None),
-            u64::MAX
-        );
-        assert_eq!(compute_progress_total(100, Some(u64::MAX), Some(500)), 500);
+        for (offset, content_len, complete_len, expected) in [
+            (0, Some(500), None, 500),
+            (100, Some(400), Some(1000), 1000),
+            (100, Some(400), None, 500),
+            (100, None, None, 100),
+            (0, None, None, 0),
+            (100, Some(u64::MAX), None, u64::MAX),
+            (u64::MAX, Some(1), None, u64::MAX),
+            (u64::MAX, Some(u64::MAX), None, u64::MAX),
+            (100, Some(u64::MAX), Some(500), 500),
+        ] {
+            assert_eq!(
+                compute_progress_total(offset, content_len, complete_len),
+                expected
+            );
+        }
     }
 
     #[test]
-    fn test_classify_download_response_ok() {
-        assert_eq!(
-            classify_download_response(StatusCode::OK, None, Some(1024), 0, true).unwrap(),
-            ResponseAction::WriteFromStart {
-                total_expected_size: 1024,
-            }
-        );
-        assert_eq!(
-            classify_download_response(StatusCode::OK, None, Some(1024), 256, true).unwrap(),
-            ResponseAction::WriteFromStart {
-                total_expected_size: 1024,
-            }
-        );
-        assert_eq!(
-            classify_download_response(StatusCode::OK, None, None, 256, false).unwrap(),
-            ResponseAction::WriteFromStart {
-                total_expected_size: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn test_classify_download_response_partial_content() {
-        let err = classify_download_response(
-            StatusCode::PARTIAL_CONTENT,
-            Some("bytes 0-99/200"),
-            Some(100),
-            0,
-            true,
-        )
-        .unwrap_err();
-        assert!(matches!(err, IaGetError::Network(_)));
-
-        assert_eq!(
-            classify_download_response(
+    fn test_classify_download_response() {
+        let ok_cases = [
+            // 200 OK
+            (
+                StatusCode::OK,
+                None,
+                Some(1024),
+                0,
+                true,
+                ResponseAction::WriteFromStart {
+                    total_expected_size: 1024,
+                },
+            ),
+            (
+                StatusCode::OK,
+                None,
+                Some(1024),
+                256,
+                true,
+                ResponseAction::WriteFromStart {
+                    total_expected_size: 1024,
+                },
+            ),
+            (
+                StatusCode::OK,
+                None,
+                None,
+                256,
+                false,
+                ResponseAction::WriteFromStart {
+                    total_expected_size: 0,
+                },
+            ),
+            // 206 Partial Content
+            (
                 StatusCode::PARTIAL_CONTENT,
                 Some("bytes 100-199/500"),
                 Some(100),
                 100,
                 true,
-            )
-            .unwrap(),
-            ResponseAction::AppendFromOffset {
-                total_expected_size: 500,
-            }
-        );
-
-        assert_eq!(
-            classify_download_response(
+                ResponseAction::AppendFromOffset {
+                    total_expected_size: 500,
+                },
+            ),
+            (
                 StatusCode::PARTIAL_CONTENT,
                 Some("bytes 100-199/*"),
                 Some(100),
                 100,
                 false,
-            )
-            .unwrap(),
-            ResponseAction::AppendFromOffset {
-                total_expected_size: 200,
-            }
-        );
-
-        assert_eq!(
-            classify_download_response(
+                ResponseAction::AppendFromOffset {
+                    total_expected_size: 200,
+                },
+            ),
+            (
                 StatusCode::PARTIAL_CONTENT,
                 Some("bytes 100-199/*"),
                 Some(u64::MAX),
                 100,
                 false,
-            )
-            .unwrap(),
-            ResponseAction::AppendFromOffset {
-                total_expected_size: u64::MAX,
-            }
-        );
-
-        assert_eq!(
-            classify_download_response(
+                ResponseAction::AppendFromOffset {
+                    total_expected_size: u64::MAX,
+                },
+            ),
+            (
                 StatusCode::PARTIAL_CONTENT,
                 Some("bytes 50-199/500"),
                 Some(150),
                 100,
                 true,
-            )
-            .unwrap(),
-            ResponseAction::DiscardAndRefetchUnranged
-        );
-
-        assert_eq!(
-            classify_download_response(StatusCode::PARTIAL_CONTENT, None, Some(100), 100, true)
-                .unwrap(),
-            ResponseAction::DiscardAndRefetchUnranged
-        );
-
-        assert_eq!(
-            classify_download_response(
+                ResponseAction::DiscardAndRefetchUnranged,
+            ),
+            (
+                StatusCode::PARTIAL_CONTENT,
+                None,
+                Some(100),
+                100,
+                true,
+                ResponseAction::DiscardAndRefetchUnranged,
+            ),
+            (
                 StatusCode::PARTIAL_CONTENT,
                 Some("bytes */100"),
                 Some(0),
                 100,
                 true,
-            )
-            .unwrap(),
-            ResponseAction::DiscardAndRefetchUnranged
-        );
-
-        assert_eq!(
-            classify_download_response(
+                ResponseAction::DiscardAndRefetchUnranged,
+            ),
+            (
                 StatusCode::PARTIAL_CONTENT,
                 Some("bytes 150-199/500"),
                 Some(50),
                 100,
                 true,
-            )
-            .unwrap(),
-            ResponseAction::DiscardAndRefetchUnranged
-        );
-
-        assert_eq!(
-            classify_download_response(
+                ResponseAction::DiscardAndRefetchUnranged,
+            ),
+            (
                 StatusCode::PARTIAL_CONTENT,
                 Some("not-a-valid-range"),
                 Some(100),
                 100,
                 true,
-            )
-            .unwrap(),
-            ResponseAction::DiscardAndRefetchUnranged
-        );
-    }
-
-    #[test]
-    fn test_classify_download_response_range_not_satisfiable() {
-        let err = classify_download_response(
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            Some("bytes */0"),
-            Some(0),
-            0,
-            true,
-        )
-        .unwrap_err();
-        assert!(matches!(err, IaGetError::Network(_)));
-
-        assert_eq!(
-            classify_download_response(
+                ResponseAction::DiscardAndRefetchUnranged,
+            ),
+            // 416 Range Not Satisfiable
+            (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 Some("bytes */500"),
                 None,
                 500,
                 false,
-            )
-            .unwrap(),
-            ResponseAction::VerifyCompletePart
-        );
-
-        assert_eq!(
-            classify_download_response(
+                ResponseAction::VerifyCompletePart,
+            ),
+            (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 Some("bytes */400"),
                 None,
                 500,
                 true,
-            )
-            .unwrap(),
-            ResponseAction::DiscardAndRefetchUnranged
-        );
-
-        assert_eq!(
-            classify_download_response(
+                ResponseAction::DiscardAndRefetchUnranged,
+            ),
+            (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 Some("bytes */600"),
                 None,
                 500,
                 true,
-            )
-            .unwrap(),
-            ResponseAction::DiscardAndRefetchUnranged
-        );
-
-        assert_eq!(
-            classify_download_response(
+                ResponseAction::DiscardAndRefetchUnranged,
+            ),
+            (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 Some("bytes 0-99/500"),
                 None,
                 500,
                 true,
-            )
-            .unwrap(),
-            ResponseAction::DiscardAndRefetchUnranged
-        );
-
-        assert_eq!(
-            classify_download_response(StatusCode::RANGE_NOT_SATISFIABLE, None, None, 500, true)
-                .unwrap(),
-            ResponseAction::VerifyCompletePart
-        );
-
-        assert_eq!(
-            classify_download_response(StatusCode::RANGE_NOT_SATISFIABLE, None, None, 500, false)
-                .unwrap(),
-            ResponseAction::DiscardAndRefetchUnranged
-        );
-
-        assert_eq!(
-            classify_download_response(
+                ResponseAction::DiscardAndRefetchUnranged,
+            ),
+            (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                None,
+                None,
+                500,
+                true,
+                ResponseAction::VerifyCompletePart,
+            ),
+            (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                None,
+                None,
+                500,
+                false,
+                ResponseAction::DiscardAndRefetchUnranged,
+            ),
+            (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 Some("invalid"),
                 None,
                 500,
                 true,
-            )
-            .unwrap(),
-            ResponseAction::VerifyCompletePart
-        );
-
-        assert_eq!(
-            classify_download_response(
+                ResponseAction::VerifyCompletePart,
+            ),
+            (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 Some("invalid"),
                 None,
                 500,
                 false,
-            )
-            .unwrap(),
-            ResponseAction::DiscardAndRefetchUnranged
-        );
-    }
+                ResponseAction::DiscardAndRefetchUnranged,
+            ),
+        ];
 
-    #[test]
-    fn test_classify_download_response_other_statuses() {
+        for (status, content_range, content_length, offset, has_md5, expected) in ok_cases {
+            assert_eq!(
+                classify_download_response(status, content_range, content_length, offset, has_md5)
+                    .unwrap(),
+                expected,
+                "{status} range={content_range:?} offset={offset} md5={has_md5}"
+            );
+        }
+
+        // Unsolicited 206 / 416 when offset == 0 must error
+        for (status, range, cl) in [
+            (
+                StatusCode::PARTIAL_CONTENT,
+                Some("bytes 0-99/200"),
+                Some(100),
+            ),
+            (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                Some("bytes */0"),
+                Some(0),
+            ),
+        ] {
+            let err = classify_download_response(status, range, cl, 0, true).unwrap_err();
+            assert!(matches!(err, IaGetError::Network(_)));
+        }
+
+        // Other statuses always return Network("HTTP error <status>")
         for status in [
             StatusCode::NOT_FOUND,
             StatusCode::FORBIDDEN,
@@ -4909,306 +5121,18 @@ mod tests {
 
     #[test]
     fn test_part_file_path() {
-        assert_eq!(part_file_path("file.zip"), PathBuf::from("file.zip.part"));
-        assert_eq!(
-            part_file_path("archive.tar.gz"),
-            PathBuf::from("archive.tar.gz.part")
-        );
-        assert_eq!(part_file_path("README"), PathBuf::from("README.part"));
-        assert_eq!(
-            part_file_path("dir.v1/sub.dir/data.2026.tar.xz"),
-            PathBuf::from("dir.v1/sub.dir/data.2026.tar.xz.part")
-        );
-        assert_eq!(part_file_path(".hidden"), PathBuf::from(".hidden.part"));
-        assert_eq!(
-            part_file_path("file name (1).bin"),
-            PathBuf::from("file name (1).bin.part")
-        );
-    }
-
-    use std::sync::atomic::AtomicU64;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::Mutex;
-
-    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempTestDir {
-        path: PathBuf,
-    }
-
-    impl TempTestDir {
-        fn new(prefix: &str) -> Self {
-            let id = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "ia-get-test-{}-{}-{}",
-                prefix,
-                std::process::id(),
-                id
-            ));
-            fs::create_dir_all(&path).expect("create temp test dir");
-            Self { path }
-        }
-
-        fn join(&self, name: &str) -> PathBuf {
-            self.path.join(name)
-        }
-
-        fn part_path(&self, name: &str) -> PathBuf {
-            self.path.join(part_file_path(name))
-        }
-    }
-
-    impl Drop for TempTestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
-
-    fn md5_hex(data: &[u8]) -> String {
-        format!("{:x}", md5::compute(data))
-    }
-
-    #[derive(Debug, Clone)]
-    struct CapturedRequest {
-        request_line: String,
-        headers: Vec<(String, String)>,
-    }
-
-    impl CapturedRequest {
-        fn header(&self, name: &str) -> Option<&str> {
-            self.headers
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                .map(|(_, v)| v.as_str())
-        }
-    }
-
-    enum MockResponse {
-        Static {
-            status_line: &'static str,
-            headers: Vec<(String, String)>,
-            body: Vec<u8>,
-        },
-        MidStreamInterrupt {
-            status_line: &'static str,
-            headers: Vec<(String, String)>,
-            first_chunk: Vec<u8>,
-            second_chunk: Option<Vec<u8>>,
-            watch_path: PathBuf,
-            expected_part_len: u64,
-            signal: ShutdownSignal,
-        },
-    }
-
-    impl MockResponse {
-        fn ok(body: &[u8]) -> Self {
-            Self::Static {
-                status_line: "200 OK",
-                headers: vec![("Content-Length".to_string(), body.len().to_string())],
-                body: body.to_vec(),
-            }
-        }
-
-        fn with_headers(
-            status_line: &'static str,
-            headers: Vec<(&str, String)>,
-            body: &[u8],
-        ) -> Self {
-            Self::Static {
-                status_line,
-                headers: headers
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v))
-                    .collect(),
-                body: body.to_vec(),
-            }
-        }
-    }
-
-    struct MockServer {
-        host: &'static str,
-        addr: std::net::SocketAddr,
-        requests: Arc<Mutex<Vec<CapturedRequest>>>,
-        handle: Option<tokio::task::JoinHandle<()>>,
-    }
-
-    impl MockServer {
-        async fn start(responses: Vec<MockResponse>) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("bind mock server");
-            Self::start_with_listener(listener, "127.0.0.1", responses)
-        }
-
-        async fn start_on_localhost(responses: Vec<MockResponse>) -> Self {
-            let listener = TcpListener::bind(("localhost", 0))
-                .await
-                .expect("bind localhost mock server");
-            Self::start_with_listener(listener, "localhost", responses)
-        }
-
-        fn start_with_listener(
-            listener: TcpListener,
-            host: &'static str,
-            responses: Vec<MockResponse>,
-        ) -> Self {
-            let addr = listener.local_addr().expect("mock server local_addr");
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let requests_clone = Arc::clone(&requests);
-
-            let handle = tokio::spawn(async move {
-                for response in responses {
-                    let Ok((mut socket, _)) = listener.accept().await else {
-                        break;
-                    };
-                    let _ = socket.set_nodelay(true);
-                    if let Some(req) = read_http_request(&mut socket).await {
-                        requests_clone.lock().await.push(req);
-                    }
-                    write_mock_response(&mut socket, response).await;
-                }
-            });
-
-            Self {
-                host,
-                addr,
-                requests,
-                handle: Some(handle),
-            }
-        }
-
-        fn url(&self, path: &str) -> String {
-            format!("http://{}:{}{}", self.host, self.addr.port(), path)
-        }
-
-        fn requests_handle(&self) -> Arc<Mutex<Vec<CapturedRequest>>> {
-            Arc::clone(&self.requests)
-        }
-
-        async fn finish(mut self) -> Vec<CapturedRequest> {
-            if let Some(handle) = self.handle.take() {
-                let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-            }
-            self.requests.lock().await.clone()
-        }
-
-        async fn abort_and_collect(mut self) -> Vec<CapturedRequest> {
-            if let Some(handle) = self.handle.take() {
-                handle.abort();
-                let _ = handle.await;
-            }
-            self.requests.lock().await.clone()
-        }
-    }
-
-    impl Drop for MockServer {
-        fn drop(&mut self) {
-            if let Some(handle) = self.handle.take() {
-                handle.abort();
-            }
-        }
-    }
-
-    async fn read_http_request(socket: &mut TcpStream) -> Option<CapturedRequest> {
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 1024];
-        loop {
-            let n = socket.read(&mut chunk).await.ok()?;
-            if n == 0 {
-                break;
-            }
-            buf.extend_from_slice(&chunk[..n]);
-            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
-        }
-
-        let header_end = buf
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .unwrap_or(buf.len());
-        let header_text = String::from_utf8_lossy(&buf[..header_end]);
-        let mut lines = header_text.split("\r\n");
-        let request_line = lines.next()?.to_string();
-        let mut headers = Vec::new();
-        for line in lines {
-            if let Some((name, value)) = line.split_once(':') {
-                headers.push((name.trim().to_string(), value.trim().to_string()));
-            }
-        }
-
-        Some(CapturedRequest {
-            request_line,
-            headers,
-        })
-    }
-
-    fn format_response_head(status_line: &str, headers: &[(String, String)]) -> Vec<u8> {
-        let mut head = format!("HTTP/1.1 {}\r\n", status_line);
-        let mut has_connection = false;
-        for (name, value) in headers {
-            if name.eq_ignore_ascii_case("connection") {
-                has_connection = true;
-            }
-            head.push_str(name);
-            head.push_str(": ");
-            head.push_str(value);
-            head.push_str("\r\n");
-        }
-        if !has_connection {
-            head.push_str("Connection: close\r\n");
-        }
-        head.push_str("\r\n");
-        head.into_bytes()
-    }
-
-    async fn write_mock_response(socket: &mut TcpStream, response: MockResponse) {
-        match response {
-            MockResponse::Static {
-                status_line,
-                headers,
-                body,
-            } => {
-                let mut wire = format_response_head(status_line, &headers);
-                wire.extend_from_slice(&body);
-                let _ = socket.write_all(&wire).await;
-                let _ = socket.flush().await;
-                let _ = socket.shutdown().await;
-            }
-            MockResponse::MidStreamInterrupt {
-                status_line,
-                headers,
-                first_chunk,
-                second_chunk,
-                watch_path,
-                expected_part_len,
-                signal,
-            } => {
-                let mut wire = format_response_head(status_line, &headers);
-                wire.extend_from_slice(&first_chunk);
-                let _ = socket.write_all(&wire).await;
-                let _ = socket.flush().await;
-
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-                while tokio::time::Instant::now() < deadline {
-                    if fs::metadata(&watch_path)
-                        .map(|m| m.len() >= expected_part_len)
-                        .unwrap_or(false)
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-
-                signal.trigger();
-
-                if let Some(chunk) = second_chunk {
-                    let _ = socket.write_all(&chunk).await;
-                    let _ = socket.flush().await;
-                }
-                let _ = socket.shutdown().await;
-            }
+        for (input, expected) in [
+            ("file.zip", "file.zip.part"),
+            ("archive.tar.gz", "archive.tar.gz.part"),
+            ("README", "README.part"),
+            (
+                "dir.v1/sub.dir/data.2026.tar.xz",
+                "dir.v1/sub.dir/data.2026.tar.xz.part",
+            ),
+            (".hidden", ".hidden.part"),
+            ("file name (1).bin", "file name (1).bin.part"),
+        ] {
+            assert_eq!(part_file_path(input), PathBuf::from(expected));
         }
     }
 
@@ -5217,20 +5141,12 @@ mod tests {
         let payload = b"fresh archive download payload 1234567890";
         let expected_md5 = md5_hex(payload);
         let server = MockServer::start(vec![MockResponse::ok(payload)]).await;
-        let dir = TempTestDir::new("fresh-200");
-        let rel_path = "nested/item.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
+        let fx = DownloadFixture::new("fresh-200");
 
-        download_single_file(
-            &client,
-            &dir.path,
+        fx.download(
             &server.url("/item.bin"),
-            rel_path,
+            "nested/item.bin",
             Some(&expected_md5),
-            &signal,
             None,
         )
         .await
@@ -5240,8 +5156,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert!(requests[0].request_line.starts_with("GET /item.bin "));
         assert_eq!(requests[0].header("range"), None);
-        assert_eq!(fs::read(&final_path).unwrap(), payload);
-        assert!(!part_path.exists(), ".part file should be promoted away");
+        fx.assert_downloaded("nested/item.bin", payload);
     }
 
     #[tokio::test]
@@ -5249,11 +5164,9 @@ mod tests {
         let first_chunk = b"0123456789";
         let second_chunk = b"abcdefghij";
         let total_len = first_chunk.len() + second_chunk.len();
-        let dir = TempTestDir::new("interrupt");
+        let fx = DownloadFixture::new("interrupt");
         let rel_path = "interrupted.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let signal = ShutdownSignal::new();
+        let part_path = fx.part_path(rel_path);
 
         let server = MockServer::start(vec![MockResponse::MidStreamInterrupt {
             status_line: "200 OK",
@@ -5262,28 +5175,20 @@ mod tests {
             second_chunk: Some(second_chunk.to_vec()),
             watch_path: part_path.clone(),
             expected_part_len: first_chunk.len() as u64,
-            signal: signal.clone(),
+            signal: fx.signal.clone(),
         }])
         .await;
 
-        let client = http_client_builder().build().unwrap();
-        let err = download_single_file(
-            &client,
-            &dir.path,
-            &server.url("/interrupted.bin"),
-            rel_path,
-            None,
-            &signal,
-            None,
-        )
-        .await
-        .unwrap_err();
+        let err = fx
+            .download(&server.url("/interrupted.bin"), rel_path, None, None)
+            .await
+            .unwrap_err();
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 1);
         assert!(matches!(err, IaGetError::FileSystem(_)));
         assert!(
-            !final_path.exists(),
+            !fx.join(rel_path).exists(),
             "interrupted download must not create final file"
         );
         assert_eq!(
@@ -5297,37 +5202,23 @@ mod tests {
     async fn test_download_resume_http_206_appends_and_promotes() {
         let prefix = b"hello ";
         let suffix = b"resumed archive world!";
-        let mut full = Vec::new();
-        full.extend_from_slice(prefix);
-        full.extend_from_slice(suffix);
+        let full: Vec<u8> = [prefix.as_slice(), suffix.as_slice()].concat();
         let expected_md5 = md5_hex(&full);
 
-        let dir = TempTestDir::new("resume-206");
-        let rel_path = "resumed.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        fs::write(&part_path, prefix).unwrap();
+        let fx = DownloadFixture::new("resume-206");
+        fx.write_part("resumed.bin", prefix);
 
-        let content_range = format!("bytes {}-{}/{}", prefix.len(), full.len() - 1, full.len());
-        let server = MockServer::start(vec![MockResponse::with_headers(
-            "206 Partial Content",
-            vec![
-                ("Content-Range", content_range),
-                ("Content-Length", suffix.len().to_string()),
-            ],
+        let server = MockServer::start(vec![MockResponse::partial_content(
+            prefix.len() as u64,
+            full.len() as u64,
             suffix,
         )])
         .await;
 
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        download_single_file(
-            &client,
-            &dir.path,
+        fx.download(
             &server.url("/resumed.bin"),
-            rel_path,
+            "resumed.bin",
             Some(&expected_md5),
-            &signal,
             None,
         )
         .await
@@ -5339,8 +5230,7 @@ mod tests {
             requests[0].header("range"),
             Some(format!("bytes={}-", prefix.len()).as_str())
         );
-        assert_eq!(fs::read(&final_path).unwrap(), full);
-        assert!(!part_path.exists());
+        fx.assert_downloaded("resumed.bin", &full);
     }
 
     #[tokio::test]
@@ -5349,23 +5239,14 @@ mod tests {
         let full_payload = b"complete fresh payload from byte zero";
         let expected_md5 = md5_hex(full_payload);
 
-        let dir = TempTestDir::new("ranged-200");
-        let rel_path = "restarted.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        fs::write(&part_path, stale_prefix).unwrap();
+        let fx = DownloadFixture::new("ranged-200");
+        fx.write_part("restarted.bin", stale_prefix);
 
         let server = MockServer::start(vec![MockResponse::ok(full_payload)]).await;
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        download_single_file(
-            &client,
-            &dir.path,
+        fx.download(
             &server.url("/restarted.bin"),
-            rel_path,
+            "restarted.bin",
             Some(&expected_md5),
-            &signal,
             None,
         )
         .await
@@ -5377,130 +5258,92 @@ mod tests {
             requests[0].header("range"),
             Some(format!("bytes={}-", stale_prefix.len()).as_str())
         );
-        assert_eq!(fs::read(&final_path).unwrap(), full_payload);
-        assert!(!part_path.exists());
+        fx.assert_downloaded("restarted.bin", full_payload);
     }
 
     #[tokio::test]
-    async fn test_download_http_206_mismatched_content_range_discards_and_refetches_unranged() {
-        let stale_prefix = b"stale-01";
-        let full_payload = b"0123456789abcdefghij";
+    async fn test_download_bad_206_and_416_discard_and_refetch_unranged() {
+        let full_payload = b"valid complete archive payload!!";
         let expected_md5 = md5_hex(full_payload);
+        let corrupt_equal = b"corrupt equal length part data!!";
+        assert_eq!(corrupt_equal.len(), full_payload.len());
+        assert_ne!(corrupt_equal, full_payload);
 
-        let dir = TempTestDir::new("mismatched-206");
-        let rel_path = "mismatched.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        fs::write(&part_path, stale_prefix).unwrap();
-
-        let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "206 Partial Content",
-                vec![
-                    (
-                        "Content-Range",
-                        format!("bytes 0-{}/{}", full_payload.len() - 1, full_payload.len()),
-                    ),
-                    ("Content-Length", full_payload.len().to_string()),
-                ],
-                full_payload,
-            ),
-            MockResponse::ok(full_payload),
-        ])
-        .await;
-
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        download_single_file(
-            &client,
-            &dir.path,
-            &server.url("/mismatched.bin"),
-            rel_path,
-            Some(&expected_md5),
-            &signal,
-            None,
-        )
-        .await
-        .expect("mismatched Content-Range 206 should discard and refetch cleanly");
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 2);
-        assert_eq!(
-            requests[0].header("range"),
-            Some(format!("bytes={}-", stale_prefix.len()).as_str())
-        );
-        assert_eq!(
-            requests[1].header("range"),
-            None,
-            "refetch after mismatched 206 must be unranged"
-        );
-        assert_eq!(fs::read(&final_path).unwrap(), full_payload);
-        assert!(!part_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_download_http_206_missing_and_malformed_content_range_refetches_unranged() {
-        let full_payload = b"clean recovery payload after bad 206";
-        let expected_md5 = md5_hex(full_payload);
-        let stale_prefix = b"partial";
-
-        for (label, bad_headers) in [
-            ("missing", vec![("Content-Length", "4".to_string())]),
+        let cases: Vec<(&str, &[u8], MockResponse)> = vec![
             (
-                "malformed",
-                vec![
-                    ("Content-Range", "bytes not-valid".to_string()),
-                    ("Content-Length", "4".to_string()),
-                ],
+                "mismatched-206",
+                b"stale-01",
+                MockResponse::partial_content(0, full_payload.len() as u64, full_payload),
             ),
-        ] {
-            let dir = TempTestDir::new(label);
-            let rel_path = "bad206.bin";
-            let final_path = dir.join(rel_path);
-            let part_path = dir.part_path(rel_path);
-            fs::write(&part_path, stale_prefix).unwrap();
+            (
+                "missing-cr-206",
+                b"partial",
+                MockResponse::with_headers(
+                    "206 Partial Content",
+                    vec![("Content-Length", "4".to_string())],
+                    b"junk",
+                ),
+            ),
+            (
+                "malformed-cr-206",
+                b"partial",
+                MockResponse::with_headers(
+                    "206 Partial Content",
+                    vec![
+                        ("Content-Range", "bytes not-valid".to_string()),
+                        ("Content-Length", "4".to_string()),
+                    ],
+                    b"junk",
+                ),
+            ),
+            (
+                "oversized-416",
+                b"valid complete archive payload!! PLUS extra stale trailing data",
+                MockResponse::range_416(full_payload.len() as u64),
+            ),
+            (
+                "corrupt-equal-len-416",
+                corrupt_equal,
+                MockResponse::range_416(full_payload.len() as u64),
+            ),
+        ];
 
-            let server = MockServer::start(vec![
-                MockResponse::with_headers("206 Partial Content", bad_headers, b"junk"),
-                MockResponse::ok(full_payload),
-            ])
-            .await;
+        for (label, stale_part, first_response) in cases {
+            let fx = DownloadFixture::new(label);
+            fx.write_part("item.bin", stale_part);
 
-            let client = http_client_builder().build().unwrap();
-            let signal = ShutdownSignal::new();
-            download_single_file(
-                &client,
-                &dir.path,
-                &server.url("/bad206.bin"),
-                rel_path,
+            let server =
+                MockServer::start(vec![first_response, MockResponse::ok(full_payload)]).await;
+            fx.download(
+                &server.url("/item.bin"),
+                "item.bin",
                 Some(&expected_md5),
-                &signal,
                 None,
             )
             .await
-            .expect("missing or malformed Content-Range 206 should recover via unranged 200");
+            .unwrap_or_else(|err| panic!("case {label}: expected clean refetch, got {err}"));
 
             let requests = server.finish().await;
             assert_eq!(requests.len(), 2, "case {label}");
             assert_eq!(
                 requests[0].header("range"),
-                Some(format!("bytes={}-", stale_prefix.len()).as_str()),
+                Some(format!("bytes={}-", stale_part.len()).as_str()),
                 "case {label}"
             );
-            assert_eq!(requests[1].header("range"), None, "case {label}");
-            assert_eq!(fs::read(&final_path).unwrap(), full_payload, "case {label}");
-            assert!(!part_path.exists(), "case {label}");
+            assert_eq!(
+                requests[1].header("range"),
+                None,
+                "case {label}: refetch must be unranged"
+            );
+            fx.assert_downloaded("item.bin", full_payload);
         }
     }
 
     #[tokio::test]
     async fn test_download_http_206_repeated_on_unranged_retry_fails_with_network_error() {
         let stale_prefix = b"partial";
-        let dir = TempTestDir::new("repeated-206");
-        let rel_path = "repeated206.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        fs::write(&part_path, stale_prefix).unwrap();
+        let fx = DownloadFixture::new("repeated-206");
+        fx.write_part("repeated206.bin", stale_prefix);
 
         let server = MockServer::start(vec![
             MockResponse::with_headers(
@@ -5508,30 +5351,19 @@ mod tests {
                 vec![("Content-Length", "4".to_string())],
                 b"junk",
             ),
-            MockResponse::with_headers(
-                "206 Partial Content",
-                vec![
-                    ("Content-Range", "bytes 0-3/10".to_string()),
-                    ("Content-Length", "4".to_string()),
-                ],
-                b"junk",
-            ),
+            MockResponse::partial_content(0, 10, b"junk"),
         ])
         .await;
 
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let err = download_single_file(
-            &client,
-            &dir.path,
-            &server.url("/repeated206.bin"),
-            rel_path,
-            None,
-            &signal,
-            None,
-        )
-        .await
-        .unwrap_err();
+        let err = fx
+            .download(
+                &server.url("/repeated206.bin"),
+                "repeated206.bin",
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 2);
@@ -5541,8 +5373,8 @@ mod tests {
         );
         assert_eq!(requests[1].header("range"), None);
         assert!(matches!(err, IaGetError::Network(_)));
-        assert!(!final_path.exists());
-        assert!(!part_path.exists());
+        assert!(!fx.join("repeated206.bin").exists());
+        assert!(!fx.part_path("repeated206.bin").exists());
     }
 
     #[tokio::test]
@@ -5550,31 +5382,16 @@ mod tests {
         let full_payload = b"already complete part payload";
         let expected_md5 = md5_hex(full_payload);
 
-        let dir = TempTestDir::new("416-complete");
-        let rel_path = "complete.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        fs::write(&part_path, full_payload).unwrap();
+        let fx = DownloadFixture::new("416-complete");
+        fx.write_part("complete.bin", full_payload);
 
-        let server = MockServer::start(vec![MockResponse::with_headers(
-            "416 Range Not Satisfiable",
-            vec![
-                ("Content-Range", format!("bytes */{}", full_payload.len())),
-                ("Content-Length", "0".to_string()),
-            ],
-            b"",
-        )])
-        .await;
+        let server =
+            MockServer::start(vec![MockResponse::range_416(full_payload.len() as u64)]).await;
 
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        download_single_file(
-            &client,
-            &dir.path,
+        fx.download(
             &server.url("/complete.bin"),
-            rel_path,
+            "complete.bin",
             Some(&expected_md5),
-            &signal,
             None,
         )
         .await
@@ -5586,114 +5403,7 @@ mod tests {
             requests[0].header("range"),
             Some(format!("bytes={}-", full_payload.len()).as_str())
         );
-        assert_eq!(fs::read(&final_path).unwrap(), full_payload);
-        assert!(!part_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_download_http_416_oversized_part_discards_and_refetches_unranged() {
-        let full_payload = b"exact server bytes";
-        let expected_md5 = md5_hex(full_payload);
-        let oversized_part = b"exact server bytes PLUS extra stale trailing data";
-
-        let dir = TempTestDir::new("416-oversized");
-        let rel_path = "oversized.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        fs::write(&part_path, oversized_part).unwrap();
-
-        let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "416 Range Not Satisfiable",
-                vec![
-                    ("Content-Range", format!("bytes */{}", full_payload.len())),
-                    ("Content-Length", "0".to_string()),
-                ],
-                b"",
-            ),
-            MockResponse::ok(full_payload),
-        ])
-        .await;
-
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        download_single_file(
-            &client,
-            &dir.path,
-            &server.url("/oversized.bin"),
-            rel_path,
-            Some(&expected_md5),
-            &signal,
-            None,
-        )
-        .await
-        .expect("416 with smaller complete length should discard oversized .part and refetch");
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 2);
-        assert_eq!(
-            requests[0].header("range"),
-            Some(format!("bytes={}-", oversized_part.len()).as_str())
-        );
-        assert_eq!(requests[1].header("range"), None);
-        assert_eq!(fs::read(&final_path).unwrap(), full_payload);
-        assert!(!part_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_download_http_416_corrupt_equal_length_part_discards_and_refetches_unranged() {
-        let full_payload = b"valid complete archive payload!!";
-        let corrupt_part = b"corrupt equal length part data!!";
-        assert_eq!(corrupt_part.len(), full_payload.len());
-        assert_ne!(corrupt_part, full_payload);
-        let expected_md5 = md5_hex(full_payload);
-
-        let dir = TempTestDir::new("416-corrupt-equal-len");
-        let rel_path = "corrupt-complete.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        fs::write(&part_path, corrupt_part).unwrap();
-
-        let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "416 Range Not Satisfiable",
-                vec![
-                    ("Content-Range", format!("bytes */{}", full_payload.len())),
-                    ("Content-Length", "0".to_string()),
-                ],
-                b"",
-            ),
-            MockResponse::ok(full_payload),
-        ])
-        .await;
-
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        download_single_file(
-            &client,
-            &dir.path,
-            &server.url("/corrupt-complete.bin"),
-            rel_path,
-            Some(&expected_md5),
-            &signal,
-            None,
-        )
-        .await
-        .expect("416 on corrupt equal-length .part should discard and refetch unranged");
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 2);
-        assert_eq!(
-            requests[0].header("range"),
-            Some(format!("bytes={}-", corrupt_part.len()).as_str())
-        );
-        assert_eq!(
-            requests[1].header("range"),
-            None,
-            "retry after corrupt equal-length 416 must be unranged"
-        );
-        assert_eq!(fs::read(&final_path).unwrap(), full_payload);
-        assert!(!part_path.exists());
+        fx.assert_downloaded("complete.bin", full_payload);
     }
 
     #[tokio::test]
@@ -5714,114 +5424,68 @@ mod tests {
             ("403", "403 Forbidden", b"Access Denied", 1),
         ];
 
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let fast_policy = RetryPolicy {
-            max_retries: 2,
-            initial_delay: Duration::from_millis(1),
-            max_delay: Duration::from_millis(1),
-            max_retry_after: Duration::from_millis(1),
-        };
+        let policy = fast_retry_policy(2);
 
         for (label, status_line, body, expected_requests) in error_cases {
-            // Case 1: no prior .part file
-            let dir_fresh = TempTestDir::new(&format!("err-fresh-{label}"));
-            let rel_path = "target.bin";
-            let final_path_fresh = dir_fresh.join(rel_path);
-            let part_path_fresh = dir_fresh.part_path(rel_path);
+            for existing_prefix in [None, Some(b"preserved-partial-prefix".as_slice())] {
+                let mode = if existing_prefix.is_some() {
+                    "resume"
+                } else {
+                    "fresh"
+                };
+                let fx = DownloadFixture::new(&format!("err-{mode}-{label}"));
+                let rel_path = "target.bin";
+                if let Some(prefix) = existing_prefix {
+                    fx.write_part(rel_path, prefix);
+                }
 
-            let fresh_responses = (0..expected_requests)
-                .map(|_| {
-                    MockResponse::with_headers(
-                        status_line,
-                        vec![
-                            ("Content-Type", "text/html".to_string()),
-                            ("Content-Length", body.len().to_string()),
-                        ],
-                        body,
-                    )
-                })
-                .collect();
-            let server_fresh = MockServer::start(fresh_responses).await;
+                let responses = (0..expected_requests)
+                    .map(|_| {
+                        MockResponse::with_headers(
+                            status_line,
+                            vec![
+                                ("Content-Type", "text/html".to_string()),
+                                ("Content-Length", body.len().to_string()),
+                            ],
+                            body,
+                        )
+                    })
+                    .collect();
+                let server = MockServer::start(responses).await;
 
-            let err = download_single_file_with_policy(
-                &client,
-                &dir_fresh.path,
-                &server_fresh.url("/target.bin"),
-                rel_path,
-                None,
-                &signal,
-                None,
-                &fast_policy,
-            )
-            .await
-            .unwrap_err();
+                let err = fx
+                    .download_with_policy(&server.url("/target.bin"), rel_path, None, None, &policy)
+                    .await
+                    .unwrap_err();
 
-            let requests = server_fresh.finish().await;
-            assert_eq!(requests.len(), expected_requests, "fresh {label}");
-            assert!(matches!(err, IaGetError::Network(_)), "fresh {label}");
-            assert!(
-                !part_path_fresh.exists(),
-                "fresh {label} must not create .part"
-            );
-            assert!(
-                !final_path_fresh.exists(),
-                "fresh {label} must not create final file"
-            );
-
-            // Case 2: pre-existing .part prefix must stay untouched
-            let existing_prefix = b"preserved-partial-prefix";
-            let dir_resume = TempTestDir::new(&format!("err-resume-{label}"));
-            let final_path_resume = dir_resume.join(rel_path);
-            let part_path_resume = dir_resume.part_path(rel_path);
-            fs::write(&part_path_resume, existing_prefix).unwrap();
-
-            let resume_responses = (0..expected_requests)
-                .map(|_| {
-                    MockResponse::with_headers(
-                        status_line,
-                        vec![
-                            ("Content-Type", "text/html".to_string()),
-                            ("Content-Length", body.len().to_string()),
-                        ],
-                        body,
-                    )
-                })
-                .collect();
-            let server_resume = MockServer::start(resume_responses).await;
-
-            let err = download_single_file_with_policy(
-                &client,
-                &dir_resume.path,
-                &server_resume.url("/target.bin"),
-                rel_path,
-                None,
-                &signal,
-                None,
-                &fast_policy,
-            )
-            .await
-            .unwrap_err();
-
-            let requests = server_resume.finish().await;
-            assert_eq!(requests.len(), expected_requests, "resume {label}");
-            for request in &requests {
-                assert_eq!(
-                    request.header("range"),
-                    Some(format!("bytes={}-", existing_prefix.len()).as_str()),
-                    "resume {label}"
+                let requests = server.finish().await;
+                assert_eq!(requests.len(), expected_requests, "{mode} {label}");
+                assert!(matches!(err, IaGetError::Network(_)), "{mode} {label}");
+                assert!(
+                    !fx.join(rel_path).exists(),
+                    "{mode} {label} must not create final file"
                 );
+                match existing_prefix {
+                    None => assert!(
+                        !fx.part_path(rel_path).exists(),
+                        "fresh {label} must not create .part"
+                    ),
+                    Some(prefix) => {
+                        for request in &requests {
+                            assert_eq!(
+                                request.header("range"),
+                                Some(format!("bytes={}-", prefix.len()).as_str()),
+                                "resume {label}"
+                            );
+                        }
+                        assert_eq!(
+                            fs::read(fx.part_path(rel_path)).unwrap(),
+                            prefix,
+                            "resume {label} must not modify .part with error body"
+                        );
+                    }
+                }
             }
-            assert!(matches!(err, IaGetError::Network(_)), "resume {label}");
-            assert_eq!(
-                fs::read(&part_path_resume).unwrap(),
-                existing_prefix,
-                "resume {label} must not append or overwrite .part with error body"
-            );
-            assert!(
-                !final_path_resume.exists(),
-                "resume {label} must not create final file"
-            );
         }
     }
 
@@ -5830,45 +5494,35 @@ mod tests {
         let payload = b"corrupted payload bytes";
         let wrong_md5 = "00000000000000000000000000000000";
         let server = MockServer::start(vec![MockResponse::ok(payload)]).await;
+        let fx = DownloadFixture::new("md5-mismatch");
 
-        let dir = TempTestDir::new("md5-mismatch");
-        let rel_path = "corrupt.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        let err = download_single_file(
-            &client,
-            &dir.path,
-            &server.url("/corrupt.bin"),
-            rel_path,
-            Some(wrong_md5),
-            &signal,
-            None,
-        )
-        .await
-        .unwrap_err();
+        let err = fx
+            .download(
+                &server.url("/corrupt.bin"),
+                "corrupt.bin",
+                Some(wrong_md5),
+                None,
+            )
+            .await
+            .unwrap_err();
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 1);
         assert!(matches!(err, IaGetError::Integrity(_)));
         assert!(
-            !final_path.exists(),
+            !fx.join("corrupt.bin").exists(),
             "MD5 mismatch must never promote .part to final path"
         );
-        assert_eq!(fs::read(&part_path).unwrap(), payload);
+        assert_eq!(fs::read(fx.part_path("corrupt.bin")).unwrap(), payload);
     }
 
     #[tokio::test]
     async fn test_download_http_206_huge_content_length_does_not_overflow_or_panic() {
         let prefix = b"hello";
         let chunk = b"world";
-        let dir = TempTestDir::new("u64-max-cl");
+        let fx = DownloadFixture::new("u64-max-cl");
         let rel_path = "huge-cl.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        fs::write(&part_path, prefix).unwrap();
+        let part_path = fx.write_part(rel_path, prefix);
 
         // hyper reserves u64::MAX and u64::MAX - 1 as DecodedLength sentinels, so
         // u64::MAX - 2 is the largest Content-Length it passes to reqwest; with a
@@ -5877,7 +5531,6 @@ mod tests {
         let huge_content_length = u64::MAX - 2;
         assert!(prefix.len() as u64 > u64::MAX - huge_content_length);
 
-        let signal = ShutdownSignal::new();
         let server = MockServer::start(vec![MockResponse::MidStreamInterrupt {
             status_line: "206 Partial Content",
             headers: vec![
@@ -5891,21 +5544,13 @@ mod tests {
             second_chunk: None,
             watch_path: part_path.clone(),
             expected_part_len: (prefix.len() + chunk.len()) as u64,
-            signal: signal.clone(),
+            signal: fx.signal.clone(),
         }])
         .await;
 
-        let client = http_client_builder().build().unwrap();
-        let result = download_single_file(
-            &client,
-            &dir.path,
-            &server.url("/huge-cl.bin"),
-            rel_path,
-            None,
-            &signal,
-            None,
-        )
-        .await;
+        let result = fx
+            .download(&server.url("/huge-cl.bin"), rel_path, None, None)
+            .await;
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 1);
@@ -5917,7 +5562,7 @@ mod tests {
             result.is_err(),
             "truncated stream with u64::MAX Content-Length should return an error without panicking"
         );
-        assert!(!final_path.exists());
+        assert!(!fx.join(rel_path).exists());
         assert_eq!(fs::read(&part_path).unwrap(), b"helloworld");
     }
 
@@ -5934,30 +5579,102 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_retry_after_delta_seconds() {
+    fn test_parse_retry_after_valid_deltas_and_http_dates() {
         let now = utc_time(2026, 5, 1, 12, 0, 0);
         let cap = Duration::from_secs(60);
+        let base_1994 = utc_time(1994, 11, 6, 8, 49, 0);
 
-        assert_eq!(parse_retry_after("0", now, cap), Some(Duration::ZERO));
-        assert_eq!(parse_retry_after("00", now, cap), Some(Duration::ZERO));
-        assert_eq!(
-            parse_retry_after("5", now, cap),
-            Some(Duration::from_secs(5))
-        );
-        assert_eq!(
-            parse_retry_after("  42  ", now, cap),
-            Some(Duration::from_secs(42))
-        );
-        assert_eq!(parse_retry_after("60", now, cap), Some(cap));
-        assert_eq!(parse_retry_after("120", now, cap), Some(cap));
-        assert_eq!(
-            parse_retry_after("999999999999999999999999999999999999", now, cap),
-            Some(cap)
-        );
-        assert_eq!(
-            parse_retry_after("10", now, Duration::ZERO),
-            Some(Duration::ZERO)
-        );
+        let cases = [
+            // Delta-seconds
+            ("0", now, cap, Duration::ZERO),
+            ("00", now, cap, Duration::ZERO),
+            ("5", now, cap, Duration::from_secs(5)),
+            ("  42  ", now, cap, Duration::from_secs(42)),
+            ("60", now, cap, cap),
+            ("120", now, cap, cap),
+            ("999999999999999999999999999999999999", now, cap, cap),
+            ("10", now, Duration::ZERO, Duration::ZERO),
+            // IMF-fixdate: future, equal, past, far-future clamp, subsecond `now`
+            (
+                "Sun, 06 Nov 1994 08:49:37 GMT",
+                base_1994,
+                cap,
+                Duration::from_secs(37),
+            ),
+            (
+                "Sun, 06 Nov 1994 08:49:37 GMT",
+                utc_time(1994, 11, 6, 8, 49, 37),
+                cap,
+                Duration::ZERO,
+            ),
+            (
+                "Sun, 06 Nov 1994 08:49:37 GMT",
+                utc_time(1994, 11, 6, 9, 0, 0),
+                cap,
+                Duration::ZERO,
+            ),
+            ("Sun, 06 Nov 1994 09:49:37 GMT", base_1994, cap, cap),
+            (
+                "Sun, 06 Nov 1994 08:49:05 GMT",
+                base_1994 + Duration::from_millis(250),
+                cap,
+                Duration::from_millis(4_750),
+            ),
+            // Valid leap years (divisible by 400 and divisible by 4 not 100)
+            (
+                "Tue, 29 Feb 2000 00:00:30 GMT",
+                utc_time(2000, 2, 29, 0, 0, 0),
+                cap,
+                Duration::from_secs(30),
+            ),
+            (
+                "Thu, 29 Feb 2024 00:00:15 GMT",
+                utc_time(2024, 2, 29, 0, 0, 0),
+                cap,
+                Duration::from_secs(15),
+            ),
+            // RFC 850: current century, past century pivot, and century wrap
+            (
+                "Sunday, 06-Nov-94 08:49:37 GMT",
+                base_1994,
+                cap,
+                Duration::from_secs(37),
+            ),
+            (
+                "Sunday, 06-Nov-94 08:49:37 GMT",
+                utc_time(2026, 1, 1, 0, 0, 0),
+                cap,
+                Duration::ZERO,
+            ),
+            (
+                "Saturday, 01-Jan-00 00:00:30 GMT",
+                utc_time(1999, 12, 31, 23, 59, 50),
+                cap,
+                Duration::from_secs(40),
+            ),
+            // asctime(): single-digit padded day and two-digit day
+            (
+                "Sun Nov  6 08:49:37 1994",
+                base_1994,
+                cap,
+                Duration::from_secs(37),
+            ),
+            (
+                "Wed Nov 16 08:49:37 1994",
+                utc_time(1994, 11, 16, 8, 49, 17),
+                cap,
+                Duration::from_secs(20),
+            ),
+            ("Wed Nov 16 08:49:37 1994", base_1994, cap, cap),
+        ];
+
+        for (header, base, max_cap, expected) in cases {
+            assert_eq!(
+                parse_retry_after(header, base, max_cap),
+                Some(expected),
+                "header={header:?}"
+            );
+        }
     }
 
     #[test]
@@ -6011,104 +5728,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_retry_after_http_dates_and_leap_years() {
-        let cap = Duration::from_secs(60);
-
-        // IMF-fixdate: future, equal, past, far-future clamp
-        let base_1994 = utc_time(1994, 11, 6, 8, 49, 0);
-        assert_eq!(
-            parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", base_1994, cap),
-            Some(Duration::from_secs(37))
-        );
-        assert_eq!(
-            parse_retry_after(
-                "Sun, 06 Nov 1994 08:49:37 GMT",
-                utc_time(1994, 11, 6, 8, 49, 37),
-                cap,
-            ),
-            Some(Duration::ZERO)
-        );
-        assert_eq!(
-            parse_retry_after(
-                "Sun, 06 Nov 1994 08:49:37 GMT",
-                utc_time(1994, 11, 6, 9, 0, 0),
-                cap,
-            ),
-            Some(Duration::ZERO)
-        );
-        assert_eq!(
-            parse_retry_after("Sun, 06 Nov 1994 09:49:37 GMT", base_1994, cap),
-            Some(cap)
-        );
-
-        // Subsecond precision on `now`
-        let base_subsec = base_1994 + Duration::from_millis(250);
-        assert_eq!(
-            parse_retry_after("Sun, 06 Nov 1994 08:49:05 GMT", base_subsec, cap),
-            Some(Duration::from_millis(4_750))
-        );
-
-        // Valid leap years (divisible by 400 and divisible by 4 not 100)
-        assert_eq!(
-            parse_retry_after(
-                "Tue, 29 Feb 2000 00:00:30 GMT",
-                utc_time(2000, 2, 29, 0, 0, 0),
-                cap,
-            ),
-            Some(Duration::from_secs(30))
-        );
-        assert_eq!(
-            parse_retry_after(
-                "Thu, 29 Feb 2024 00:00:15 GMT",
-                utc_time(2024, 2, 29, 0, 0, 0),
-                cap,
-            ),
-            Some(Duration::from_secs(15))
-        );
-
-        // RFC 850: current century, past century pivot, and century wrap
-        assert_eq!(
-            parse_retry_after("Sunday, 06-Nov-94 08:49:37 GMT", base_1994, cap),
-            Some(Duration::from_secs(37))
-        );
-        assert_eq!(
-            parse_retry_after(
-                "Sunday, 06-Nov-94 08:49:37 GMT",
-                utc_time(2026, 1, 1, 0, 0, 0),
-                cap,
-            ),
-            Some(Duration::ZERO)
-        );
-        assert_eq!(
-            parse_retry_after(
-                "Saturday, 01-Jan-00 00:00:30 GMT",
-                utc_time(1999, 12, 31, 23, 59, 50),
-                cap,
-            ),
-            Some(Duration::from_secs(40))
-        );
-
-        // asctime(): single-digit padded day and two-digit day
-        assert_eq!(
-            parse_retry_after("Sun Nov  6 08:49:37 1994", base_1994, cap),
-            Some(Duration::from_secs(37))
-        );
-        assert_eq!(
-            parse_retry_after(
-                "Wed Nov 16 08:49:37 1994",
-                utc_time(1994, 11, 16, 8, 49, 17),
-                cap,
-            ),
-            Some(Duration::from_secs(20))
-        );
-        assert_eq!(
-            parse_retry_after("Wed Nov 16 08:49:37 1994", base_1994, cap),
-            Some(cap)
-        );
-    }
-
-    #[test]
-    fn test_compute_backoff_delay_with_sample_bounds_and_saturation() {
+    fn test_compute_backoff_and_retry_delay() {
         let policy = RetryPolicy {
             max_retries: 5,
             initial_delay: Duration::from_secs(1),
@@ -6116,75 +5736,41 @@ mod tests {
             max_retry_after: Duration::from_secs(60),
         };
 
-        // Attempt 1: base = 1s -> [500ms, 1000ms]
-        assert_eq!(
-            compute_backoff_delay_with_sample(1, &policy, 0),
-            Duration::from_millis(500)
-        );
-        let mid = compute_backoff_delay_with_sample(1, &policy, u64::MAX / 2);
-        assert!(
-            mid >= Duration::from_millis(749) && mid <= Duration::from_millis(751),
-            "expected ~750ms midpoint, got {:?}",
-            mid
-        );
-        assert_eq!(
-            compute_backoff_delay_with_sample(1, &policy, u64::MAX),
-            Duration::from_secs(1)
-        );
-
-        // Doubling across attempts 2, 3, 4 (bases 2s, 4s, 8s) and cap at 10s on attempt 5
-        assert_eq!(
-            compute_backoff_delay_with_sample(2, &policy, 0),
-            Duration::from_secs(1)
-        );
-        assert_eq!(
-            compute_backoff_delay_with_sample(2, &policy, u64::MAX),
-            Duration::from_secs(2)
-        );
-        assert_eq!(
-            compute_backoff_delay_with_sample(3, &policy, 0),
-            Duration::from_secs(2)
-        );
-        assert_eq!(
-            compute_backoff_delay_with_sample(3, &policy, u64::MAX),
-            Duration::from_secs(4)
-        );
-        assert_eq!(
-            compute_backoff_delay_with_sample(4, &policy, 0),
-            Duration::from_secs(4)
-        );
-        assert_eq!(
-            compute_backoff_delay_with_sample(4, &policy, u64::MAX),
-            Duration::from_secs(8)
-        );
-        assert_eq!(
-            compute_backoff_delay_with_sample(5, &policy, 0),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            compute_backoff_delay_with_sample(5, &policy, u64::MAX),
-            Duration::from_secs(10)
-        );
-
-        // Large attempts must saturate cleanly without overflow
-        for attempt in [64, 128, 1000, u32::MAX] {
+        // Attempt 0 saturates exponent to 0; attempts 1..=5 double and cap at 10s; large attempts saturate cleanly.
+        for (attempt, sample, expected) in [
+            (0, 0, Duration::from_millis(500)),
+            (1, 0, Duration::from_millis(500)),
+            (1, u64::MAX, Duration::from_secs(1)),
+            (2, 0, Duration::from_secs(1)),
+            (2, u64::MAX, Duration::from_secs(2)),
+            (3, 0, Duration::from_secs(2)),
+            (3, u64::MAX, Duration::from_secs(4)),
+            (4, 0, Duration::from_secs(4)),
+            (4, u64::MAX, Duration::from_secs(8)),
+            (5, 0, Duration::from_secs(5)),
+            (5, u64::MAX, Duration::from_secs(10)),
+            (64, 0, Duration::from_secs(5)),
+            (64, u64::MAX, Duration::from_secs(10)),
+            (128, 0, Duration::from_secs(5)),
+            (128, u64::MAX, Duration::from_secs(10)),
+            (1000, 0, Duration::from_secs(5)),
+            (1000, u64::MAX, Duration::from_secs(10)),
+            (u32::MAX, 0, Duration::from_secs(5)),
+            (u32::MAX, u64::MAX, Duration::from_secs(10)),
+        ] {
             assert_eq!(
-                compute_backoff_delay_with_sample(attempt, &policy, 0),
-                Duration::from_secs(5)
-            );
-            assert_eq!(
-                compute_backoff_delay_with_sample(attempt, &policy, u64::MAX),
-                Duration::from_secs(10)
+                compute_backoff_delay_with_sample(attempt, &policy, sample),
+                expected,
+                "attempt={attempt} sample={sample}"
             );
         }
 
-        // Attempt 0 saturates exponent to 0
-        assert_eq!(
-            compute_backoff_delay_with_sample(0, &policy, 0),
-            Duration::from_millis(500)
+        let mid = compute_backoff_delay_with_sample(1, &policy, u64::MAX / 2);
+        assert!(
+            mid >= Duration::from_millis(749) && mid <= Duration::from_millis(751),
+            "expected ~750ms midpoint, got {mid:?}"
         );
 
-        // Zero delays
         let zero_policy = RetryPolicy {
             initial_delay: Duration::ZERO,
             ..policy
@@ -6193,40 +5779,33 @@ mod tests {
             compute_backoff_delay_with_sample(1, &zero_policy, u64::MAX),
             Duration::ZERO
         );
-    }
 
-    #[test]
-    fn test_compute_retry_delay_prefers_valid_retry_after_and_falls_back() {
+        // compute_retry_delay prefers valid Retry-After (clamped) and falls back to jittered backoff
         let now = utc_time(2026, 5, 1, 12, 0, 0);
-        let policy = RetryPolicy {
+        let retry_policy = RetryPolicy {
             max_retries: 3,
             initial_delay: Duration::from_secs(2),
             max_delay: Duration::from_secs(16),
             max_retry_after: Duration::from_secs(30),
         };
-
         assert_eq!(
-            compute_retry_delay(1, Some("12"), now, &policy),
+            compute_retry_delay(1, Some("12"), now, &retry_policy),
             Duration::from_secs(12)
         );
         assert_eq!(
-            compute_retry_delay(1, Some("120"), now, &policy),
+            compute_retry_delay(1, Some("120"), now, &retry_policy),
             Duration::from_secs(30)
         );
-
-        let fallback_none = compute_retry_delay(1, None, now, &policy);
+        let fallback_none = compute_retry_delay(1, None, now, &retry_policy);
         assert!(
             fallback_none >= Duration::from_secs(1) && fallback_none <= Duration::from_secs(2),
-            "expected fallback in [1s, 2s], got {:?}",
-            fallback_none
+            "expected fallback in [1s, 2s], got {fallback_none:?}"
         );
-
-        let fallback_invalid = compute_retry_delay(2, Some("not-a-date"), now, &policy);
+        let fallback_invalid = compute_retry_delay(2, Some("not-a-date"), now, &retry_policy);
         assert!(
             fallback_invalid >= Duration::from_secs(2)
                 && fallback_invalid <= Duration::from_secs(4),
-            "expected fallback in [2s, 4s], got {:?}",
-            fallback_invalid
+            "expected fallback in [2s, 4s], got {fallback_invalid:?}"
         );
     }
 
@@ -6278,7 +5857,7 @@ mod tests {
         let closed_addr = listener.local_addr().unwrap();
         drop(listener);
         let connect_err = client
-            .get(format!("http://{}/", closed_addr))
+            .get(format!("http://{closed_addr}/"))
             .send()
             .await
             .unwrap_err();
@@ -6286,84 +5865,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sleep_interruptible_already_triggered_returns_immediately() {
-        let signal = ShutdownSignal::new();
-        signal.trigger();
-        assert!(!signal.is_running());
+    async fn test_sleep_interruptible() {
+        // Completes when running
+        let running = ShutdownSignal::new();
+        assert!(running.is_running());
+        assert!(running.running_flag().load(Ordering::SeqCst));
+        sleep_interruptible(Duration::ZERO, &running).await.unwrap();
+        sleep_interruptible(Duration::from_millis(10), &running)
+            .await
+            .unwrap();
 
+        // Already triggered returns immediately
+        let triggered = ShutdownSignal::new();
+        triggered.trigger();
+        assert!(!triggered.is_running());
         let start = std::time::Instant::now();
-        let err = sleep_interruptible(Duration::from_secs(60), &signal)
+        let err = sleep_interruptible(Duration::from_secs(60), &triggered)
             .await
             .unwrap_err();
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "already-triggered signal should return immediately"
-        );
+        assert!(start.elapsed() < Duration::from_secs(1));
         assert!(matches!(err, IaGetError::FileSystem(_)));
         assert!(err.to_string().contains("Download interrupted by user"));
-    }
 
-    #[tokio::test]
-    async fn test_sleep_interruptible_cancels_long_wait_immediately() {
-        let signal = ShutdownSignal::new();
-        let trigger_signal = signal.clone();
-
+        // Triggered mid-wait wakes promptly
+        let mid_wait = ShutdownSignal::new();
+        let trigger_signal = mid_wait.clone();
         let trigger_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             trigger_signal.trigger();
         });
-
         let start = std::time::Instant::now();
-        let err = sleep_interruptible(Duration::from_secs(60), &signal)
+        let err = sleep_interruptible(Duration::from_secs(60), &mid_wait)
             .await
             .unwrap_err();
         trigger_task.await.unwrap();
-
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "sleep_interruptible should wake promptly on trigger, took {:?}",
-            start.elapsed()
-        );
+        assert!(start.elapsed() < Duration::from_secs(2));
         assert!(err.to_string().contains("Download interrupted by user"));
-    }
-
-    #[tokio::test]
-    async fn test_sleep_interruptible_completes_when_running() {
-        let signal = ShutdownSignal::new();
-        assert!(signal.is_running());
-        assert!(signal.running_flag().load(Ordering::SeqCst));
-
-        sleep_interruptible(Duration::ZERO, &signal).await.unwrap();
-        sleep_interruptible(Duration::from_millis(10), &signal)
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
     async fn test_send_and_fetch_text_with_retry_behavior() {
         let client = http_client_builder().build().unwrap();
-        let policy = RetryPolicy {
-            max_retries: 3,
-            initial_delay: Duration::from_millis(5),
-            max_delay: Duration::from_millis(20),
-            max_retry_after: Duration::from_secs(5),
-        };
+        let policy = fast_retry_policy(3);
+        let signal = ShutdownSignal::new();
 
         // Transient 503 + 429 (with Retry-After: 0) then 200 succeeds
         let server = MockServer::start(vec![
-            MockResponse::with_headers("503 Service Unavailable", vec![], b"busy"),
-            MockResponse::with_headers(
-                "429 Too Many Requests",
-                vec![("Retry-After", "0".to_string())],
-                b"slow down",
-            ),
+            MockResponse::status("503 Service Unavailable", b"busy"),
+            MockResponse::retry_after("429 Too Many Requests", "0", b"slow down"),
             MockResponse::ok(b"<files/>"),
         ])
         .await;
-
-        let signal = ShutdownSignal::new();
         let mut events = Vec::new();
-        let meta_url = Url::parse(&server.url("/meta.xml")).unwrap();
+        let meta_url = server.parsed_url("/meta.xml");
         let body = fetch_text_with_retry(
             &meta_url,
             &policy,
@@ -6385,22 +5939,16 @@ mod tests {
         assert_eq!(body, "<files/>");
         assert_eq!(requests.len(), 3);
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].0, 1);
-        assert_eq!(events[0].1, 3);
+        assert_eq!((events[0].0, events[0].1), (1, 3));
         assert!(events[0].3.contains("503"));
-        assert_eq!(events[1].0, 2);
-        assert_eq!(events[1].2, Duration::ZERO);
+        assert_eq!((events[1].0, events[1].2), (2, Duration::ZERO));
         assert!(events[1].3.contains("429"));
 
         // Permanent 404 fails immediately without retrying
-        let server_404 = MockServer::start(vec![MockResponse::with_headers(
-            "404 Not Found",
-            vec![],
-            b"missing",
-        )])
-        .await;
+        let server_404 =
+            MockServer::start(vec![MockResponse::status("404 Not Found", b"missing")]).await;
         let mut retry_calls = 0;
-        let missing_url = Url::parse(&server_404.url("/missing")).unwrap();
+        let missing_url = server_404.parsed_url("/missing");
         let err = send_with_retry(
             &missing_url,
             &policy,
@@ -6410,24 +5958,20 @@ mod tests {
         )
         .await
         .unwrap_err();
-        let requests_404 = server_404.finish().await;
-        assert_eq!(requests_404.len(), 1);
+        assert_eq!(server_404.finish().await.len(), 1);
         assert_eq!(retry_calls, 0);
         assert!(matches!(err, IaGetError::Network(_)));
 
         // Exhausting max_retries on persistent 503 returns error
-        let small_policy = RetryPolicy {
-            max_retries: 2,
-            ..policy
-        };
+        let small_policy = fast_retry_policy(2);
         let server_503 = MockServer::start(vec![
-            MockResponse::with_headers("503 Service Unavailable", vec![], b"1"),
-            MockResponse::with_headers("503 Service Unavailable", vec![], b"2"),
-            MockResponse::with_headers("503 Service Unavailable", vec![], b"3"),
+            MockResponse::status("503 Service Unavailable", b"1"),
+            MockResponse::status("503 Service Unavailable", b"2"),
+            MockResponse::status("503 Service Unavailable", b"3"),
         ])
         .await;
         let mut attempts = Vec::new();
-        let down_url = Url::parse(&server_503.url("/down")).unwrap();
+        let down_url = server_503.parsed_url("/down");
         let err = send_with_retry(
             &down_url,
             &small_policy,
@@ -6437,495 +5981,131 @@ mod tests {
         )
         .await
         .unwrap_err();
-        let requests_503 = server_503.finish().await;
-        assert_eq!(requests_503.len(), 3);
+        assert_eq!(server_503.finish().await.len(), 3);
         assert_eq!(attempts, vec![1, 2]);
         assert!(matches!(err, IaGetError::Network(_)));
 
         // Triggering ShutdownSignal during retry sleep aborts immediately
-        let server_cancel = MockServer::start(vec![MockResponse::with_headers(
+        let server_cancel = MockServer::start(vec![MockResponse::retry_after(
             "429 Too Many Requests",
-            vec![("Retry-After", "60".to_string())],
+            "60",
             b"rate limited",
         )])
         .await;
         let cancel_signal = ShutdownSignal::new();
         let trigger_signal = cancel_signal.clone();
         let start = std::time::Instant::now();
-        let rate_limited_url = Url::parse(&server_cancel.url("/rate-limited")).unwrap();
+        let rate_limited_url = server_cancel.parsed_url("/rate-limited");
         let err = send_with_retry(
             &rate_limited_url,
-            &RetryPolicy {
-                max_retries: 2,
-                max_retry_after: Duration::from_secs(60),
-                ..policy
-            },
+            &slow_retry_policy(2),
             &cancel_signal,
             |target_url| Ok(client.get(target_url.clone())),
             |_| trigger_signal.trigger(),
         )
         .await
         .unwrap_err();
-        let requests_cancel = server_cancel.finish().await;
-        assert_eq!(requests_cancel.len(), 1);
+        assert_eq!(server_cancel.finish().await.len(), 1);
         assert!(start.elapsed() < Duration::from_secs(2));
         assert!(err.to_string().contains("Download interrupted by user"));
     }
 
-    fn format_imf_fixdate(unix_secs: i64) -> String {
-        const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        const MONTHS: [&str; 12] = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-
-        let days = unix_secs.div_euclid(86_400);
-        let sec_of_day = unix_secs.rem_euclid(86_400);
-        let z = days + 719_468;
-        let era = z.div_euclid(146_097);
-        let doe = z.rem_euclid(146_097);
-        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-        let y = yoe + era * 400;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let day = doy - (153 * mp + 2) / 5 + 1;
-        let month = mp + if mp < 10 { 3 } else { -9 };
-        let year = y + i64::from(month <= 2);
-
-        let weekday = WEEKDAYS[(days + 4).rem_euclid(7) as usize];
-        let month_name = MONTHS[(month - 1) as usize];
-        let hour = sec_of_day / 3600;
-        let minute = (sec_of_day % 3600) / 60;
-        let second = sec_of_day % 60;
-
-        format!("{weekday}, {day:02} {month_name} {year:04} {hour:02}:{minute:02}:{second:02} GMT")
-    }
-
-    fn future_imf_fixdate_header() -> String {
-        let since_epoch = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after UNIX_EPOCH");
-        let offset_secs = if since_epoch.subsec_millis() >= 800 {
-            2
-        } else {
-            1
-        };
-        format_imf_fixdate(since_epoch.as_secs() as i64 + offset_secs)
-    }
-
     #[tokio::test]
-    async fn test_download_429_retry_after_zero_retries_immediately_and_promotes() {
-        let payload = b"retry-after zero payload bytes";
-        let expected_md5 = md5_hex(payload);
-        let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "429 Too Many Requests",
-                vec![
-                    ("Retry-After", "0".to_string()),
-                    ("Content-Length", "9".to_string()),
-                ],
-                b"slow down",
-            ),
-            MockResponse::ok(payload),
-        ])
-        .await;
-
-        let dir = TempTestDir::new("429-retry-after-0");
-        let rel_path = "item.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let policy = RetryPolicy {
-            max_retries: 2,
-            initial_delay: Duration::from_secs(10),
-            max_delay: Duration::from_secs(10),
-            max_retry_after: Duration::from_secs(5),
-        };
-
-        let start = std::time::Instant::now();
-        download_single_file_with_policy(
-            &client,
-            &dir.path,
-            &server.url("/item.bin"),
-            rel_path,
-            Some(&expected_md5),
-            &signal,
-            None,
-            &policy,
-        )
-        .await
-        .expect("429 with Retry-After: 0 should retry and promote");
-        let elapsed = start.elapsed();
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 2);
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "Retry-After: 0 should retry promptly instead of falling back to 10s backoff, took {:?}",
-            elapsed
-        );
-        assert_eq!(fs::read(&final_path).unwrap(), payload);
-        assert!(!part_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_download_429_retry_after_delta_seconds_honours_delay_and_promotes() {
-        let payload = b"retry-after delta-seconds payload";
-        let expected_md5 = md5_hex(payload);
-        let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "429 Too Many Requests",
-                vec![
-                    ("Retry-After", "1".to_string()),
-                    ("Content-Length", "9".to_string()),
-                ],
-                b"slow down",
-            ),
-            MockResponse::ok(payload),
-        ])
-        .await;
-
-        let dir = TempTestDir::new("429-retry-after-1");
-        let rel_path = "item.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let policy = RetryPolicy {
-            max_retries: 2,
-            initial_delay: Duration::from_millis(5),
-            max_delay: Duration::from_millis(5),
-            max_retry_after: Duration::from_secs(5),
-        };
-
-        let start = std::time::Instant::now();
-        download_single_file_with_policy(
-            &client,
-            &dir.path,
-            &server.url("/item.bin"),
-            rel_path,
-            Some(&expected_md5),
-            &signal,
-            None,
-            &policy,
-        )
-        .await
-        .expect("429 with Retry-After: 1 should wait, retry, and promote");
-        let elapsed = start.elapsed();
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 2);
-        assert!(
-            elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(4),
-            "Retry-After: 1 should wait roughly 1s rather than 5ms backoff, took {:?}",
-            elapsed
-        );
-        assert_eq!(fs::read(&final_path).unwrap(), payload);
-        assert!(!part_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_download_503_retry_after_imf_fixdate_retries_and_promotes() {
-        let payload = b"retry-after imf-fixdate payload";
-        let expected_md5 = md5_hex(payload);
-        let retry_after_date = future_imf_fixdate_header();
-        let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "503 Service Unavailable",
-                vec![
-                    ("Retry-After", retry_after_date),
-                    ("Content-Length", "4".to_string()),
-                ],
-                b"busy",
-            ),
-            MockResponse::ok(payload),
-        ])
-        .await;
-
-        let dir = TempTestDir::new("503-retry-after-date");
-        let rel_path = "item.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let policy = RetryPolicy {
-            max_retries: 2,
-            initial_delay: Duration::from_secs(10),
-            max_delay: Duration::from_secs(10),
-            max_retry_after: Duration::from_secs(5),
-        };
-
-        let start = std::time::Instant::now();
-        download_single_file_with_policy(
-            &client,
-            &dir.path,
-            &server.url("/item.bin"),
-            rel_path,
-            Some(&expected_md5),
-            &signal,
-            None,
-            &policy,
-        )
-        .await
-        .expect("503 with future IMF-fixdate Retry-After should retry and promote");
-        let elapsed = start.elapsed();
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 2);
-        assert!(
-            elapsed >= Duration::from_millis(100) && elapsed < Duration::from_secs(3),
-            "IMF-fixdate Retry-After should wait for future timestamp without falling back to 10s backoff, took {:?}",
-            elapsed
-        );
-        assert_eq!(fs::read(&final_path).unwrap(), payload);
-        assert!(!part_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_download_429_excessive_retry_after_clamps_to_max_retry_after() {
-        let payload = b"clamped retry-after payload";
-        let expected_md5 = md5_hex(payload);
-        let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "429 Too Many Requests",
-                vec![
-                    ("Retry-After", "999999".to_string()),
-                    ("Content-Length", "12".to_string()),
-                ],
-                b"rate limited",
-            ),
-            MockResponse::ok(payload),
-        ])
-        .await;
-
-        let dir = TempTestDir::new("429-retry-after-clamp");
-        let rel_path = "item.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let policy = RetryPolicy {
+    async fn test_download_retryable_statuses_and_retry_after_recover_on_200() {
+        // Large backoff (30s) with 50ms Retry-After cap proves Retry-After headers are
+        // parsed and clamped rather than falling back to slow backoff or sleeping seconds.
+        let clamped_retry_after_policy = RetryPolicy {
             max_retries: 2,
             initial_delay: Duration::from_secs(30),
             max_delay: Duration::from_secs(30),
             max_retry_after: Duration::from_millis(50),
         };
+        let backoff_policy = fast_retry_policy(2);
 
-        let start = std::time::Instant::now();
-        download_single_file_with_policy(
-            &client,
-            &dir.path,
-            &server.url("/item.bin"),
-            rel_path,
-            Some(&expected_md5),
-            &signal,
-            None,
-            &policy,
-        )
-        .await
-        .expect("excessive Retry-After should clamp to max_retry_after and succeed");
-        let elapsed = start.elapsed();
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 2);
-        assert!(
-            elapsed >= Duration::from_millis(40) && elapsed < Duration::from_secs(1),
-            "Retry-After: 999999 should clamp to ~50ms max_retry_after, took {:?}",
-            elapsed
-        );
-        assert_eq!(fs::read(&final_path).unwrap(), payload);
-        assert!(!part_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_download_408_and_502_retry_and_recover_on_200() {
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let fast_policy = RetryPolicy {
-            max_retries: 2,
-            initial_delay: Duration::from_millis(5),
-            max_delay: Duration::from_millis(10),
-            max_retry_after: Duration::from_millis(50),
-        };
-
-        for (label, status_line) in [("408", "408 Request Timeout"), ("502", "502 Bad Gateway")] {
-            let payload = format!("recovered payload after {label}");
-            let expected_md5 = md5_hex(payload.as_bytes());
-            let server = MockServer::start(vec![
-                MockResponse::with_headers(
-                    status_line,
-                    vec![("Content-Length", "9".to_string())],
-                    b"transient",
-                ),
-                MockResponse::ok(payload.as_bytes()),
-            ])
-            .await;
-
-            let dir = TempTestDir::new(&format!("recover-{label}"));
-            let rel_path = "item.bin";
-            let final_path = dir.join(rel_path);
-            let part_path = dir.part_path(rel_path);
-
-            download_single_file_with_policy(
-                &client,
-                &dir.path,
-                &server.url("/item.bin"),
-                rel_path,
-                Some(&expected_md5),
-                &signal,
+        let cases: [(&str, &str, Option<&str>, &RetryPolicy, Duration); 5] = [
+            (
+                "429-retry-after-0",
+                "429 Too Many Requests",
+                Some("0"),
+                &clamped_retry_after_policy,
+                Duration::ZERO,
+            ),
+            (
+                "429-retry-after-delta-clamped",
+                "429 Too Many Requests",
+                Some("999999"),
+                &clamped_retry_after_policy,
+                Duration::from_millis(40),
+            ),
+            (
+                "503-retry-after-imf-fixdate",
+                "503 Service Unavailable",
+                Some("Thu, 01 Jan 2099 00:00:00 GMT"),
+                &clamped_retry_after_policy,
+                Duration::from_millis(40),
+            ),
+            (
+                "408-backoff",
+                "408 Request Timeout",
                 None,
-                &fast_policy,
+                &backoff_policy,
+                Duration::ZERO,
+            ),
+            (
+                "502-backoff",
+                "502 Bad Gateway",
+                None,
+                &backoff_policy,
+                Duration::ZERO,
+            ),
+        ];
+
+        for (label, status_line, retry_after, policy, min_elapsed) in cases {
+            let payload = format!("recovered payload for {label}");
+            let expected_md5 = md5_hex(payload.as_bytes());
+            let first_response = match retry_after {
+                Some(header) => MockResponse::retry_after(status_line, header, b"transient"),
+                None => MockResponse::status(status_line, b"transient"),
+            };
+            let server =
+                MockServer::start(vec![first_response, MockResponse::ok(payload.as_bytes())]).await;
+            let fx = DownloadFixture::new(&format!("retry-{label}"));
+
+            let start = std::time::Instant::now();
+            fx.download_with_policy(
+                &server.url("/item.bin"),
+                "item.bin",
+                Some(&expected_md5),
+                None,
+                policy,
             )
             .await
-            .unwrap_or_else(|err| panic!("expected HTTP {label} to recover on 200, got: {err}"));
+            .unwrap_or_else(|err| panic!("case {label}: expected recovery on 200, got {err}"));
+            let elapsed = start.elapsed();
 
             let requests = server.finish().await;
             assert_eq!(requests.len(), 2, "case {label}");
-            assert_eq!(
-                fs::read(&final_path).unwrap(),
-                payload.as_bytes(),
-                "case {label}"
-            );
-            assert!(!part_path.exists(), "case {label}");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_download_persistent_503_stops_after_one_plus_max_retries() {
-        let fast_policy = RetryPolicy {
-            max_retries: 2,
-            initial_delay: Duration::from_millis(5),
-            max_delay: Duration::from_millis(10),
-            max_retry_after: Duration::from_millis(50),
-        };
-        let expected_requests = 1 + fast_policy.max_retries as usize;
-
-        let mut responses: Vec<MockResponse> = (0..expected_requests)
-            .map(|_| {
-                MockResponse::with_headers(
-                    "503 Service Unavailable",
-                    vec![("Content-Length", "4".to_string())],
-                    b"busy",
-                )
-            })
-            .collect();
-        responses.push(MockResponse::ok(b"should never be reached"));
-
-        let server = MockServer::start(responses).await;
-        let dir = TempTestDir::new("persistent-503");
-        let rel_path = "item.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        let err = download_single_file_with_policy(
-            &client,
-            &dir.path,
-            &server.url("/item.bin"),
-            rel_path,
-            None,
-            &signal,
-            None,
-            &fast_policy,
-        )
-        .await
-        .unwrap_err();
-
-        let requests = server.abort_and_collect().await;
-        assert_eq!(requests.len(), expected_requests);
-        assert!(matches!(err, IaGetError::Network(_)));
-        assert!(err.to_string().contains("503"));
-        assert!(!part_path.exists());
-        assert!(!final_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_download_403_and_404_fail_fast_without_retrying() {
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let slow_policy = RetryPolicy {
-            max_retries: 3,
-            initial_delay: Duration::from_secs(10),
-            max_delay: Duration::from_secs(10),
-            max_retry_after: Duration::from_secs(10),
-        };
-
-        for (code, status_line) in [("403", "403 Forbidden"), ("404", "404 Not Found")] {
-            let server = MockServer::start(vec![
-                MockResponse::with_headers(
-                    status_line,
-                    vec![("Content-Length", "4".to_string())],
-                    b"nope",
-                ),
-                MockResponse::ok(b"should never be fetched on permanent 4xx"),
-            ])
-            .await;
-
-            let dir = TempTestDir::new(&format!("fast-fail-{code}"));
-            let rel_path = "item.bin";
-            let final_path = dir.join(rel_path);
-            let part_path = dir.part_path(rel_path);
-
-            let start = std::time::Instant::now();
-            let err = download_single_file_with_policy(
-                &client,
-                &dir.path,
-                &server.url("/item.bin"),
-                rel_path,
-                None,
-                &signal,
-                None,
-                &slow_policy,
-            )
-            .await
-            .unwrap_err();
-            let elapsed = start.elapsed();
-
-            let requests = server.abort_and_collect().await;
-            assert_eq!(requests.len(), 1, "HTTP {code} must not retry");
             assert!(
-                elapsed < Duration::from_secs(1),
-                "HTTP {code} should fail immediately, took {:?}",
-                elapsed
+                elapsed >= min_elapsed && elapsed < Duration::from_secs(1),
+                "case {label}: unexpected elapsed {elapsed:?} (min {min_elapsed:?})"
             );
-            assert!(matches!(err, IaGetError::Network(_)), "case {code}");
-            assert!(err.to_string().contains(code), "case {code}: {err}");
-            assert!(!part_path.exists(), "case {code}");
-            assert!(!final_path.exists(), "case {code}");
+            fx.assert_downloaded("item.bin", payload.as_bytes());
         }
     }
 
     #[tokio::test]
     async fn test_download_ctrl_c_during_retry_wait_exits_promptly() {
         let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "429 Too Many Requests",
-                vec![
-                    ("Retry-After", "30".to_string()),
-                    ("Content-Length", "12".to_string()),
-                ],
-                b"rate limited",
-            ),
+            MockResponse::retry_after("429 Too Many Requests", "30", b"rate limited"),
             MockResponse::ok(b"should never be downloaded"),
         ])
         .await;
 
-        let dir = TempTestDir::new("ctrl-c-retry-wait");
-        let rel_path = "item.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let policy = RetryPolicy {
-            max_retries: 3,
-            initial_delay: Duration::from_secs(10),
-            max_delay: Duration::from_secs(30),
-            max_retry_after: Duration::from_secs(60),
-        };
+        let fx = DownloadFixture::new("ctrl-c-retry-wait");
+        let policy = slow_retry_policy(3);
 
         let requests_handle = server.requests_handle();
-        let trigger_signal = signal.clone();
+        let trigger_signal = fx.signal.clone();
         let trigger_task = tokio::spawn(async move {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             while tokio::time::Instant::now() < deadline {
@@ -6939,26 +6119,17 @@ mod tests {
         });
 
         let start = std::time::Instant::now();
-        let err = download_single_file_with_policy(
-            &client,
-            &dir.path,
-            &server.url("/item.bin"),
-            rel_path,
-            None,
-            &signal,
-            None,
-            &policy,
-        )
-        .await
-        .unwrap_err();
+        let err = fx
+            .download_with_policy(&server.url("/item.bin"), "item.bin", None, None, &policy)
+            .await
+            .unwrap_err();
         let elapsed = start.elapsed();
         trigger_task.await.unwrap();
 
-        let requests = server.abort_and_collect().await;
+        let requests = server.abort().await;
         assert!(
             elapsed < Duration::from_secs(1),
-            "Ctrl+C during 30s Retry-After wait should exit promptly, took {:?}",
-            elapsed
+            "Ctrl+C during 30s Retry-After wait should exit promptly, took {elapsed:?}"
         );
         assert_eq!(requests.len(), 1);
         assert!(matches!(err, IaGetError::FileSystem(_)));
@@ -6966,8 +6137,8 @@ mod tests {
             err.to_string().contains("Download interrupted by user"),
             "unexpected error: {err}"
         );
-        assert!(!part_path.exists());
-        assert!(!final_path.exists());
+        assert!(!fx.part_path("item.bin").exists());
+        assert!(!fx.join("item.bin").exists());
     }
 
     #[test]
@@ -6985,282 +6156,119 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_batch_continues_after_http_404_and_downloads_remaining_files() {
-        let payload2 = b"second file archive payload";
-        let payload3 = b"third file archive payload!";
-        let md5_2 = md5_hex(payload2);
-        let md5_3 = md5_hex(payload3);
-
-        let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "404 Not Found",
-                vec![("Content-Length", "9".to_string())],
-                b"not found",
-            ),
-            MockResponse::ok(payload2),
-            MockResponse::ok(payload3),
-        ])
-        .await;
-
-        let dir = TempTestDir::new("batch-404-continue");
-        let file1 = "file1.bin".to_string();
-        let file2 = "file2.bin".to_string();
-        let file3 = "nested/file3.bin".to_string();
-
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let policy = RetryPolicy {
-            max_retries: 2,
-            initial_delay: Duration::from_millis(1),
-            max_delay: Duration::from_millis(2),
-            max_retry_after: Duration::from_millis(5),
-        };
-
-        let files = vec![
-            (server.url("/file1.bin"), file1.clone(), None),
-            (server.url("/file2.bin"), file2.clone(), Some(md5_2)),
-            (server.url("/file3.bin"), file3.clone(), Some(md5_3)),
-        ];
-
-        let summary = download_files_in_dir(&client, &dir.path, files, 3, None, &policy, &signal)
-            .await
-            .unwrap();
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 3);
-        assert!(requests[0].request_line.starts_with("GET /file1.bin "));
-        assert!(requests[1].request_line.starts_with("GET /file2.bin "));
-        assert!(requests[2].request_line.starts_with("GET /file3.bin "));
-
-        assert_eq!(summary.ok, 2);
-        assert_eq!(summary.skipped, 0);
-        assert_eq!(summary.failed.len(), 1);
-        assert!(!summary.interrupted);
-        assert_eq!(summary.failed[0].file_path, file1);
-        assert!(
-            summary.failed[0].error.contains("404"),
-            "expected 404 in failure error, got: {}",
-            summary.failed[0].error
-        );
-
-        assert!(!dir.join(&file1).exists());
-        assert!(!dir.part_path(&file1).exists());
-        assert_eq!(fs::read(dir.join(&file2)).unwrap(), payload2);
-        assert!(!dir.part_path(&file2).exists());
-        assert_eq!(fs::read(dir.join(&file3)).unwrap(), payload3);
-        assert!(!dir.part_path(&file3).exists());
-
-        let formatted = format_batch_summary(&summary);
-        assert!(formatted.contains("2 ok"), "summary was: {formatted}");
-        assert!(formatted.contains("1 failed"), "summary was: {formatted}");
-        assert!(formatted.contains(&file1), "summary was: {formatted}");
-    }
-
-    #[tokio::test]
-    async fn test_batch_continues_after_exhausted_retries() {
-        let payload2 = b"file two downloads after file one exhausts retries";
-        let md5_2 = md5_hex(payload2);
-
-        let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "503 Service Unavailable",
-                vec![("Content-Length", "4".to_string())],
-                b"busy",
-            ),
-            MockResponse::with_headers(
-                "503 Service Unavailable",
-                vec![("Content-Length", "4".to_string())],
-                b"busy",
-            ),
-            MockResponse::ok(payload2),
-        ])
-        .await;
-
-        let dir = TempTestDir::new("batch-exhausted-retries");
-        let file1 = "file1.bin".to_string();
-        let file2 = "file2.bin".to_string();
-
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let fast_policy = RetryPolicy {
-            max_retries: 1,
-            initial_delay: Duration::from_millis(1),
-            max_delay: Duration::from_millis(1),
-            max_retry_after: Duration::from_millis(1),
-        };
-
-        let files = vec![
-            (server.url("/file1.bin"), file1.clone(), None),
-            (server.url("/file2.bin"), file2.clone(), Some(md5_2)),
-        ];
-
-        let summary =
-            download_files_in_dir(&client, &dir.path, files, 2, None, &fast_policy, &signal)
-                .await
-                .unwrap();
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 3);
-        assert!(requests[0].request_line.starts_with("GET /file1.bin "));
-        assert!(requests[1].request_line.starts_with("GET /file1.bin "));
-        assert!(requests[2].request_line.starts_with("GET /file2.bin "));
-
-        assert_eq!(summary.ok, 1);
-        assert_eq!(summary.skipped, 0);
-        assert_eq!(summary.failed.len(), 1);
-        assert!(!summary.interrupted);
-        assert_eq!(summary.failed[0].file_path, file1);
-        assert!(
-            summary.failed[0].error.contains("503"),
-            "expected 503 in failure error, got: {}",
-            summary.failed[0].error
-        );
-
-        assert!(!dir.join(&file1).exists());
-        assert!(!dir.part_path(&file1).exists());
-        assert_eq!(fs::read(dir.join(&file2)).unwrap(), payload2);
-        assert!(!dir.part_path(&file2).exists());
-    }
-
-    #[tokio::test]
-    async fn test_batch_md5_mismatch_counts_as_failed_and_continues() {
-        let payload1 = b"corrupted first file payload";
-        let payload2 = b"verified second file payload";
-        let wrong_md5 = "00000000000000000000000000000000".to_string();
-        let md5_2 = md5_hex(payload2);
-
-        let server =
-            MockServer::start(vec![MockResponse::ok(payload1), MockResponse::ok(payload2)]).await;
-
-        let dir = TempTestDir::new("batch-md5-mismatch");
-        let file1 = "corrupt.bin".to_string();
-        let file2 = "good.bin".to_string();
-
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let policy = RetryPolicy {
-            max_retries: 1,
-            initial_delay: Duration::from_millis(1),
-            max_delay: Duration::from_millis(1),
-            max_retry_after: Duration::from_millis(1),
-        };
-
-        let files = vec![
-            (server.url("/corrupt.bin"), file1.clone(), Some(wrong_md5)),
-            (server.url("/good.bin"), file2.clone(), Some(md5_2)),
-        ];
-
-        let summary = download_files_in_dir(&client, &dir.path, files, 2, None, &policy, &signal)
-            .await
-            .unwrap();
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 2);
-
-        assert_eq!(summary.ok, 1);
-        assert_eq!(summary.skipped, 0);
-        assert_eq!(summary.failed.len(), 1);
-        assert!(!summary.interrupted);
-        assert_eq!(summary.failed[0].file_path, file1);
-        assert!(
-            summary.failed[0].error.contains("MD5 mismatch"),
-            "expected MD5 mismatch in failure error, got: {}",
-            summary.failed[0].error
-        );
-
-        assert!(
-            !dir.join(&file1).exists(),
-            "MD5 mismatch must not promote file 1 to final path"
-        );
-        assert_eq!(fs::read(dir.part_path(&file1)).unwrap(), payload1);
-        assert_eq!(fs::read(dir.join(&file2)).unwrap(), payload2);
-        assert!(!dir.part_path(&file2).exists());
-    }
-
-    #[tokio::test]
-    async fn test_batch_counts_skipped_existing_files_alongside_ok_and_failed() {
+    async fn test_batch_mixed_skips_retries_failures_and_continues() {
         let verified_payload = b"already downloaded and verified";
         let verified_md5 = md5_hex(verified_payload);
         let unhashed_payload = b"already present without md5";
-        let fresh_payload = b"freshly downloaded file payload";
+        let corrupt_payload = b"corrupted file payload";
+        let fresh_payload = b"freshly downloaded nested payload";
         let fresh_md5 = md5_hex(fresh_payload);
 
-        let dir = TempTestDir::new("batch-skipped-mixed");
-        let existing_verified = "existing_verified.bin".to_string();
-        let existing_unhashed = "existing_unhashed.bin".to_string();
-        let fresh_ok = "fresh_ok.bin".to_string();
-        let missing_fail = "missing_fail.bin".to_string();
-
-        fs::write(dir.join(&existing_verified), verified_payload).unwrap();
-        fs::write(dir.join(&existing_unhashed), unhashed_payload).unwrap();
+        let fx = DownloadFixture::new("batch-mixed-6");
+        fx.write("existing_verified.bin", verified_payload);
+        fx.write("existing_unhashed.bin", unhashed_payload);
 
         let server = MockServer::start(vec![
+            MockResponse::status("404 Not Found", b"not found"),
+            MockResponse::status("503 Service Unavailable", b"busy"),
+            MockResponse::status("503 Service Unavailable", b"busy"),
+            MockResponse::ok(corrupt_payload),
             MockResponse::ok(fresh_payload),
-            MockResponse::with_headers(
-                "404 Not Found",
-                vec![("Content-Length", "7".to_string())],
-                b"missing",
-            ),
         ])
         .await;
 
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let policy = RetryPolicy {
-            max_retries: 1,
-            initial_delay: Duration::from_millis(1),
-            max_delay: Duration::from_millis(1),
-            max_retry_after: Duration::from_millis(1),
-        };
-
+        let policy = fast_retry_policy(1);
         let files = vec![
             (
                 server.url("/existing_verified.bin"),
-                existing_verified.clone(),
+                "existing_verified.bin".to_string(),
                 Some(verified_md5),
             ),
             (
                 server.url("/existing_unhashed.bin"),
-                existing_unhashed.clone(),
+                "existing_unhashed.bin".to_string(),
                 None,
             ),
+            (server.url("/missing.bin"), "missing.bin".to_string(), None),
+            (server.url("/down.bin"), "down.bin".to_string(), None),
             (
-                server.url("/fresh_ok.bin"),
-                fresh_ok.clone(),
+                server.url("/corrupt.bin"),
+                "corrupt.bin".to_string(),
+                Some("00000000000000000000000000000000".to_string()),
+            ),
+            (
+                server.url("/nested/fresh.bin"),
+                "nested/fresh.bin".to_string(),
                 Some(fresh_md5),
             ),
-            (server.url("/missing_fail.bin"), missing_fail.clone(), None),
         ];
 
-        let summary = download_files_in_dir(&client, &dir.path, files, 4, None, &policy, &signal)
-            .await
-            .unwrap();
+        let summary =
+            download_files_in_dir(&fx.client, fx.path(), files, 6, None, &policy, &fx.signal)
+                .await
+                .unwrap();
 
         let requests = server.finish().await;
-        assert_eq!(requests.len(), 2);
-        assert!(requests[0].request_line.starts_with("GET /fresh_ok.bin "));
-        assert!(requests[1]
-            .request_line
-            .starts_with("GET /missing_fail.bin "));
+        let expected_lines = [
+            "GET /missing.bin ",
+            "GET /down.bin ",
+            "GET /down.bin ",
+            "GET /corrupt.bin ",
+            "GET /nested/fresh.bin ",
+        ];
+        assert_eq!(requests.len(), expected_lines.len());
+        for (req, prefix) in requests.iter().zip(expected_lines) {
+            assert!(
+                req.request_line.starts_with(prefix),
+                "expected '{prefix}', got '{}'",
+                req.request_line
+            );
+        }
 
-        assert_eq!(summary.skipped, 2);
         assert_eq!(summary.ok, 1);
-        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.skipped, 2);
         assert!(!summary.interrupted);
-        assert_eq!(summary.failed[0].file_path, missing_fail);
-        assert!(summary.failed[0].error.contains("404"));
+        assert_eq!(summary.failed.len(), 3);
+        for (idx, (path, needle)) in [
+            ("missing.bin", "404"),
+            ("down.bin", "503"),
+            ("corrupt.bin", "MD5 mismatch"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(summary.failed[idx].file_path, path);
+            assert!(
+                summary.failed[idx].error.contains(needle),
+                "expected '{needle}' in '{}'",
+                summary.failed[idx].error
+            );
+        }
 
-        assert_eq!(
-            fs::read(dir.join(&existing_verified)).unwrap(),
-            verified_payload
+        fx.assert_downloaded("existing_verified.bin", verified_payload);
+        fx.assert_downloaded("existing_unhashed.bin", unhashed_payload);
+        fx.assert_downloaded("nested/fresh.bin", fresh_payload);
+        for absent in ["missing.bin", "down.bin"] {
+            assert!(!fx.join(absent).exists());
+            assert!(!fx.part_path(absent).exists());
+        }
+        assert!(
+            !fx.join("corrupt.bin").exists(),
+            "MD5 mismatch must not promote to final path"
         );
         assert_eq!(
-            fs::read(dir.join(&existing_unhashed)).unwrap(),
-            unhashed_payload
+            fs::read(fx.part_path("corrupt.bin")).unwrap(),
+            corrupt_payload
         );
-        assert_eq!(fs::read(dir.join(&fresh_ok)).unwrap(), fresh_payload);
-        assert!(!dir.part_path(&fresh_ok).exists());
-        assert!(!dir.join(&missing_fail).exists());
+
+        let formatted = format_batch_summary(&summary);
+        assert!(formatted.contains("1 ok"), "summary was: {formatted}");
+        assert!(formatted.contains("2 skipped"), "summary was: {formatted}");
+        assert!(formatted.contains("3 failed"), "summary was: {formatted}");
+        assert!(
+            formatted.contains("missing.bin"),
+            "summary was: {formatted}"
+        );
     }
 
     #[tokio::test]
@@ -7271,13 +6279,9 @@ mod tests {
         let second_chunk = b"-never-completed";
         let total_len = first_chunk.len() + second_chunk.len();
 
-        let dir = TempTestDir::new("batch-ctrl-c-mid");
-        let file1 = "file1.bin".to_string();
-        let file2 = "file2.bin".to_string();
-        let file3 = "file3.bin".to_string();
-        let part2 = dir.part_path(&file2);
+        let fx = DownloadFixture::new("batch-ctrl-c-mid");
+        let part2 = fx.part_path("file2.bin");
 
-        let signal = ShutdownSignal::new();
         let server = MockServer::start(vec![
             MockResponse::ok(payload1),
             MockResponse::MidStreamInterrupt {
@@ -7287,31 +6291,29 @@ mod tests {
                 second_chunk: Some(second_chunk.to_vec()),
                 watch_path: part2.clone(),
                 expected_part_len: first_chunk.len() as u64,
-                signal: signal.clone(),
+                signal: fx.signal.clone(),
             },
             MockResponse::ok(b"file3 must not be requested"),
         ])
         .await;
 
-        let client = http_client_builder().build().unwrap();
-        let policy = RetryPolicy {
-            max_retries: 1,
-            initial_delay: Duration::from_millis(1),
-            max_delay: Duration::from_millis(1),
-            max_retry_after: Duration::from_millis(1),
-        };
-
+        let policy = fast_retry_policy(1);
         let files = vec![
-            (server.url("/file1.bin"), file1.clone(), Some(md5_1)),
-            (server.url("/file2.bin"), file2.clone(), None),
-            (server.url("/file3.bin"), file3.clone(), None),
+            (
+                server.url("/file1.bin"),
+                "file1.bin".to_string(),
+                Some(md5_1),
+            ),
+            (server.url("/file2.bin"), "file2.bin".to_string(), None),
+            (server.url("/file3.bin"), "file3.bin".to_string(), None),
         ];
 
-        let summary = download_files_in_dir(&client, &dir.path, files, 3, None, &policy, &signal)
-            .await
-            .unwrap();
+        let summary =
+            download_files_in_dir(&fx.client, fx.path(), files, 3, None, &policy, &fx.signal)
+                .await
+                .unwrap();
 
-        let requests = server.abort_and_collect().await;
+        let requests = server.abort().await;
         assert_eq!(requests.len(), 2);
         assert!(requests[0].request_line.starts_with("GET /file1.bin "));
         assert!(requests[1].request_line.starts_with("GET /file2.bin "));
@@ -7325,12 +6327,11 @@ mod tests {
         );
         assert!(summary.interrupted);
 
-        assert_eq!(fs::read(dir.join(&file1)).unwrap(), payload1);
-        assert!(!dir.part_path(&file1).exists());
-        assert!(!dir.join(&file2).exists());
+        fx.assert_downloaded("file1.bin", payload1);
+        assert!(!fx.join("file2.bin").exists());
         assert_eq!(fs::read(&part2).unwrap(), first_chunk);
-        assert!(!dir.join(&file3).exists());
-        assert!(!dir.part_path(&file3).exists());
+        assert!(!fx.join("file3.bin").exists());
+        assert!(!fx.part_path("file3.bin").exists());
     }
 
     #[tokio::test]
@@ -7341,45 +6342,30 @@ mod tests {
         ])
         .await;
 
-        let dir = TempTestDir::new("batch-ctrl-c-before-start");
-        let file1 = "file1.bin".to_string();
-        let file2 = "file2.bin".to_string();
+        let fx = DownloadFixture::new("batch-ctrl-c-before-start");
+        fx.signal.trigger();
 
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        signal.trigger();
-
-        let policy = RetryPolicy {
-            max_retries: 1,
-            initial_delay: Duration::from_millis(1),
-            max_delay: Duration::from_millis(1),
-            max_retry_after: Duration::from_millis(1),
-        };
-
+        let policy = fast_retry_policy(1);
         let files = vec![
-            (server.url("/file1.bin"), file1.clone(), None),
-            (server.url("/file2.bin"), file2.clone(), None),
+            (server.url("/file1.bin"), "file1.bin".to_string(), None),
+            (server.url("/file2.bin"), "file2.bin".to_string(), None),
         ];
 
-        let summary = download_files_in_dir(&client, &dir.path, files, 2, None, &policy, &signal)
-            .await
-            .unwrap();
+        let summary =
+            download_files_in_dir(&fx.client, fx.path(), files, 2, None, &policy, &fx.signal)
+                .await
+                .unwrap();
 
-        let requests = server.abort_and_collect().await;
-        assert!(
-            requests.is_empty(),
-            "expected 0 requests, got {:?}",
-            requests
-        );
-
+        let requests = server.abort().await;
+        assert!(requests.is_empty(), "expected 0 requests, got {requests:?}");
         assert_eq!(summary.ok, 0);
         assert_eq!(summary.skipped, 0);
         assert!(summary.failed.is_empty());
         assert!(summary.interrupted);
-        assert!(!dir.join(&file1).exists());
-        assert!(!dir.part_path(&file1).exists());
-        assert!(!dir.join(&file2).exists());
-        assert!(!dir.part_path(&file2).exists());
+        for name in ["file1.bin", "file2.bin"] {
+            assert!(!fx.join(name).exists());
+            assert!(!fx.part_path(name).exists());
+        }
     }
 
     #[test]
@@ -7477,16 +6463,25 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_download_rejects_traversal_and_unsafe_paths_with_zero_requests() {
-        let dir = TempTestDir::new("unsafe-paths");
-        let root = dir.join("root");
-        fs::create_dir_all(&root).unwrap();
+    #[cfg(unix)]
+    fn create_fifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed for {}", path.display());
+    }
 
-        let server = MockServer::start(vec![MockResponse::ok(b"should never be fetched")]).await;
+    #[tokio::test]
+    async fn test_download_refuses_unsafe_paths_and_special_targets_with_zero_requests() {
         let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
+        // 1. Traversal, absolute, empty, and current-dir paths
+        let dir = TempTestDir::new("unsafe-paths");
+        let root = dir.join("root");
+        fs::create_dir_all(&root).unwrap();
+        let server = MockServer::start(vec![MockResponse::ok(b"should never be fetched")]).await;
         for unsafe_path in [
             "../escape.bin",
             "sub/../../escape.bin",
@@ -7510,104 +6505,202 @@ mod tests {
                 "expected FileSystem error for {unsafe_path:?}, got {err:?}"
             );
         }
-
-        let requests = server.abort_and_collect().await;
-        assert!(
-            requests.is_empty(),
-            "expected zero HTTP requests for unsafe paths, got {requests:?}"
-        );
+        assert!(server.abort().await.is_empty());
         assert!(!dir.join("escape.bin").exists());
-    }
 
-    #[tokio::test]
-    async fn test_download_rejects_directory_at_target_or_part_with_zero_requests() {
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        // Directory at target (with and without expected_md5)
-        for expected_md5 in [None, Some("d41d8cd98f00b204e9800998ecf8427e")] {
-            let dir = TempTestDir::new("dir-at-target");
-            fs::create_dir(dir.join("item.bin")).unwrap();
-            let server = MockServer::start(vec![MockResponse::ok(b"payload")]).await;
-
-            let err = download_single_file(
-                &client,
-                &dir.path,
-                &server.url("/item.bin"),
+        // 2. Directory at target (with/without MD5), directory at .part, regular file blocking dir
+        type SetupFn = fn(&Path);
+        let cross_cases: [(&str, &str, Option<&str>, SetupFn); 4] = [
+            ("dir-target-nomd5", "item.bin", None, |r| {
+                fs::create_dir(r.join("item.bin")).unwrap();
+            }),
+            (
+                "dir-target-md5",
                 "item.bin",
-                expected_md5,
-                &signal,
-                None,
-            )
-            .await
-            .unwrap_err();
-
-            let requests = server.abort_and_collect().await;
-            assert!(matches!(err, IaGetError::FileSystem(_)));
-            assert!(requests.is_empty());
-            assert!(dir.join("item.bin").is_dir());
-            assert!(!dir.part_path("item.bin").exists());
+                Some("d41d8cd98f00b204e9800998ecf8427e"),
+                |r| {
+                    fs::create_dir(r.join("item.bin")).unwrap();
+                },
+            ),
+            ("dir-part", "item.bin", None, |r| {
+                fs::create_dir(r.join("item.bin.part")).unwrap();
+            }),
+            ("file-blocks-dir", "blocker/item.bin", None, |r| {
+                fs::write(r.join("blocker"), b"existing regular file").unwrap();
+            }),
+        ];
+        for (label, rel_path, expected_md5, setup) in cross_cases {
+            let fx = DownloadFixture::new(label);
+            setup(fx.path());
+            let server = MockServer::start(vec![MockResponse::ok(b"payload")]).await;
+            let err = fx
+                .download(&server.url("/item.bin"), rel_path, expected_md5, None)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, IaGetError::FileSystem(_)), "case {label}");
+            assert!(server.abort().await.is_empty(), "case {label}");
+            if label == "file-blocks-dir" {
+                assert_eq!(
+                    fs::read(fx.join("blocker")).unwrap(),
+                    b"existing regular file"
+                );
+            } else if label == "dir-part" {
+                assert!(fx.part_path("item.bin").is_dir());
+                assert!(!fx.join("item.bin").exists());
+            } else {
+                assert!(fx.join("item.bin").is_dir());
+                assert!(!fx.part_path("item.bin").exists());
+            }
         }
 
-        // Directory at .part
-        let dir = TempTestDir::new("dir-at-part");
-        fs::create_dir(dir.part_path("item.bin")).unwrap();
-        let server = MockServer::start(vec![MockResponse::ok(b"payload")]).await;
+        // 3. Unix symlinks (intermediate dir, live/dangling .part, live/dangling target) and FIFOs
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
 
-        let err = download_single_file(
-            &client,
-            &dir.path,
-            &server.url("/item.bin"),
-            "item.bin",
-            None,
-            &signal,
-            None,
-        )
-        .await
-        .unwrap_err();
+            enum UnixSpecial {
+                SymlinkParent,
+                SymlinkPartLive,
+                SymlinkPartDangling,
+                SymlinkTargetLive,
+                SymlinkTargetDangling,
+                FifoTarget,
+                FifoPart,
+            }
 
-        let requests = server.abort_and_collect().await;
-        assert!(matches!(err, IaGetError::FileSystem(_)));
-        assert!(requests.is_empty());
-        assert!(dir.part_path("item.bin").is_dir());
-        assert!(!dir.join("item.bin").exists());
-    }
+            let md5_some = Some("d41d8cd98f00b204e9800998ecf8427e");
+            let unix_cases: [(&str, UnixSpecial, &str, Option<&str>); 10] = [
+                (
+                    "symlink-parent",
+                    UnixSpecial::SymlinkParent,
+                    "sub/victim.bin",
+                    None,
+                ),
+                (
+                    "symlink-part-live",
+                    UnixSpecial::SymlinkPartLive,
+                    "item.bin",
+                    None,
+                ),
+                (
+                    "symlink-part-dangling",
+                    UnixSpecial::SymlinkPartDangling,
+                    "item.bin",
+                    None,
+                ),
+                (
+                    "symlink-target-live-nomd5",
+                    UnixSpecial::SymlinkTargetLive,
+                    "item.bin",
+                    None,
+                ),
+                (
+                    "symlink-target-live-md5",
+                    UnixSpecial::SymlinkTargetLive,
+                    "item.bin",
+                    md5_some,
+                ),
+                (
+                    "symlink-target-dangling-nomd5",
+                    UnixSpecial::SymlinkTargetDangling,
+                    "item.bin",
+                    None,
+                ),
+                (
+                    "symlink-target-dangling-md5",
+                    UnixSpecial::SymlinkTargetDangling,
+                    "item.bin",
+                    md5_some,
+                ),
+                (
+                    "fifo-target-nomd5",
+                    UnixSpecial::FifoTarget,
+                    "item.bin",
+                    None,
+                ),
+                (
+                    "fifo-target-md5",
+                    UnixSpecial::FifoTarget,
+                    "item.bin",
+                    md5_some,
+                ),
+                ("fifo-part", UnixSpecial::FifoPart, "item.bin", None),
+            ];
 
-    #[tokio::test]
-    async fn test_download_rejects_regular_file_blocking_intermediate_directory() {
-        let dir = TempTestDir::new("file-blocks-dir");
-        let blocker = dir.join("blocker");
-        fs::write(&blocker, b"existing regular file").unwrap();
+            for (label, kind, rel_path, expected_md5) in unix_cases {
+                let sandbox = TempTestDir::new(label);
+                let root = sandbox.join("root");
+                let outside = sandbox.join("outside");
+                fs::create_dir_all(&root).unwrap();
+                fs::create_dir_all(&outside).unwrap();
+                let victim = outside.join("victim.bin");
+                let missing = outside.join("missing.bin");
 
-        let server = MockServer::start(vec![MockResponse::ok(b"payload")]).await;
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
+                match kind {
+                    UnixSpecial::SymlinkParent => {
+                        fs::write(&victim, b"original outside data").unwrap();
+                        symlink(&outside, root.join("sub")).unwrap();
+                    }
+                    UnixSpecial::SymlinkPartLive => {
+                        fs::write(&victim, b"do not overwrite").unwrap();
+                        symlink(&victim, root.join("item.bin.part")).unwrap();
+                    }
+                    UnixSpecial::SymlinkPartDangling => {
+                        symlink(&missing, root.join("item.bin.part")).unwrap();
+                    }
+                    UnixSpecial::SymlinkTargetLive => {
+                        fs::write(&victim, b"protected target").unwrap();
+                        symlink(&victim, root.join("item.bin")).unwrap();
+                    }
+                    UnixSpecial::SymlinkTargetDangling => {
+                        symlink(&missing, root.join("item.bin")).unwrap();
+                    }
+                    UnixSpecial::FifoTarget => create_fifo(&root.join("item.bin")),
+                    UnixSpecial::FifoPart => create_fifo(&root.join("item.bin.part")),
+                }
 
-        let err = download_single_file(
-            &client,
-            &dir.path,
-            &server.url("/item.bin"),
-            "blocker/item.bin",
-            None,
-            &signal,
-            None,
-        )
-        .await
-        .unwrap_err();
+                let server = MockServer::start(vec![MockResponse::ok(b"payload")]).await;
+                let result = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    download_single_file(
+                        &client,
+                        &root,
+                        &server.url("/item.bin"),
+                        rel_path,
+                        expected_md5,
+                        &signal,
+                        None,
+                    ),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("case {label}: check must not hang"));
 
-        let requests = server.abort_and_collect().await;
-        assert!(matches!(err, IaGetError::FileSystem(_)));
-        assert!(requests.is_empty());
-        assert_eq!(fs::read(&blocker).unwrap(), b"existing regular file");
-    }
-
-    #[cfg(unix)]
-    fn create_fifo(path: &Path) {
-        let status = std::process::Command::new("mkfifo")
-            .arg(path)
-            .status()
-            .expect("run mkfifo");
-        assert!(status.success(), "mkfifo failed for {}", path.display());
+                assert!(
+                    matches!(result.unwrap_err(), IaGetError::FileSystem(_)),
+                    "case {label}"
+                );
+                assert!(server.abort().await.is_empty(), "case {label}");
+                match kind {
+                    UnixSpecial::SymlinkParent => {
+                        assert_eq!(fs::read(&victim).unwrap(), b"original outside data");
+                        assert!(!outside.join("victim.bin.part").exists());
+                    }
+                    UnixSpecial::SymlinkPartLive => {
+                        assert_eq!(fs::read(&victim).unwrap(), b"do not overwrite");
+                        assert!(!root.join("item.bin").exists());
+                    }
+                    UnixSpecial::SymlinkPartDangling => {
+                        assert!(!missing.exists());
+                        assert!(!root.join("item.bin").exists());
+                    }
+                    UnixSpecial::SymlinkTargetLive => {
+                        assert_eq!(fs::read(&victim).unwrap(), b"protected target");
+                    }
+                    UnixSpecial::SymlinkTargetDangling => assert!(!missing.exists()),
+                    UnixSpecial::FifoTarget | UnixSpecial::FifoPart => {}
+                }
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -7620,9 +6713,8 @@ mod tests {
         };
 
         let dir = TempTestDir::new("nofollow-flag");
-        let real_file = dir.join("real.bin");
+        let real_file = dir.write("real.bin", b"hello");
         let link_file = dir.join("link.bin");
-        fs::write(&real_file, b"hello").unwrap();
         symlink(&real_file, &link_file).unwrap();
 
         let _regular = fs::OpenOptions::new()
@@ -7643,370 +6735,156 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn test_unix_symlinked_intermediate_dir_refused_with_zero_requests() {
-        use std::os::unix::fs::symlink;
-
-        let dir = TempTestDir::new("symlink-parent");
-        let root = dir.join("root");
-        let outside = dir.join("outside");
-        fs::create_dir_all(&root).unwrap();
-        fs::create_dir_all(&outside).unwrap();
-
-        let outside_file = outside.join("victim.bin");
-        fs::write(&outside_file, b"original outside data").unwrap();
-        symlink(&outside, root.join("sub")).unwrap();
-
-        let server = MockServer::start(vec![MockResponse::ok(b"attacker payload")]).await;
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        let err = download_single_file(
-            &client,
-            &root,
-            &server.url("/victim.bin"),
-            "sub/victim.bin",
-            None,
-            &signal,
-            None,
-        )
-        .await
-        .unwrap_err();
-
-        let requests = server.abort_and_collect().await;
-        assert!(matches!(err, IaGetError::FileSystem(_)));
-        assert!(requests.is_empty(), "expected zero HTTP requests");
-        assert_eq!(fs::read(&outside_file).unwrap(), b"original outside data");
-        assert!(!outside.join("victim.bin.part").exists());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_unix_live_and_dangling_symlinked_part_refused_with_zero_requests() {
-        use std::os::unix::fs::symlink;
-
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        // Live symlinked .part
-        {
-            let dir = TempTestDir::new("symlink-part-live");
-            let root = dir.join("root");
-            let outside = dir.join("outside");
-            fs::create_dir_all(&root).unwrap();
-            fs::create_dir_all(&outside).unwrap();
-
-            let outside_victim = outside.join("victim.bin");
-            fs::write(&outside_victim, b"do not overwrite").unwrap();
-            symlink(&outside_victim, root.join("item.bin.part")).unwrap();
-
-            let server = MockServer::start(vec![MockResponse::ok(b"new payload")]).await;
-            let err = download_single_file(
-                &client,
-                &root,
-                &server.url("/item.bin"),
-                "item.bin",
-                None,
-                &signal,
-                None,
-            )
-            .await
-            .unwrap_err();
-
-            let requests = server.abort_and_collect().await;
-            assert!(matches!(err, IaGetError::FileSystem(_)));
-            assert!(requests.is_empty());
-            assert_eq!(fs::read(&outside_victim).unwrap(), b"do not overwrite");
-            assert!(!root.join("item.bin").exists());
-        }
-
-        // Dangling symlinked .part
-        {
-            let dir = TempTestDir::new("symlink-part-dangling");
-            let root = dir.join("root");
-            let outside = dir.join("outside");
-            fs::create_dir_all(&root).unwrap();
-            fs::create_dir_all(&outside).unwrap();
-
-            let dangling_target = outside.join("should-not-exist.bin");
-            symlink(&dangling_target, root.join("item.bin.part")).unwrap();
-
-            let server = MockServer::start(vec![MockResponse::ok(b"new payload")]).await;
-            let err = download_single_file(
-                &client,
-                &root,
-                &server.url("/item.bin"),
-                "item.bin",
-                None,
-                &signal,
-                None,
-            )
-            .await
-            .unwrap_err();
-
-            let requests = server.abort_and_collect().await;
-            assert!(matches!(err, IaGetError::FileSystem(_)));
-            assert!(requests.is_empty());
-            assert!(!dangling_target.exists());
-            assert!(!root.join("item.bin").exists());
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_unix_live_and_dangling_symlinked_target_refused_with_and_without_md5() {
-        use std::os::unix::fs::symlink;
-
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        for expected_md5 in [None, Some("d41d8cd98f00b204e9800998ecf8427e")] {
-            // Live symlinked target
-            let dir = TempTestDir::new("symlink-target-live");
-            let root = dir.join("root");
-            let outside = dir.join("outside");
-            fs::create_dir_all(&root).unwrap();
-            fs::create_dir_all(&outside).unwrap();
-
-            let outside_victim = outside.join("victim.bin");
-            fs::write(&outside_victim, b"protected target").unwrap();
-            symlink(&outside_victim, root.join("item.bin")).unwrap();
-
-            let server = MockServer::start(vec![MockResponse::ok(b"payload")]).await;
-            let err = download_single_file(
-                &client,
-                &root,
-                &server.url("/item.bin"),
-                "item.bin",
-                expected_md5,
-                &signal,
-                None,
-            )
-            .await
-            .unwrap_err();
-
-            let requests = server.abort_and_collect().await;
-            assert!(matches!(err, IaGetError::FileSystem(_)));
-            assert!(requests.is_empty());
-            assert_eq!(fs::read(&outside_victim).unwrap(), b"protected target");
-
-            // Dangling symlinked target
-            let dir_dangling = TempTestDir::new("symlink-target-dangling");
-            let root_d = dir_dangling.join("root");
-            let outside_d = dir_dangling.join("outside");
-            fs::create_dir_all(&root_d).unwrap();
-            fs::create_dir_all(&outside_d).unwrap();
-
-            let missing_target = outside_d.join("missing.bin");
-            symlink(&missing_target, root_d.join("item.bin")).unwrap();
-
-            let server_d = MockServer::start(vec![MockResponse::ok(b"payload")]).await;
-            let err_d = download_single_file(
-                &client,
-                &root_d,
-                &server_d.url("/item.bin"),
-                "item.bin",
-                expected_md5,
-                &signal,
-                None,
-            )
-            .await
-            .unwrap_err();
-
-            let requests_d = server_d.abort_and_collect().await;
-            assert!(matches!(err_d, IaGetError::FileSystem(_)));
-            assert!(requests_d.is_empty());
-            assert!(!missing_target.exists());
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_unix_fifo_at_target_and_part_refused_without_hanging() {
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        // FIFO at target (with and without expected_md5)
-        for expected_md5 in [None, Some("d41d8cd98f00b204e9800998ecf8427e")] {
-            let dir = TempTestDir::new("fifo-target");
-            create_fifo(&dir.join("item.bin"));
-            let server = MockServer::start(vec![MockResponse::ok(b"payload")]).await;
-
-            let result = tokio::time::timeout(
-                Duration::from_secs(5),
-                download_single_file(
-                    &client,
-                    &dir.path,
-                    &server.url("/item.bin"),
-                    "item.bin",
-                    expected_md5,
-                    &signal,
-                    None,
-                ),
-            )
-            .await
-            .expect("FIFO target check must not hang");
-
-            let requests = server.abort_and_collect().await;
-            assert!(matches!(result.unwrap_err(), IaGetError::FileSystem(_)));
-            assert!(requests.is_empty());
-        }
-
-        // FIFO at .part
-        let dir = TempTestDir::new("fifo-part");
-        create_fifo(&dir.part_path("item.bin"));
-        let server = MockServer::start(vec![MockResponse::ok(b"payload")]).await;
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            download_single_file(
-                &client,
-                &dir.path,
-                &server.url("/item.bin"),
-                "item.bin",
-                None,
-                &signal,
-                None,
-            ),
-        )
-        .await
-        .expect("FIFO .part check must not hang");
-
-        let requests = server.abort_and_collect().await;
-        assert!(matches!(result.unwrap_err(), IaGetError::FileSystem(_)));
-        assert!(requests.is_empty());
-    }
-
-    #[cfg(unix)]
     #[test]
     fn test_unix_promote_part_file_refuses_symlink_fifo_and_directory_targets() {
         use std::os::unix::fs::symlink;
 
-        // Live symlink target
-        {
-            let dir = TempTestDir::new("promote-symlink-live");
+        enum PromoteTarget {
+            LiveSymlink,
+            DanglingSymlink,
+            Fifo,
+            Directory,
+        }
+
+        for (label, kind) in [
+            ("promote-symlink-live", PromoteTarget::LiveSymlink),
+            ("promote-symlink-dangling", PromoteTarget::DanglingSymlink),
+            ("promote-fifo", PromoteTarget::Fifo),
+            ("promote-dir", PromoteTarget::Directory),
+        ] {
+            let dir = TempTestDir::new(label);
             let root = dir.join("root");
             let outside = dir.join("outside");
             fs::create_dir_all(&root).unwrap();
             fs::create_dir_all(&outside).unwrap();
+            fs::write(root.join("item.bin.part"), b"staged").unwrap();
 
             let outside_file = outside.join("victim.bin");
-            fs::write(&outside_file, b"original").unwrap();
-            fs::write(root.join("item.bin.part"), b"staged").unwrap();
-            symlink(&outside_file, root.join("item.bin")).unwrap();
+            match kind {
+                PromoteTarget::LiveSymlink => {
+                    fs::write(&outside_file, b"original").unwrap();
+                    symlink(&outside_file, root.join("item.bin")).unwrap();
+                }
+                PromoteTarget::DanglingSymlink => {
+                    symlink(&outside_file, root.join("item.bin")).unwrap();
+                }
+                PromoteTarget::Fifo => create_fifo(&root.join("item.bin")),
+                PromoteTarget::Directory => fs::create_dir(root.join("item.bin")).unwrap(),
+            }
 
             let err = promote_part_file(&root, Path::new("item.bin.part"), Path::new("item.bin"))
                 .unwrap_err();
-            assert!(matches!(err, IaGetError::FileSystem(_)));
-            assert_eq!(fs::read(&outside_file).unwrap(), b"original");
+            assert!(matches!(err, IaGetError::FileSystem(_)), "case {label}");
             assert_eq!(fs::read(root.join("item.bin.part")).unwrap(), b"staged");
-        }
-
-        // Dangling symlink target
-        {
-            let dir = TempTestDir::new("promote-symlink-dangling");
-            let root = dir.join("root");
-            let outside = dir.join("outside");
-            fs::create_dir_all(&root).unwrap();
-            fs::create_dir_all(&outside).unwrap();
-
-            let dangling = outside.join("missing.bin");
-            fs::write(root.join("item.bin.part"), b"staged").unwrap();
-            symlink(&dangling, root.join("item.bin")).unwrap();
-
-            let err = promote_part_file(&root, Path::new("item.bin.part"), Path::new("item.bin"))
-                .unwrap_err();
-            assert!(matches!(err, IaGetError::FileSystem(_)));
-            assert!(!dangling.exists());
-            assert_eq!(fs::read(root.join("item.bin.part")).unwrap(), b"staged");
-        }
-
-        // FIFO target
-        {
-            let dir = TempTestDir::new("promote-fifo");
-            fs::write(dir.join("item.bin.part"), b"staged").unwrap();
-            create_fifo(&dir.join("item.bin"));
-
-            let err =
-                promote_part_file(&dir.path, Path::new("item.bin.part"), Path::new("item.bin"))
-                    .unwrap_err();
-            assert!(matches!(err, IaGetError::FileSystem(_)));
-            assert_eq!(fs::read(dir.join("item.bin.part")).unwrap(), b"staged");
-        }
-
-        // Directory target
-        {
-            let dir = TempTestDir::new("promote-dir");
-            fs::write(dir.join("item.bin.part"), b"staged").unwrap();
-            fs::create_dir(dir.join("item.bin")).unwrap();
-
-            let err =
-                promote_part_file(&dir.path, Path::new("item.bin.part"), Path::new("item.bin"))
-                    .unwrap_err();
-            assert!(matches!(err, IaGetError::FileSystem(_)));
-            assert!(dir.join("item.bin").is_dir());
-            assert_eq!(fs::read(dir.join("item.bin.part")).unwrap(), b"staged");
+            match kind {
+                PromoteTarget::LiveSymlink => {
+                    assert_eq!(fs::read(&outside_file).unwrap(), b"original");
+                }
+                PromoteTarget::DanglingSymlink => assert!(!outside_file.exists()),
+                PromoteTarget::Directory => assert!(root.join("item.bin").is_dir()),
+                PromoteTarget::Fifo => {}
+            }
         }
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_unix_symlinked_root_succeeds_while_symlinks_inside_root_fail() {
+    async fn test_unix_symlinked_output_root_allows_contained_downloads_and_blocks_inner_escapes() {
         use std::os::unix::fs::symlink;
 
-        let dir = TempTestDir::new("symlinked-root");
-        let real_root = dir.join("real_root");
-        let link_root = dir.join("link_root");
-        let outside = dir.join("outside");
+        let sandbox = TempTestDir::new("symlinked-output-root");
+        let real_root = sandbox.join("real_root");
+        let link_root = sandbox.join("link_root");
+        let outside = sandbox.join("outside");
         fs::create_dir_all(&real_root).unwrap();
         fs::create_dir_all(&outside).unwrap();
         symlink(&real_root, &link_root).unwrap();
+        symlink(&outside, real_root.join("escape")).unwrap();
 
-        let payload = b"downloaded through symlinked root";
-        let expected_md5 = md5_hex(payload);
-        let server = MockServer::start(vec![MockResponse::ok(payload)]).await;
+        let canonical = prepare_output_dir(&link_root)
+            .expect("symlinked --output-dir pointing to an existing directory should succeed");
+        assert_eq!(canonical, fs::canonicalize(&real_root).unwrap());
+        assert!(matches!(
+            validate_contained_path(&canonical, Path::new("escape/bad.bin"), true),
+            Err(IaGetError::FileSystem(_))
+        ));
+
         let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
-        // Normal nested download inside symlinked root must succeed
+        // Single-file download into symlinked root succeeds; inner symlink escape fails with 0 requests
+        let single_payload = b"downloaded through symlinked root";
+        let server_single = MockServer::start(vec![MockResponse::ok(single_payload)]).await;
         download_single_file(
             &client,
             &link_root,
-            &server.url("/good.bin"),
-            "nested/good.bin",
-            Some(&expected_md5),
+            &server_single.url("/single.bin"),
+            "nested/single.bin",
+            Some(&md5_hex(single_payload)),
             &signal,
             None,
         )
         .await
-        .expect("download into symlinked root should succeed");
+        .expect("single download into symlinked root should succeed");
+        assert_eq!(server_single.finish().await.len(), 1);
+        assert_downloaded_file(&real_root, "nested/single.bin", single_payload);
 
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 1);
-        assert_eq!(
-            fs::read(real_root.join("nested/good.bin")).unwrap(),
-            payload
-        );
-
-        // Symlink planted inside that same symlinked root must still be refused
-        symlink(&outside, real_root.join("escape")).unwrap();
-        let server_bad = MockServer::start(vec![MockResponse::ok(b"nope")]).await;
+        let server_single_bad = MockServer::start(vec![MockResponse::ok(b"nope")]).await;
         let err = download_single_file(
             &client,
             &link_root,
-            &server_bad.url("/bad.bin"),
-            "escape/bad.bin",
+            &server_single_bad.url("/bad.bin"),
+            "escape/single_bad.bin",
             None,
             &signal,
             None,
         )
         .await
         .unwrap_err();
-
-        let bad_requests = server_bad.abort_and_collect().await;
         assert!(matches!(err, IaGetError::FileSystem(_)));
-        assert!(bad_requests.is_empty());
-        assert!(!outside.join("bad.bin").exists());
+        assert!(server_single_bad.abort().await.is_empty());
+
+        // Batch download into symlinked root skips inner escape (0 requests) and downloads sibling
+        let batch_payload = b"batch downloaded via symlinked output-dir";
+        let server_batch = MockServer::start(vec![MockResponse::ok(batch_payload)]).await;
+        let files = vec![
+            (
+                server_batch.url("/batch_bad.bin"),
+                "escape/batch_bad.bin".to_string(),
+                None,
+            ),
+            (
+                server_batch.url("/batch_good.bin"),
+                "nested/batch_good.bin".to_string(),
+                Some(md5_hex(batch_payload)),
+            ),
+        ];
+        let summary = download_files_in_dir(
+            &client,
+            &link_root,
+            files,
+            2,
+            None,
+            &RetryPolicy::default(),
+            &signal,
+        )
+        .await
+        .expect("batch into symlinked output-dir should return summary");
+
+        let batch_requests = server_batch.finish().await;
+        assert_eq!(batch_requests.len(), 1);
+        assert!(batch_requests[0]
+            .request_line
+            .starts_with("GET /batch_good.bin "));
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].file_path, "escape/batch_bad.bin");
+        assert!(summary.failed[0]
+            .error
+            .starts_with("File operation failed:"));
+        assert!(!outside.join("single_bad.bin").exists());
+        assert!(!outside.join("batch_bad.bin").exists());
+        assert_downloaded_file(&real_root, "nested/batch_good.bin", batch_payload);
     }
 
     #[tokio::test]
@@ -8015,33 +6893,20 @@ mod tests {
         let expected_md5 = md5_hex(payload);
 
         let target_server = MockServer::start_on_localhost(vec![MockResponse::ok(payload)]).await;
-        let redirect_url = target_server.url("/final/item.bin");
-        let origin_server = MockServer::start(vec![MockResponse::with_headers(
+        let origin_server = MockServer::start(vec![MockResponse::redirect(
             "302 Found",
-            vec![
-                ("Location", redirect_url),
-                ("Content-Length", "0".to_string()),
-            ],
-            b"",
+            target_server.url("/final/item.bin"),
         )])
         .await;
 
         let cookie_source =
             CookieSource::from_netscape_str("127.0.0.1\tFALSE\t/\tFALSE\t0\tsession\tsecret123\n");
-        let dir = TempTestDir::new("redirect-strip-cookie");
-        let rel_path = "item.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
+        let fx = DownloadFixture::new("redirect-strip-cookie");
 
-        download_single_file(
-            &client,
-            &dir.path,
+        fx.download(
             &origin_server.url("/download/item.bin"),
-            rel_path,
+            "item.bin",
             Some(&expected_md5),
-            &signal,
             Some(&cookie_source),
         )
         .await
@@ -8067,9 +6932,7 @@ mod tests {
             None,
             "redirect to non-matching host must strip Cookie header"
         );
-
-        assert_eq!(fs::read(&final_path).unwrap(), payload);
-        assert!(!part_path.exists());
+        fx.assert_downloaded("item.bin", payload);
     }
 
     #[tokio::test]
@@ -8078,14 +6941,7 @@ mod tests {
         let expected_md5 = md5_hex(payload);
 
         let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "302 Found",
-                vec![
-                    ("Location", "/download/public/item.bin".to_string()),
-                    ("Content-Length", "0".to_string()),
-                ],
-                b"",
-            ),
+            MockResponse::redirect("302 Found", "/download/public/item.bin"),
             MockResponse::ok(payload),
         ])
         .await;
@@ -8096,20 +6952,11 @@ mod tests {
             "127.0.0.1\tFALSE\t/download/private\tFALSE\t0\tprivate\t1\n",
         ));
 
-        let dir = TempTestDir::new("redirect-path-scope");
-        let rel_path = "item.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        download_single_file(
-            &client,
-            &dir.path,
+        let fx = DownloadFixture::new("redirect-path-scope");
+        fx.download(
             &server.url("/download/private/item.bin"),
-            rel_path,
+            "item.bin",
             Some(&expected_md5),
-            &signal,
             Some(&cookie_source),
         )
         .await
@@ -8121,29 +6968,20 @@ mod tests {
             .request_line
             .starts_with("GET /download/private/item.bin "));
         assert_eq!(requests[0].header("cookie"), Some("private=1; root=1"));
-
         assert!(requests[1]
             .request_line
             .starts_with("GET /download/public/item.bin "));
         assert_eq!(requests[1].header("cookie"), Some("root=1"));
-
-        assert_eq!(fs::read(&final_path).unwrap(), payload);
-        assert!(!part_path.exists());
+        fx.assert_downloaded("item.bin", payload);
     }
 
     #[tokio::test]
     async fn test_download_resume_preserves_range_across_all_redirect_statuses() {
         let prefix = b"partial-prefix-";
         let suffix = b"resumed-payload-after-redirect";
-        let mut full = Vec::new();
-        full.extend_from_slice(prefix);
-        full.extend_from_slice(suffix);
+        let full: Vec<u8> = [prefix.as_slice(), suffix.as_slice()].concat();
         let expected_md5 = md5_hex(&full);
         let expected_range = format!("bytes={}-", prefix.len());
-        let content_range = format!("bytes {}-{}/{}", prefix.len(), full.len() - 1, full.len());
-
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
 
         for (code, status_line) in [
             ("301", "301 Moved Permanently"),
@@ -8152,39 +6990,19 @@ mod tests {
             ("307", "307 Temporary Redirect"),
             ("308", "308 Permanent Redirect"),
         ] {
-            let dir = TempTestDir::new(&format!("resume-redirect-{code}"));
-            let rel_path = "resumed.bin";
-            let final_path = dir.join(rel_path);
-            let part_path = dir.part_path(rel_path);
-            fs::write(&part_path, prefix).unwrap();
+            let fx = DownloadFixture::new(&format!("resume-redirect-{code}"));
+            fx.write_part("resumed.bin", prefix);
 
             let server = MockServer::start(vec![
-                MockResponse::with_headers(
-                    status_line,
-                    vec![
-                        ("Location", "/cdn/resumed.bin".to_string()),
-                        ("Content-Length", "0".to_string()),
-                    ],
-                    b"",
-                ),
-                MockResponse::with_headers(
-                    "206 Partial Content",
-                    vec![
-                        ("Content-Range", content_range.clone()),
-                        ("Content-Length", suffix.len().to_string()),
-                    ],
-                    suffix,
-                ),
+                MockResponse::redirect(status_line, "/cdn/resumed.bin"),
+                MockResponse::partial_content(prefix.len() as u64, full.len() as u64, suffix),
             ])
             .await;
 
-            download_single_file(
-                &client,
-                &dir.path,
+            fx.download(
                 &server.url("/download/resumed.bin"),
-                rel_path,
+                "resumed.bin",
                 Some(&expected_md5),
-                &signal,
                 None,
             )
             .await
@@ -8214,8 +7032,7 @@ mod tests {
                 Some(expected_range.as_str()),
                 "status {code} hop 1 must preserve Range"
             );
-            assert_eq!(fs::read(&final_path).unwrap(), full, "status {code}");
-            assert!(!part_path.exists(), "status {code}");
+            fx.assert_downloaded("resumed.bin", &full);
         }
     }
 
@@ -8223,27 +7040,23 @@ mod tests {
     async fn test_download_raw_vs_cookies_txt_disambiguation_end_to_end() {
         let payload = b"cookie source disambiguation payload";
         let expected_md5 = md5_hex(payload);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
 
         // Raw cookie string: strictly scoped to HTTPS archive.org, so http://127.0.0.1 receives no Cookie.
         let raw_source = CookieSource::from_input("logged-in-user=yes; logged-in-sig=abc123")
             .expect("raw cookie string should parse");
         assert!(matches!(raw_source, CookieSource::Raw(_)));
 
-        let dir_raw = TempTestDir::new("cookie-raw-e2e");
+        let fx_raw = DownloadFixture::new("cookie-raw-e2e");
         let server_raw = MockServer::start(vec![MockResponse::ok(payload)]).await;
-        download_single_file(
-            &client,
-            &dir_raw.path,
-            &server_raw.url("/download/item.bin"),
-            "item.bin",
-            Some(&expected_md5),
-            &signal,
-            Some(&raw_source),
-        )
-        .await
-        .expect("download with raw cookie source should succeed");
+        fx_raw
+            .download(
+                &server_raw.url("/download/item.bin"),
+                "item.bin",
+                Some(&expected_md5),
+                Some(&raw_source),
+            )
+            .await
+            .expect("download with raw cookie source should succeed");
 
         let raw_requests = server_raw.finish().await;
         assert_eq!(raw_requests.len(), 1);
@@ -8252,67 +7065,46 @@ mod tests {
             None,
             "raw cookie must not be sent to plain HTTP 127.0.0.1"
         );
-        assert_eq!(fs::read(dir_raw.join("item.bin")).unwrap(), payload);
+        fx_raw.assert_downloaded("item.bin", payload);
 
         // Netscape cookies.txt file: attaches only matching host and path cookies.
-        let dir_file = TempTestDir::new("cookie-file-e2e");
-        let cookie_file = dir_file.join("cookies.txt");
-        fs::write(
-            &cookie_file,
+        let fx_file = DownloadFixture::new("cookie-file-e2e");
+        let cookie_file = fx_file.write(
+            "cookies.txt",
             concat!(
                 "# Netscape HTTP Cookie File\n",
                 "127.0.0.1\tFALSE\t/download\tFALSE\t0\tsession\tfromfile\n",
                 "127.0.0.1\tFALSE\t/other\tFALSE\t0\tother\tskip\n",
                 "example.com\tFALSE\t/\tFALSE\t0\tforeign\tskip\n",
             ),
-        )
-        .unwrap();
-
+        );
         let file_source = CookieSource::from_input(cookie_file.to_str().unwrap())
             .expect("cookies.txt file should parse");
         assert!(matches!(file_source, CookieSource::NetscapeFile(_)));
 
         let server_file = MockServer::start(vec![MockResponse::ok(payload)]).await;
-        download_single_file(
-            &client,
-            &dir_file.path,
-            &server_file.url("/download/item.bin"),
-            "item.bin",
-            Some(&expected_md5),
-            &signal,
-            Some(&file_source),
-        )
-        .await
-        .expect("download with cookies.txt file should succeed");
+        fx_file
+            .download(
+                &server_file.url("/download/item.bin"),
+                "item.bin",
+                Some(&expected_md5),
+                Some(&file_source),
+            )
+            .await
+            .expect("download with cookies.txt file should succeed");
 
         let file_requests = server_file.finish().await;
         assert_eq!(file_requests.len(), 1);
         assert_eq!(file_requests[0].header("cookie"), Some("session=fromfile"));
-        assert_eq!(fs::read(dir_file.join("item.bin")).unwrap(), payload);
+        fx_file.assert_downloaded("item.bin", payload);
     }
 
     #[tokio::test]
     async fn test_download_redirect_errors_fail_fast_without_retrying() {
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let slow_policy = RetryPolicy {
-            max_retries: 3,
-            initial_delay: Duration::from_secs(10),
-            max_delay: Duration::from_secs(10),
-            max_retry_after: Duration::from_secs(10),
-        };
+        let policy = slow_retry_policy(3);
 
         let mut too_many_responses: Vec<MockResponse> = (0..=MAX_REDIRECTS)
-            .map(|hop| {
-                MockResponse::with_headers(
-                    "302 Found",
-                    vec![
-                        ("Location", format!("/hop-{}", hop + 1)),
-                        ("Content-Length", "0".to_string()),
-                    ],
-                    b"",
-                )
-            })
+            .map(|hop| MockResponse::redirect("302 Found", format!("/hop-{}", hop + 1)))
             .collect();
         too_many_responses.push(MockResponse::ok(b"should not retry"));
 
@@ -8321,14 +7113,7 @@ mod tests {
                 "direct-loop",
                 "/a",
                 vec![
-                    MockResponse::with_headers(
-                        "302 Found",
-                        vec![
-                            ("Location", "/a".to_string()),
-                            ("Content-Length", "0".to_string()),
-                        ],
-                        b"",
-                    ),
+                    MockResponse::redirect("302 Found", "/a"),
                     MockResponse::ok(b"should not retry"),
                 ],
                 1,
@@ -8338,22 +7123,8 @@ mod tests {
                 "two-hop-loop",
                 "/a",
                 vec![
-                    MockResponse::with_headers(
-                        "302 Found",
-                        vec![
-                            ("Location", "/b".to_string()),
-                            ("Content-Length", "0".to_string()),
-                        ],
-                        b"",
-                    ),
-                    MockResponse::with_headers(
-                        "302 Found",
-                        vec![
-                            ("Location", "/a".to_string()),
-                            ("Content-Length", "0".to_string()),
-                        ],
-                        b"",
-                    ),
+                    MockResponse::redirect("302 Found", "/b"),
+                    MockResponse::redirect("302 Found", "/a"),
                     MockResponse::ok(b"should not retry"),
                 ],
                 2,
@@ -8363,14 +7134,7 @@ mod tests {
                 "fragment-only-loop",
                 "/a",
                 vec![
-                    MockResponse::with_headers(
-                        "302 Found",
-                        vec![
-                            ("Location", "/a#section".to_string()),
-                            ("Content-Length", "0".to_string()),
-                        ],
-                        b"",
-                    ),
+                    MockResponse::redirect("302 Found", "/a#section"),
                     MockResponse::ok(b"should not retry"),
                 ],
                 1,
@@ -8387,11 +7151,7 @@ mod tests {
                 "missing-location",
                 "/missing",
                 vec![
-                    MockResponse::with_headers(
-                        "302 Found",
-                        vec![("Content-Length", "0".to_string())],
-                        b"",
-                    ),
+                    MockResponse::status("302 Found", b""),
                     MockResponse::ok(b"should not retry"),
                 ],
                 1,
@@ -8401,14 +7161,7 @@ mod tests {
                 "empty-location",
                 "/empty",
                 vec![
-                    MockResponse::with_headers(
-                        "302 Found",
-                        vec![
-                            ("Location", "   ".to_string()),
-                            ("Content-Length", "0".to_string()),
-                        ],
-                        b"",
-                    ),
+                    MockResponse::redirect("302 Found", "   "),
                     MockResponse::ok(b"should not retry"),
                 ],
                 1,
@@ -8418,14 +7171,7 @@ mod tests {
                 "non-http-scheme",
                 "/scheme",
                 vec![
-                    MockResponse::with_headers(
-                        "302 Found",
-                        vec![
-                            ("Location", "file:///etc/passwd".to_string()),
-                            ("Content-Length", "0".to_string()),
-                        ],
-                        b"",
-                    ),
+                    MockResponse::redirect("302 Found", "file:///etc/passwd"),
                     MockResponse::ok(b"should not retry"),
                 ],
                 1,
@@ -8434,45 +7180,32 @@ mod tests {
         ];
 
         for (label, initial_path, responses, expected_requests, expected_msg) in cases {
-            let dir = TempTestDir::new(&format!("redirect-err-{label}"));
+            let fx = DownloadFixture::new(&format!("redirect-err-{label}"));
             let server = MockServer::start(responses).await;
 
             let start = std::time::Instant::now();
-            let err = download_single_file_with_policy(
-                &client,
-                &dir.path,
-                &server.url(initial_path),
-                "item.bin",
-                None,
-                &signal,
-                None,
-                &slow_policy,
-            )
-            .await
-            .unwrap_err();
+            let err = fx
+                .download_with_policy(&server.url(initial_path), "item.bin", None, None, &policy)
+                .await
+                .unwrap_err();
             let elapsed = start.elapsed();
 
-            let requests = server.abort_and_collect().await;
-            assert_eq!(
-                requests.len(),
-                expected_requests,
-                "case {label}: unexpected request count"
-            );
+            let requests = server.abort().await;
+            assert_eq!(requests.len(), expected_requests, "case {label}");
             assert!(
                 elapsed < Duration::from_secs(2),
-                "case {label}: redirect error must fail fast without retrying, took {:?}",
-                elapsed
+                "case {label}: redirect error must fail fast, took {elapsed:?}"
             );
             assert!(
                 matches!(err, IaGetError::Network(_)),
-                "case {label}: expected Network error, got {err:?}"
+                "case {label}: {err:?}"
             );
             assert!(
                 err.to_string().contains(expected_msg),
-                "case {label}: expected '{expected_msg}' in error '{err}'"
+                "case {label}: expected '{expected_msg}' in '{err}'"
             );
-            assert!(!dir.join("item.bin").exists(), "case {label}");
-            assert!(!dir.part_path("item.bin").exists(), "case {label}");
+            assert!(!fx.join("item.bin").exists(), "case {label}");
+            assert!(!fx.part_path("item.bin").exists(), "case {label}");
         }
     }
 
@@ -8482,55 +7215,21 @@ mod tests {
         let expected_md5 = md5_hex(payload);
 
         let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "302 Found",
-                vec![
-                    ("Location", "/cdn/item.bin".to_string()),
-                    ("Content-Length", "0".to_string()),
-                ],
-                b"",
-            ),
-            MockResponse::with_headers(
-                "503 Service Unavailable",
-                vec![
-                    ("Retry-After", "0".to_string()),
-                    ("Content-Length", "4".to_string()),
-                ],
-                b"busy",
-            ),
-            MockResponse::with_headers(
-                "302 Found",
-                vec![
-                    ("Location", "/cdn/item.bin".to_string()),
-                    ("Content-Length", "0".to_string()),
-                ],
-                b"",
-            ),
+            MockResponse::redirect("302 Found", "/cdn/item.bin"),
+            MockResponse::retry_after("503 Service Unavailable", "0", b"busy"),
+            MockResponse::redirect("302 Found", "/cdn/item.bin"),
             MockResponse::ok(payload),
         ])
         .await;
 
-        let dir = TempTestDir::new("redirect-retry-503");
-        let rel_path = "item.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let policy = RetryPolicy {
-            max_retries: 2,
-            initial_delay: Duration::from_secs(10),
-            max_delay: Duration::from_secs(10),
-            max_retry_after: Duration::from_secs(5),
-        };
+        let fx = DownloadFixture::new("redirect-retry-503");
+        let policy = slow_retry_policy(2);
 
         let start = std::time::Instant::now();
-        download_single_file_with_policy(
-            &client,
-            &dir.path,
+        fx.download_with_policy(
             &server.url("/download/item.bin"),
-            rel_path,
+            "item.bin",
             Some(&expected_md5),
-            &signal,
             None,
             &policy,
         )
@@ -8550,11 +7249,9 @@ mod tests {
         assert!(requests[3].request_line.starts_with("GET /cdn/item.bin "));
         assert!(
             elapsed < Duration::from_secs(2),
-            "Retry-After: 0 should retry immediately, took {:?}",
-            elapsed
+            "Retry-After: 0 should retry immediately, took {elapsed:?}"
         );
-        assert_eq!(fs::read(&final_path).unwrap(), payload);
-        assert!(!part_path.exists());
+        fx.assert_downloaded("item.bin", payload);
     }
 
     #[tokio::test]
@@ -8563,30 +7260,13 @@ mod tests {
         let expected_md5 = md5_hex(payload);
 
         let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "503 Service Unavailable",
-                vec![
-                    ("Retry-After", "2".to_string()),
-                    ("Content-Length", "4".to_string()),
-                ],
-                b"busy",
-            ),
+            MockResponse::retry_after("503 Service Unavailable", "2", b"busy"),
             MockResponse::ok(payload),
         ])
         .await;
 
-        let dir = TempTestDir::new("cookie-expiry-retry");
-        let rel_path = "item.bin";
-        let final_path = dir.join(rel_path);
-        let part_path = dir.part_path(rel_path);
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-        let policy = RetryPolicy {
-            max_retries: 2,
-            initial_delay: Duration::from_secs(10),
-            max_delay: Duration::from_secs(10),
-            max_retry_after: Duration::from_secs(5),
-        };
+        let fx = DownloadFixture::new("cookie-expiry-retry");
+        let policy = slow_retry_policy(2);
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -8599,13 +7279,10 @@ mod tests {
             now + 3600
         ));
 
-        download_single_file_with_policy(
-            &client,
-            &dir.path,
+        fx.download_with_policy(
             &server.url("/download/item.bin"),
-            rel_path,
+            "item.bin",
             Some(&expected_md5),
-            &signal,
             Some(&cookie_source),
             &policy,
         )
@@ -8620,33 +7297,12 @@ mod tests {
             Some("long=keep"),
             "expired short-lived cookie must be omitted on retry"
         );
-        assert_eq!(fs::read(&final_path).unwrap(), payload);
-        assert!(!part_path.exists());
-    }
-
-    #[test]
-    fn test_resolve_redirect_target_rejects_https_to_http_downgrade() {
-        let current = Url::parse("https://archive.org/download/item/a").unwrap();
-
-        for target in [
-            "http://archive.org/download/item/a",
-            "http://mirror.example/a",
-        ] {
-            let err = resolve_redirect_target(&current, target).unwrap_err();
-            assert!(
-                matches!(err, IaGetError::Network(_)),
-                "target {target}: expected Network error, got {err:?}"
-            );
-            assert!(
-                err.to_string().contains("downgrade"),
-                "target {target}: expected downgrade error message, got '{err}'"
-            );
-        }
+        fx.assert_downloaded("item.bin", payload);
     }
 
     #[test]
     fn test_resolve_redirect_target_allows_valid_transitions() {
-        let cases = [
+        for (current_str, location, expected) in [
             (
                 "https://archive.org/download/item/a",
                 "https://mirror.example/download/item/a",
@@ -8672,9 +7328,7 @@ mod tests {
                 "https://archive.org/download/item/a",
                 "https://archive.org/download/item/a",
             ),
-        ];
-
-        for (current_str, location, expected) in cases {
+        ] {
             let current = Url::parse(current_str).unwrap();
             let resolved = resolve_redirect_target(&current, location)
                 .unwrap_or_else(|err| panic!("{current_str} -> {location} failed: {err}"));
@@ -8683,10 +7337,12 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_redirect_target_rejects_invalid_and_unsupported_locations() {
+    fn test_resolve_redirect_target_rejects_downgrade_and_invalid_locations() {
         let current = Url::parse("https://archive.org/download/item/a").unwrap();
 
         for (location, expected_msg) in [
+            ("http://archive.org/download/item/a", "downgrade"),
+            ("http://mirror.example/a", "downgrade"),
             ("", "empty Location"),
             ("   ", "empty Location"),
             ("file:///etc/passwd", "Unsupported redirect scheme"),
@@ -8732,65 +7388,58 @@ mod tests {
     async fn test_prepare_output_dir_dot_returns_canonical_current_working_dir() {
         let _cwd_lock = CURRENT_DIR_LOCK.lock().await;
         let dir = TempTestDir::new("prepare-dot");
-        let _cwd_guard = CurrentDirGuard::enter(&dir.path);
+        let _cwd_guard = CurrentDirGuard::enter(dir.path());
 
         let canonical = prepare_output_dir(Path::new("."))
             .expect("prepare_output_dir('.') should resolve current working directory");
-        assert_eq!(canonical, fs::canonicalize(&dir.path).unwrap());
+        assert_eq!(canonical, fs::canonicalize(dir.path()).unwrap());
     }
 
     #[tokio::test]
     async fn test_download_files_with_policy_and_signal_writes_to_default_working_dir() {
         let _cwd_lock = CURRENT_DIR_LOCK.lock().await;
-        let dir = TempTestDir::new("default-cwd-download");
-        let _cwd_guard = CurrentDirGuard::enter(&dir.path);
+        let fx = DownloadFixture::new("default-cwd-download");
+        let _cwd_guard = CurrentDirGuard::enter(fx.path());
 
         let payload_top = b"default working directory top-level payload";
         let payload_nested = b"default working directory nested payload";
-        let md5_top = md5_hex(payload_top);
-        let md5_nested = md5_hex(payload_nested);
-
         let server = MockServer::start(vec![
             MockResponse::ok(payload_top),
             MockResponse::ok(payload_nested),
         ])
         .await;
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
 
         let files = vec![
-            (server.url("/top.bin"), "top.bin".to_string(), Some(md5_top)),
+            (
+                server.url("/top.bin"),
+                "top.bin".to_string(),
+                Some(md5_hex(payload_top)),
+            ),
             (
                 server.url("/nested.bin"),
                 "sub/nested.bin".to_string(),
-                Some(md5_nested),
+                Some(md5_hex(payload_nested)),
             ),
         ];
 
         let summary = download_files_with_policy_and_signal(
-            &client,
+            &fx.client,
             files,
             2,
             None,
             &RetryPolicy::default(),
-            &signal,
+            &fx.signal,
         )
         .await
         .expect("default working directory download should succeed");
 
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 2);
+        assert_eq!(server.finish().await.len(), 2);
         assert_eq!(summary.ok, 2);
         assert_eq!(summary.skipped, 0);
         assert!(summary.failed.is_empty());
         assert!(!summary.interrupted);
-        assert_eq!(fs::read(dir.join("top.bin")).unwrap(), payload_top);
-        assert_eq!(
-            fs::read(dir.join("sub/nested.bin")).unwrap(),
-            payload_nested
-        );
-        assert!(!dir.part_path("top.bin").exists());
-        assert!(!dir.part_path("sub/nested.bin").exists());
+        fx.assert_downloaded("top.bin", payload_top);
+        fx.assert_downloaded("sub/nested.bin", payload_nested);
     }
 
     #[test]
@@ -8818,10 +7467,6 @@ mod tests {
         let payload_top = b"top-level archive file";
         let payload_deep = b"deeply nested archive binary payload";
         let payload_sibling = b"second nested archive file";
-        let md5_top = md5_hex(payload_top);
-        let md5_deep = md5_hex(payload_deep);
-        let md5_sibling = md5_hex(payload_sibling);
-
         let server = MockServer::start(vec![
             MockResponse::ok(payload_top),
             MockResponse::ok(payload_deep),
@@ -8832,16 +7477,20 @@ mod tests {
         let signal = ShutdownSignal::new();
 
         let files = vec![
-            (server.url("/top.txt"), "top.txt".to_string(), Some(md5_top)),
+            (
+                server.url("/top.txt"),
+                "top.txt".to_string(),
+                Some(md5_hex(payload_top)),
+            ),
             (
                 server.url("/dir1/sub/file.bin"),
                 "dir1/sub/file.bin".to_string(),
-                Some(md5_deep),
+                Some(md5_hex(payload_deep)),
             ),
             (
                 server.url("/dir2/data.bin"),
                 "dir2/data.bin".to_string(),
-                Some(md5_sibling),
+                Some(md5_hex(payload_sibling)),
             ),
         ];
 
@@ -8857,30 +7506,17 @@ mod tests {
         .await
         .expect("download_files_in_dir should create missing nested output dir");
 
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 3);
+        assert_eq!(server.finish().await.len(), 3);
         assert!(output_dir.is_dir());
         assert_eq!(summary.ok, 3);
         assert_eq!(summary.skipped, 0);
         assert!(summary.failed.is_empty());
         assert!(!summary.interrupted);
+        assert_downloaded_file(&output_dir, "top.txt", payload_top);
+        assert_downloaded_file(&output_dir, "dir1/sub/file.bin", payload_deep);
+        assert_downloaded_file(&output_dir, "dir2/data.bin", payload_sibling);
 
-        assert_eq!(fs::read(output_dir.join("top.txt")).unwrap(), payload_top);
-        assert_eq!(
-            fs::read(output_dir.join("dir1/sub/file.bin")).unwrap(),
-            payload_deep
-        );
-        assert_eq!(
-            fs::read(output_dir.join("dir2/data.bin")).unwrap(),
-            payload_sibling
-        );
-        assert!(!output_dir.join(part_file_path("top.txt")).exists());
-        assert!(!output_dir
-            .join(part_file_path("dir1/sub/file.bin"))
-            .exists());
-        assert!(!output_dir.join(part_file_path("dir2/data.bin")).exists());
-
-        let sandbox_entries: Vec<OsString> = fs::read_dir(&sandbox.path)
+        let sandbox_entries: Vec<OsString> = fs::read_dir(sandbox.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
@@ -8889,37 +7525,52 @@ mod tests {
             vec![OsString::from("downloads")],
             "nothing should be written outside the target output directory"
         );
-        assert!(!sandbox.join("top.txt").exists());
-        assert!(!sandbox.join("dir1").exists());
     }
 
     #[tokio::test]
     async fn test_prepare_output_dir_and_download_reject_invalid_paths_with_zero_requests() {
         let sandbox = TempTestDir::new("invalid-output-paths");
-        let existing_file = sandbox.join("existing.txt");
-        fs::write(&existing_file, b"untouched-regular-file").unwrap();
+        let existing_file = sandbox.write("existing.txt", b"untouched-regular-file");
         let file_ancestor = existing_file.join("sub");
         let empty_path = PathBuf::from("");
+
+        let mut cases: Vec<(&str, PathBuf, Option<&str>)> = vec![
+            ("existing-file", existing_file.clone(), None),
+            ("file-ancestor", file_ancestor, None),
+            ("empty-path", empty_path, None),
+        ];
+
+        #[cfg(unix)]
+        let missing_symlink_target = {
+            use std::os::unix::fs::symlink;
+            let missing_target = sandbox.join("missing-target");
+            let broken_link = sandbox.join("broken-out");
+            symlink(&missing_target, &broken_link).unwrap();
+            cases.push(("broken-symlink", broken_link, Some("broken symlink")));
+            missing_target
+        };
 
         let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
 
-        for (label, bad_path) in [
-            ("existing-file", &existing_file),
-            ("file-ancestor", &file_ancestor),
-            ("empty-path", &empty_path),
-        ] {
-            let prep_err = prepare_output_dir(bad_path).unwrap_err();
+        for (label, bad_path, expected_substr) in cases {
+            let prep_err = prepare_output_dir(&bad_path).unwrap_err();
             assert!(
                 matches!(prep_err, IaGetError::FileSystem(_)),
                 "case {label}: expected FileSystem error from prepare_output_dir, got {prep_err:?}"
             );
+            if let Some(substr) = expected_substr {
+                assert!(
+                    prep_err.to_string().contains(substr),
+                    "case {label}: expected '{substr}' in '{prep_err}'"
+                );
+            }
 
             let server =
                 MockServer::start(vec![MockResponse::ok(b"must never be requested")]).await;
             let dl_err = download_files_in_dir(
                 &client,
-                bad_path,
+                &bad_path,
                 vec![(server.url("/file.bin"), "file.bin".to_string(), None)],
                 1,
                 None,
@@ -8928,67 +7579,19 @@ mod tests {
             )
             .await
             .unwrap_err();
-            let requests = server.abort_and_collect().await;
-
             assert!(
                 matches!(dl_err, IaGetError::FileSystem(_)),
                 "case {label}: expected FileSystem error from download_files_in_dir, got {dl_err:?}"
             );
             assert!(
-                requests.is_empty(),
+                server.abort().await.is_empty(),
                 "case {label}: expected 0 HTTP requests for invalid output path"
             );
         }
 
         assert_eq!(fs::read(&existing_file).unwrap(), b"untouched-regular-file");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_unix_prepare_output_dir_and_download_reject_broken_symlink_with_zero_requests() {
-        use std::os::unix::fs::symlink;
-
-        let sandbox = TempTestDir::new("broken-output-symlink");
-        let missing_target = sandbox.join("missing-target");
-        let broken_link = sandbox.join("broken-out");
-        symlink(&missing_target, &broken_link).unwrap();
-
-        let prep_err = prepare_output_dir(&broken_link).unwrap_err();
-        assert!(
-            matches!(prep_err, IaGetError::FileSystem(_)),
-            "expected FileSystem error for broken symlink, got {prep_err:?}"
-        );
-        assert!(
-            prep_err.to_string().contains("broken symlink"),
-            "unexpected error message: {prep_err}"
-        );
-
-        let server = MockServer::start(vec![MockResponse::ok(b"must never be requested")]).await;
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        let dl_err = download_files_in_dir(
-            &client,
-            &broken_link,
-            vec![(server.url("/file.bin"), "file.bin".to_string(), None)],
-            1,
-            None,
-            &RetryPolicy::default(),
-            &signal,
-        )
-        .await
-        .unwrap_err();
-        let requests = server.abort_and_collect().await;
-
-        assert!(
-            matches!(dl_err, IaGetError::FileSystem(_)),
-            "expected FileSystem error from download_files_in_dir, got {dl_err:?}"
-        );
-        assert!(
-            requests.is_empty(),
-            "broken symlink output path must send 0 HTTP requests"
-        );
-        assert!(!missing_target.exists());
+        #[cfg(unix)]
+        assert!(!missing_symlink_target.exists());
     }
 
     #[cfg(unix)]
@@ -9005,7 +7608,6 @@ mod tests {
 
         let outside_victim = outside_dir.join("victim.bin");
         fs::write(&outside_victim, b"untouched-outside-victim").unwrap();
-
         symlink(&outside_dir, output_dir.join("escape_dir")).unwrap();
         symlink(&outside_victim, output_dir.join("escape_file.bin")).unwrap();
 
@@ -9020,7 +7622,6 @@ mod tests {
         ));
 
         let safe_payload = b"safe sibling downloaded inside output-dir";
-        let safe_md5 = md5_hex(safe_payload);
         let server = MockServer::start(vec![MockResponse::ok(safe_payload)]).await;
         let client = http_client_builder().build().unwrap();
         let signal = ShutdownSignal::new();
@@ -9039,7 +7640,7 @@ mod tests {
             (
                 server.url("/safe.bin"),
                 "safe/sibling.bin".to_string(),
-                Some(safe_md5),
+                Some(md5_hex(safe_payload)),
             ),
         ];
 
@@ -9056,33 +7657,21 @@ mod tests {
         .expect("batch with escaped entries should return summary");
 
         let requests = server.finish().await;
-        assert_eq!(
-            requests.len(),
-            1,
-            "escaped entries must send 0 HTTP requests; only safe sibling should be fetched"
-        );
+        assert_eq!(requests.len(), 1);
         assert!(requests[0].request_line.starts_with("GET /safe.bin "));
-
         assert_eq!(summary.ok, 1);
         assert_eq!(summary.skipped, 0);
         assert!(!summary.interrupted);
         assert_eq!(summary.failed.len(), 2);
-        assert_eq!(summary.failed[0].file_path, "escape_dir/payload.bin");
-        assert!(
-            summary.failed[0]
+        for (idx, path) in ["escape_dir/payload.bin", "escape_file.bin"]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(summary.failed[idx].file_path, path);
+            assert!(summary.failed[idx]
                 .error
-                .starts_with("File operation failed:"),
-            "expected FileSystem error display, got: {}",
-            summary.failed[0].error
-        );
-        assert_eq!(summary.failed[1].file_path, "escape_file.bin");
-        assert!(
-            summary.failed[1]
-                .error
-                .starts_with("File operation failed:"),
-            "expected FileSystem error display, got: {}",
-            summary.failed[1].error
-        );
+                .starts_with("File operation failed:"));
+        }
 
         assert!(!outside_dir.join("payload.bin").exists());
         assert!(!outside_dir.join("payload.bin.part").exists());
@@ -9090,82 +7679,7 @@ mod tests {
             fs::read(&outside_victim).unwrap(),
             b"untouched-outside-victim"
         );
-        assert_eq!(
-            fs::read(output_dir.join("safe/sibling.bin")).unwrap(),
-            safe_payload
-        );
-        assert!(!output_dir.join(part_file_path("safe/sibling.bin")).exists());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_unix_prepare_output_dir_allows_symlinked_output_dir_while_inner_escapes_fail() {
-        use std::os::unix::fs::symlink;
-
-        let sandbox = TempTestDir::new("symlinked-output-dir");
-        let real_out = sandbox.join("real_out");
-        let link_out = sandbox.join("link_out");
-        let outside_dir = sandbox.join("outside");
-        fs::create_dir_all(&real_out).unwrap();
-        fs::create_dir_all(&outside_dir).unwrap();
-        symlink(&real_out, &link_out).unwrap();
-        symlink(&outside_dir, real_out.join("escape_dir")).unwrap();
-
-        let canonical = prepare_output_dir(&link_out)
-            .expect("symlinked --output-dir pointing to an existing directory should succeed");
-        assert_eq!(canonical, fs::canonicalize(&real_out).unwrap());
-
-        assert!(matches!(
-            validate_contained_path(&canonical, Path::new("escape_dir/bad.bin"), true),
-            Err(IaGetError::FileSystem(_))
-        ));
-
-        let safe_payload = b"downloaded via symlinked output-dir";
-        let safe_md5 = md5_hex(safe_payload);
-        let server = MockServer::start(vec![MockResponse::ok(safe_payload)]).await;
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        let files = vec![
-            (
-                server.url("/bad.bin"),
-                "escape_dir/bad.bin".to_string(),
-                None,
-            ),
-            (
-                server.url("/good.bin"),
-                "nested/good.bin".to_string(),
-                Some(safe_md5),
-            ),
-        ];
-
-        let summary = download_files_in_dir(
-            &client,
-            &link_out,
-            files,
-            2,
-            None,
-            &RetryPolicy::default(),
-            &signal,
-        )
-        .await
-        .expect("batch into symlinked output-dir should return summary");
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].request_line.starts_with("GET /good.bin "));
-        assert_eq!(summary.ok, 1);
-        assert_eq!(summary.failed.len(), 1);
-        assert_eq!(summary.failed[0].file_path, "escape_dir/bad.bin");
-        assert!(summary.failed[0]
-            .error
-            .starts_with("File operation failed:"));
-        assert!(!outside_dir.join("bad.bin").exists());
-        assert_eq!(
-            fs::read(real_out.join("nested/good.bin")).unwrap(),
-            safe_payload
-        );
-        assert!(!real_out.join(part_file_path("nested/good.bin")).exists());
+        assert_downloaded_file(&output_dir, "safe/sibling.bin", safe_payload);
     }
 
     #[cfg(unix)]
@@ -9368,23 +7882,16 @@ mod tests {
         );
         assert_eq!(limiter.delay_for_chunk(512, t1), Duration::from_millis(500));
 
-        // Zero rate returns Duration::ZERO without dividing by zero or panicking.
-        let mut zero_rate = RateLimiter::with_start(0, t0);
-        assert_eq!(zero_rate.delay_for_chunk(0, t0), Duration::ZERO);
-        assert_eq!(zero_rate.delay_for_chunk(1024, t0), Duration::ZERO);
-    }
-
-    #[test]
-    fn test_rate_limiter_single_chunk_exact_duration() {
-        let t0 = Instant::now();
-        let mut limiter = RateLimiter::with_start(1024, t0);
-        assert_eq!(limiter.delay_for_chunk(512, t0), Duration::from_millis(500));
-
         let mut limiter_100k = RateLimiter::with_start(100_000, t0);
         assert_eq!(
             limiter_100k.delay_for_chunk(25_000, t0),
             Duration::from_millis(250)
         );
+
+        // Zero rate returns Duration::ZERO without dividing by zero or panicking.
+        let mut zero_rate = RateLimiter::with_start(0, t0);
+        assert_eq!(zero_rate.delay_for_chunk(0, t0), Duration::ZERO);
+        assert_eq!(zero_rate.delay_for_chunk(1024, t0), Duration::ZERO);
     }
 
     #[test]
@@ -9485,37 +7992,32 @@ mod tests {
         let payload: Vec<u8> = (0..(40 * 1024)).map(|i| (i % 251) as u8).collect();
         let expected_md5 = md5_hex(&payload);
         let server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
-        let client = http_client_builder().build().unwrap();
-        let temp_dir = TempTestDir::new("rate-limit-throttled");
-        let signal = ShutdownSignal::new();
+        let fx = DownloadFixture::new("rate-limit-throttled");
         let options = DownloadOptions {
             retry_policy: RetryPolicy::default(),
             limit_rate: Some(parse_rate_limit("100K").unwrap()),
             verbose: false,
         };
 
-        let files = vec![(
-            server.url("/throttled.bin"),
-            "throttled.bin".to_string(),
-            Some(expected_md5.clone()),
-        )];
-
         let started = Instant::now();
         let summary = download_files_in_dir_with_options(
-            &client,
-            &temp_dir.path,
-            files,
+            &fx.client,
+            fx.path(),
+            vec![(
+                server.url("/throttled.bin"),
+                "throttled.bin".to_string(),
+                Some(expected_md5),
+            )],
             1,
             None,
             &options,
-            &signal,
+            &fx.signal,
         )
         .await
         .expect("throttled download should succeed");
         let elapsed = started.elapsed();
 
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 1);
+        assert_eq!(server.finish().await.len(), 1);
         assert_eq!(summary.ok, 1);
         assert_eq!(summary.skipped, 0);
         assert!(summary.failed.is_empty());
@@ -9524,74 +8026,22 @@ mod tests {
             elapsed >= Duration::from_millis(320),
             "40 KiB at 100 KiB/s (~400ms expected) completed too quickly: {elapsed:?}"
         );
-
-        let saved = fs::read(temp_dir.join("throttled.bin")).unwrap();
-        assert_eq!(saved, payload);
-        assert_eq!(md5_hex(&saved), expected_md5);
-        assert!(!temp_dir.part_path("throttled.bin").exists());
-    }
-
-    #[tokio::test]
-    async fn test_download_files_unthrottled_completes_with_intact_content_and_md5() {
-        let payload: Vec<u8> = (0..(40 * 1024)).map(|i| ((i * 7) % 251) as u8).collect();
-        let expected_md5 = md5_hex(&payload);
-        let server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
-        let client = http_client_builder().build().unwrap();
-        let temp_dir = TempTestDir::new("rate-limit-unthrottled");
-        let signal = ShutdownSignal::new();
-        let options = DownloadOptions {
-            retry_policy: RetryPolicy::default(),
-            limit_rate: None,
-            verbose: false,
-        };
-
-        let files = vec![(
-            server.url("/unthrottled.bin"),
-            "unthrottled.bin".to_string(),
-            Some(expected_md5.clone()),
-        )];
-
-        let summary = download_files_in_dir_with_options(
-            &client,
-            &temp_dir.path,
-            files,
-            1,
-            None,
-            &options,
-            &signal,
-        )
-        .await
-        .expect("unthrottled download should succeed");
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 1);
-        assert_eq!(summary.ok, 1);
-        assert_eq!(summary.skipped, 0);
-        assert!(summary.failed.is_empty());
-        assert!(!summary.interrupted);
-
-        let saved = fs::read(temp_dir.join("unthrottled.bin")).unwrap();
-        assert_eq!(saved, payload);
-        assert_eq!(md5_hex(&saved), expected_md5);
-        assert!(!temp_dir.part_path("unthrottled.bin").exists());
+        fx.assert_downloaded("throttled.bin", &payload);
     }
 
     #[tokio::test]
     async fn test_download_files_with_rate_limit_interrupts_immediately_on_shutdown_signal() {
         let payload: Vec<u8> = (0..(16 * 1024)).map(|i| (i % 239) as u8).collect();
-        let expected_md5 = md5_hex(&payload);
         let server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
-        let client = http_client_builder().build().unwrap();
-        let temp_dir = TempTestDir::new("rate-limit-interrupt");
-        let signal = ShutdownSignal::new();
+        let fx = DownloadFixture::new("rate-limit-interrupt");
         let options = DownloadOptions {
             retry_policy: RetryPolicy::default(),
             limit_rate: Some(parse_rate_limit("1K").unwrap()),
             verbose: false,
         };
 
-        let part_path = temp_dir.part_path("interrupted.bin");
-        let trigger_signal = signal.clone();
+        let part_path = fx.part_path("interrupted.bin");
+        let trigger_signal = fx.signal.clone();
         let watch_part = part_path.clone();
         let trigger_task = tokio::spawn(async move {
             let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
@@ -9608,28 +8058,26 @@ mod tests {
             trigger_signal.trigger();
         });
 
-        let files = vec![(
-            server.url("/interrupted.bin"),
-            "interrupted.bin".to_string(),
-            Some(expected_md5),
-        )];
-
         let started = Instant::now();
         let summary = download_files_in_dir_with_options(
-            &client,
-            &temp_dir.path,
-            files,
+            &fx.client,
+            fx.path(),
+            vec![(
+                server.url("/interrupted.bin"),
+                "interrupted.bin".to_string(),
+                Some(md5_hex(&payload)),
+            )],
             1,
             None,
             &options,
-            &signal,
+            &fx.signal,
         )
         .await
         .expect("interrupted throttled batch should return summary");
         let elapsed = started.elapsed();
 
         let _ = trigger_task.await;
-        let _requests = server.abort_and_collect().await;
+        let _requests = server.abort().await;
 
         assert!(
             elapsed < Duration::from_secs(2),
@@ -9639,7 +8087,7 @@ mod tests {
         assert_eq!(summary.ok, 0);
         assert_eq!(summary.skipped, 0);
         assert!(summary.failed.is_empty());
-        assert!(!temp_dir.join("interrupted.bin").exists());
+        assert!(!fx.join("interrupted.bin").exists());
 
         let retained = fs::read(&part_path).expect(".part file must remain on disk");
         assert!(!retained.is_empty(), ".part file must retain written bytes");
@@ -9653,45 +8101,35 @@ mod tests {
         let remainder_len = 20 * 1024usize;
         let total_len = prefix_len + remainder_len;
         let payload: Vec<u8> = (0..total_len).map(|i| ((i * 13) % 251) as u8).collect();
-        let expected_md5 = md5_hex(&payload);
 
-        let content_range = format!("bytes {prefix_len}-{}/{total_len}", total_len - 1);
-        let server = MockServer::start(vec![MockResponse::with_headers(
-            "206 Partial Content",
-            vec![
-                ("Content-Range", content_range),
-                ("Content-Length", remainder_len.to_string()),
-            ],
+        let server = MockServer::start(vec![MockResponse::partial_content(
+            prefix_len as u64,
+            total_len as u64,
             &payload[prefix_len..],
         )])
         .await;
 
-        let client = http_client_builder().build().unwrap();
-        let temp_dir = TempTestDir::new("rate-limit-resume");
-        fs::write(temp_dir.part_path("resumed.bin"), &payload[..prefix_len]).unwrap();
-
-        let signal = ShutdownSignal::new();
+        let fx = DownloadFixture::new("rate-limit-resume");
+        fx.write_part("resumed.bin", &payload[..prefix_len]);
         let options = DownloadOptions {
             retry_policy: RetryPolicy::default(),
             limit_rate: Some(parse_rate_limit("100K").unwrap()),
             verbose: false,
         };
 
-        let files = vec![(
-            server.url("/resumed.bin"),
-            "resumed.bin".to_string(),
-            Some(expected_md5.clone()),
-        )];
-
         let started = Instant::now();
         let summary = download_files_in_dir_with_options(
-            &client,
-            &temp_dir.path,
-            files,
+            &fx.client,
+            fx.path(),
+            vec![(
+                server.url("/resumed.bin"),
+                "resumed.bin".to_string(),
+                Some(md5_hex(&payload)),
+            )],
             1,
             None,
             &options,
-            &signal,
+            &fx.signal,
         )
         .await
         .expect("resumed throttled download should succeed");
@@ -9703,7 +8141,6 @@ mod tests {
             requests[0].header("Range"),
             Some(format!("bytes={prefix_len}-").as_str())
         );
-
         assert_eq!(summary.ok, 1);
         assert_eq!(summary.skipped, 0);
         assert!(summary.failed.is_empty());
@@ -9716,233 +8153,135 @@ mod tests {
             elapsed < Duration::from_millis(1000),
             "pacing must apply only to the 20 KiB remainder (~200ms), not the 140 KiB full file (~1400ms): {elapsed:?}"
         );
-
-        let saved = fs::read(temp_dir.join("resumed.bin")).unwrap();
-        assert_eq!(saved, payload);
-        assert_eq!(md5_hex(&saved), expected_md5);
-        assert!(!temp_dir.part_path("resumed.bin").exists());
+        fx.assert_downloaded("resumed.bin", &payload);
     }
 
     #[test]
-    fn proxy_config_prefers_lowercase_without_falling_back_to_uppercase() {
-        let lookup = |name: &str| match name {
-            "http_proxy" => Some(String::new()),
-            "HTTP_PROXY" => Some("http://upper-http.example.com:8080".to_string()),
-            "https_proxy" => Some("   ".to_string()),
-            "HTTPS_PROXY" => Some("https://upper-https.example.com:8443".to_string()),
-            "all_proxy" => Some("  socks5h://127.0.0.1:1080  ".to_string()),
-            "ALL_PROXY" => Some("socks5://upper-all.example.com:1080".to_string()),
-            "no_proxy" => Some(String::new()),
-            "NO_PROXY" => Some("archive.org".to_string()),
-            _ => None,
-        };
-
-        let config = ProxyConfig::from_lookup(lookup).unwrap();
-        assert_eq!(config.http_proxy, None);
-        assert_eq!(config.https_proxy, None);
-        assert_eq!(
-            config.all_proxy,
-            Some(Url::parse("socks5h://127.0.0.1:1080").unwrap())
-        );
-        assert_eq!(config.no_proxy, None);
-    }
-
-    #[test]
-    fn proxy_config_falls_back_to_uppercase_when_lowercase_unset() {
-        let lookup = |name: &str| match name {
-            "HTTP_PROXY" => Some("http://proxy.example.com:8080".to_string()),
-            "HTTPS_PROXY" => Some("https://secure.example.com:8443".to_string()),
-            "ALL_PROXY" => Some("socks5://127.0.0.1:1080".to_string()),
-            "NO_PROXY" => Some(" localhost, .archive.org ".to_string()),
-            _ => None,
-        };
-
-        let config = ProxyConfig::from_lookup(lookup).unwrap();
-        assert_eq!(
-            config.http_proxy,
-            Some(Url::parse("http://proxy.example.com:8080").unwrap())
-        );
-        assert_eq!(
-            config.https_proxy,
-            Some(Url::parse("https://secure.example.com:8443").unwrap())
-        );
-        assert_eq!(
-            config.all_proxy,
-            Some(Url::parse("socks5://127.0.0.1:1080").unwrap())
-        );
-        assert_eq!(config.no_proxy.as_deref(), Some("localhost, .archive.org"));
-    }
-
-    #[test]
-    fn proxy_config_accepts_all_supported_schemes_and_builds_client() {
-        for raw in [
-            "http://127.0.0.1:8080",
-            "https://127.0.0.1:8443",
-            "socks4://127.0.0.1:1080",
-            "socks4a://127.0.0.1:1080",
-            "socks5://127.0.0.1:1080",
-            "socks5h://user:pass@127.0.0.1:1080",
-        ] {
-            let config = ProxyConfig::from_lookup(|name| {
-                if name == "ALL_PROXY" {
-                    Some(raw.to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|err| panic!("expected '{raw}' to be valid, got {err}"));
-
-            http_client_builder_with_proxy(&config)
-                .unwrap_or_else(|err| panic!("builder failed for '{raw}': {err}"))
-                .build()
-                .unwrap_or_else(|err| panic!("client build failed for '{raw}': {err}"));
+    fn proxy_config_env_precedence_and_empty_values() {
+        struct ProxyEnvCase<'a> {
+            label: &'a str,
+            vars: &'a [(&'a str, &'a str)],
+            http: Option<&'a str>,
+            https: Option<&'a str>,
+            all: Option<&'a str>,
+            no_proxy: Option<&'a str>,
         }
-    }
 
-    #[test]
-    fn proxy_config_rejects_invalid_urls_and_redacts_credentials() {
-        let invalid_cases = [
-            ("HTTP_PROXY", "proxy.example.com:8080", None),
-            (
-                "HTTP_PROXY",
-                "user:topsecret@proxy.example.com:8080",
-                Some("topsecret"),
-            ),
-            (
-                "HTTPS_PROXY",
-                "ftp://alice:s3cr3t@proxy.example.com:21",
-                Some("s3cr3t"),
-            ),
-            ("ALL_PROXY", "socks://127.0.0.1:1080", None),
-            (
-                "HTTP_PROXY",
-                "http://user:pw@proxy.example.com:0",
-                Some("pw"),
-            ),
-            ("ALL_PROXY", "socks5://:1080", None),
-            ("ALL_PROXY", "socks5:///path", None),
-            (
-                "HTTP_PROXY",
-                "http://user:hunter2@proxy host:8080",
-                Some("hunter2"),
-            ),
-            (
-                "HTTP_PROXY",
-                "http://user:hidden@proxy.example.com:8080\0",
-                Some("hidden"),
-            ),
-            ("HTTP_PROXY", "http:example.com/a://b", None),
+        let cases = [
+            ProxyEnvCase {
+                label: "unset",
+                vars: &[],
+                http: None,
+                https: None,
+                all: None,
+                no_proxy: None,
+            },
+            ProxyEnvCase {
+                label: "whitespace-only",
+                vars: &[
+                    ("HTTP_PROXY", ""),
+                    ("HTTPS_PROXY", "   "),
+                    ("ALL_PROXY", "\t \n"),
+                    ("NO_PROXY", "  \t "),
+                ],
+                http: None,
+                https: None,
+                all: None,
+                no_proxy: None,
+            },
+            ProxyEnvCase {
+                label: "empty-lowercase-blocks-uppercase-fallback",
+                vars: &[
+                    ("http_proxy", ""),
+                    ("HTTP_PROXY", "http://upper-http.example.com:8080"),
+                    ("https_proxy", "   "),
+                    ("HTTPS_PROXY", "https://upper-https.example.com:8443"),
+                    ("all_proxy", "  socks5h://127.0.0.1:1080  "),
+                    ("ALL_PROXY", "socks5://upper-all.example.com:1080"),
+                    ("no_proxy", ""),
+                    ("NO_PROXY", "archive.org"),
+                ],
+                http: None,
+                https: None,
+                all: Some("socks5h://127.0.0.1:1080"),
+                no_proxy: None,
+            },
+            ProxyEnvCase {
+                label: "uppercase-fallback-when-lowercase-unset",
+                vars: &[
+                    ("HTTP_PROXY", "http://proxy.example.com:8080"),
+                    ("HTTPS_PROXY", "https://secure.example.com:8443"),
+                    ("ALL_PROXY", "socks5://127.0.0.1:1080"),
+                    ("NO_PROXY", " localhost, .archive.org "),
+                ],
+                http: Some("http://proxy.example.com:8080"),
+                https: Some("https://secure.example.com:8443"),
+                all: Some("socks5://127.0.0.1:1080"),
+                no_proxy: Some("localhost, .archive.org"),
+            },
+            ProxyEnvCase {
+                label: "non-empty-lowercase-overrides-uppercase",
+                vars: &[
+                    ("http_proxy", "http://lower-http.example:8080"),
+                    ("HTTP_PROXY", "http://upper-http.example:8080"),
+                    ("https_proxy", "https://lower-https.example:8443"),
+                    ("HTTPS_PROXY", "https://upper-https.example:8443"),
+                    ("all_proxy", "socks5://lower-all.example:1080"),
+                    ("ALL_PROXY", "socks5://upper-all.example:1080"),
+                    ("no_proxy", "127.0.0.1,localhost"),
+                    ("NO_PROXY", "archive.org"),
+                ],
+                http: Some("http://lower-http.example:8080"),
+                https: Some("https://lower-https.example:8443"),
+                all: Some("socks5://lower-all.example:1080"),
+                no_proxy: Some("127.0.0.1,localhost"),
+            },
         ];
 
-        for (var_name, raw, secret) in invalid_cases {
-            let err = ProxyConfig::from_lookup(|name| {
-                if name == var_name {
-                    Some(raw.to_string())
-                } else {
-                    None
-                }
-            })
-            .expect_err(&format!("expected '{raw}' to fail"));
-
-            let rendered = err.to_string();
-            match &err {
-                IaGetError::InvalidProxy { var, value, .. } => {
-                    assert_eq!(var, var_name);
-                    if let Some(secret) = secret {
-                        assert!(!value.contains(secret), "secret leaked in value: {value}");
-                        assert!(
-                            value.contains("<redacted>@"),
-                            "expected redaction marker in value: {value}"
-                        );
-                        assert!(
-                            !rendered.contains(secret),
-                            "secret leaked in Display: {rendered}"
-                        );
-                    }
-                }
-                other => panic!("expected InvalidProxy for '{raw}', got {other:?}"),
+        for case in cases {
+            let config = proxy_config_from_vars(case.vars).unwrap();
+            assert_eq!(
+                config.http_proxy,
+                case.http.map(|u| Url::parse(u).unwrap()),
+                "{}",
+                case.label
+            );
+            assert_eq!(
+                config.https_proxy,
+                case.https.map(|u| Url::parse(u).unwrap()),
+                "{}",
+                case.label
+            );
+            assert_eq!(
+                config.all_proxy,
+                case.all.map(|u| Url::parse(u).unwrap()),
+                "{}",
+                case.label
+            );
+            assert_eq!(config.no_proxy.as_deref(), case.no_proxy, "{}", case.label);
+            if case.http.is_none()
+                && case.https.is_none()
+                && case.all.is_none()
+                && case.no_proxy.is_none()
+            {
+                assert_eq!(config, ProxyConfig::default(), "{}", case.label);
+                http_client_builder_with_proxy(&config)
+                    .unwrap()
+                    .build()
+                    .unwrap();
             }
         }
     }
 
-    #[cfg(unix)]
     #[test]
-    fn proxy_config_rejects_non_utf8_os_value() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let err = ProxyConfig::from_os_lookup(|name| match name {
-            "http_proxy" => Some(OsString::from_vec(vec![0xff, 0xfe])),
-            "HTTP_PROXY" => Some(OsString::from("http://127.0.0.1:8080")),
-            _ => None,
-        })
-        .expect_err("non-UTF-8 http_proxy must fail without falling back");
-
-        match err {
-            IaGetError::InvalidProxy { var, value, .. } => {
-                assert_eq!(var, "http_proxy");
-                assert_eq!(value, "<non-UTF-8>");
-            }
-            other => panic!("expected InvalidProxy, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn proxy_config_empty_and_whitespace_only_env_produces_direct_client() {
-        let empty = ProxyConfig::from_lookup(|_| None).unwrap();
-        assert_eq!(empty, ProxyConfig::default());
-        http_client_builder_with_proxy(&empty)
-            .expect("empty proxy config should build client builder")
-            .build()
-            .expect("empty proxy config should build direct client");
-
-        let whitespace_only = ProxyConfig::from_lookup(|name| match name {
-            "HTTP_PROXY" => Some(String::new()),
-            "HTTPS_PROXY" => Some("   ".to_string()),
-            "ALL_PROXY" => Some("\t \n".to_string()),
-            "NO_PROXY" => Some("  \t ".to_string()),
-            _ => None,
-        })
-        .unwrap();
-        assert_eq!(whitespace_only, ProxyConfig::default());
-        http_client_builder_with_proxy(&whitespace_only)
-            .expect("whitespace-only proxy config should build client builder")
-            .build()
-            .expect("whitespace-only proxy config should build direct client");
-    }
-
-    #[test]
-    fn proxy_config_non_empty_lowercase_overrides_uppercase_for_all_vars() {
-        let config = ProxyConfig::from_lookup(|name| match name {
-            "http_proxy" => Some("http://lower-http.example:8080".to_string()),
-            "HTTP_PROXY" => Some("http://upper-http.example:8080".to_string()),
-            "https_proxy" => Some("https://lower-https.example:8443".to_string()),
-            "HTTPS_PROXY" => Some("https://upper-https.example:8443".to_string()),
-            "all_proxy" => Some("socks5://lower-all.example:1080".to_string()),
-            "ALL_PROXY" => Some("socks5://upper-all.example:1080".to_string()),
-            "no_proxy" => Some("127.0.0.1,localhost".to_string()),
-            "NO_PROXY" => Some("archive.org".to_string()),
-            _ => None,
-        })
-        .unwrap();
-
-        assert_eq!(
-            config.http_proxy,
-            Some(Url::parse("http://lower-http.example:8080").unwrap())
-        );
-        assert_eq!(
-            config.https_proxy,
-            Some(Url::parse("https://lower-https.example:8443").unwrap())
-        );
-        assert_eq!(
-            config.all_proxy,
-            Some(Url::parse("socks5://lower-all.example:1080").unwrap())
-        );
-        assert_eq!(config.no_proxy.as_deref(), Some("127.0.0.1,localhost"));
-    }
-
-    #[test]
-    fn proxy_config_accepts_case_insensitive_schemes_ipv6_credentials_and_omitted_socks_port() {
+    fn proxy_config_accepts_supported_schemes_ipv6_credentials_and_omitted_ports() {
         let valid_cases = [
+            ("http://127.0.0.1:8080", "http"),
+            ("https://127.0.0.1:8443", "https"),
+            ("socks4://127.0.0.1:1080", "socks4"),
+            ("socks4a://127.0.0.1:1080", "socks4a"),
+            ("socks5://127.0.0.1:1080", "socks5"),
+            ("socks5h://user:pass@127.0.0.1:1080", "socks5h"),
             ("HTTP://127.0.0.1:8080", "http"),
             ("HTTPS://127.0.0.1:8443", "https"),
             ("SOCKS4://127.0.0.1:1080", "socks4"),
@@ -9963,18 +8302,12 @@ mod tests {
         ];
 
         for (raw, expected_scheme) in valid_cases {
-            let config = ProxyConfig::from_lookup(|name| {
-                if name == "ALL_PROXY" {
-                    Some(raw.to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|err| panic!("expected '{raw}' to be valid, got {err}"));
-
-            let parsed = config.all_proxy.as_ref().expect("all_proxy should be set");
-            assert_eq!(parsed.scheme(), expected_scheme);
-
+            let config = proxy_config_from_vars(&[("ALL_PROXY", raw)])
+                .unwrap_or_else(|err| panic!("expected '{raw}' to be valid, got {err}"));
+            assert_eq!(
+                config.all_proxy.as_ref().expect("all_proxy set").scheme(),
+                expected_scheme
+            );
             http_client_builder_with_proxy(&config)
                 .unwrap_or_else(|err| panic!("builder failed for '{raw}': {err}"))
                 .build()
@@ -9983,58 +8316,108 @@ mod tests {
     }
 
     #[test]
-    fn proxy_config_rejects_additional_malformed_urls_and_redacts_complex_credentials() {
-        let invalid_cases = [
-            ("HTTP_PROXY", "not-a-url", None),
-            ("HTTP_PROXY", "proxy.local:8080", None),
-            ("HTTP_PROXY", "http://", None),
-            ("HTTP_PROXY", "http://:8080", None),
-            ("ALL_PROXY", "socks5://", None),
-            ("HTTP_PROXY", "http://127.0.0.1:99999", None),
-            ("HTTPS_PROXY", "https://127.0.0.1:abc", None),
-            ("ALL_PROXY", "socks5://127.0.0.1:0", None),
-            ("HTTP_PROXY", "://bad", None),
-            ("ALL_PROXY", "socks5://127.0.0.1\t:1080", None),
+    fn proxy_config_rejects_invalid_urls_and_redacts_credentials() {
+        let invalid_cases: [(&str, &str, Option<&str>, &[&str]); 27] = [
+            ("HTTP_PROXY", "proxy.example.com:8080", None, &[]),
+            (
+                "HTTP_PROXY",
+                "user:topsecret@proxy.example.com:8080",
+                None,
+                &["topsecret"],
+            ),
+            (
+                "HTTPS_PROXY",
+                "ftp://alice:s3cr3t@proxy.example.com:21",
+                None,
+                &["s3cr3t"],
+            ),
+            ("ALL_PROXY", "socks://127.0.0.1:1080", None, &[]),
+            (
+                "HTTP_PROXY",
+                "http://user:pw@proxy.example.com:0",
+                None,
+                &["pw"],
+            ),
+            ("ALL_PROXY", "socks5://:1080", None, &[]),
+            ("ALL_PROXY", "socks5:///path", None, &[]),
+            (
+                "HTTP_PROXY",
+                "http://user:hunter2@proxy host:8080",
+                None,
+                &["hunter2"],
+            ),
+            (
+                "HTTP_PROXY",
+                "http://user:hidden@proxy.example.com:8080\0",
+                None,
+                &["hidden"],
+            ),
+            ("HTTP_PROXY", "http:example.com/a://b", None, &[]),
+            ("HTTP_PROXY", "not-a-url", None, &[]),
+            ("HTTP_PROXY", "proxy.local:8080", None, &[]),
+            ("HTTP_PROXY", "http://", None, &[]),
+            ("HTTP_PROXY", "http://:8080", None, &[]),
+            ("ALL_PROXY", "socks5://", None, &[]),
+            ("HTTP_PROXY", "http://127.0.0.1:99999", None, &[]),
+            ("HTTPS_PROXY", "https://127.0.0.1:abc", None, &[]),
+            ("ALL_PROXY", "socks5://127.0.0.1:0", None, &[]),
+            ("HTTP_PROXY", "://bad", None, &[]),
+            ("ALL_PROXY", "socks5://127.0.0.1\t:1080", None, &[]),
             (
                 "HTTP_PROXY",
                 "http://user:p@ssword@proxy.local:99999",
-                Some("p@ssword"),
+                None,
+                &["p@ssword"],
             ),
             (
                 "ALL_PROXY",
                 "socks5://alice:supersecret@:1080",
-                Some("supersecret"),
+                None,
+                &["supersecret"],
+            ),
+            (
+                "HTTP_PROXY",
+                "http://alice:p/ass@proxy.local:8080",
+                Some("http://<redacted>@proxy.local:8080"),
+                &["alice", "p/ass"],
+            ),
+            (
+                "HTTP_PROXY",
+                "http://alice:p?w@proxy.local:8080",
+                Some("http://<redacted>@proxy.local:8080"),
+                &["alice", "p?w"],
+            ),
+            (
+                "HTTP_PROXY",
+                "http://alice:p#w@proxy.local:8080",
+                Some("http://<redacted>@proxy.local:8080"),
+                &["alice", "p#w"],
+            ),
+            (
+                "HTTP_PROXY",
+                "alice:p/ass@proxy.local:8080",
+                Some("<redacted>@proxy.local:8080"),
+                &["alice", "p/ass"],
+            ),
+            (
+                "HTTP_PROXY",
+                "http:alice:secret@proxy.local/a://b",
+                Some("<redacted>@proxy.local/a://b"),
+                &["alice", "secret"],
             ),
         ];
 
-        for (var_name, raw, secret) in invalid_cases {
-            let err = ProxyConfig::from_lookup(|name| {
-                if name == var_name {
-                    Some(raw.to_string())
-                } else {
-                    None
-                }
-            })
-            .expect_err(&format!("expected '{raw}' to fail"));
-
-            let rendered = err.to_string();
-            match &err {
-                IaGetError::InvalidProxy { var, value, .. } => {
-                    assert_eq!(var, var_name);
-                    if let Some(secret) = secret {
-                        assert!(!value.contains(secret), "secret leaked in value: {value}");
-                        assert!(
-                            value.contains("<redacted>@"),
-                            "expected redaction marker in value: {value}"
-                        );
-                        assert!(
-                            !rendered.contains(secret),
-                            "secret leaked in Display: {rendered}"
-                        );
-                    }
-                }
-                other => panic!("expected InvalidProxy for '{raw}', got {other:?}"),
-            }
+        for (var_name, raw, expected_redacted, secrets) in invalid_cases {
+            let err = proxy_config_from_vars(&[(var_name, raw)])
+                .expect_err(&format!("expected '{raw}' to fail"));
+            assert_invalid_proxy(
+                err,
+                var_name,
+                expected_redacted,
+                secrets,
+                !secrets.is_empty(),
+                raw,
+            );
         }
 
         // Direct builder validation also rejects unsupported schemes and redacts credentials.
@@ -10044,115 +8427,47 @@ mod tests {
         };
         let err = http_client_builder_with_proxy(&direct_invalid)
             .expect_err("direct invalid scheme must be rejected");
-        let rendered = err.to_string();
-        match err {
-            IaGetError::InvalidProxy { var, value, .. } => {
-                assert_eq!(var, "HTTP_PROXY");
-                assert!(value.contains("<redacted>@"), "unexpected value: {value}");
-                assert!(!value.contains("s3cr3t"), "secret leaked in value: {value}");
-                assert!(
-                    !rendered.contains("s3cr3t"),
-                    "secret leaked in Display: {rendered}"
-                );
-            }
-            other => panic!("expected InvalidProxy, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn proxy_config_redacts_credentials_with_delimiters_and_invalid_scheme_prefixes() {
-        let cases = [
-            (
-                "http://alice:p/ass@proxy.local:8080",
-                "http://<redacted>@proxy.local:8080",
-            ),
-            (
-                "http://alice:p?w@proxy.local:8080",
-                "http://<redacted>@proxy.local:8080",
-            ),
-            (
-                "http://alice:p#w@proxy.local:8080",
-                "http://<redacted>@proxy.local:8080",
-            ),
-            (
-                "alice:p/ass@proxy.local:8080",
-                "<redacted>@proxy.local:8080",
-            ),
-            (
-                "http:alice:secret@proxy.local/a://b",
-                "<redacted>@proxy.local/a://b",
-            ),
-        ];
-        let forbidden = ["alice", "p/ass", "p?w", "p#w", "secret"];
-
-        for (raw, expected_redacted) in cases {
-            let err = ProxyConfig::from_lookup(|name| {
-                if name == "HTTP_PROXY" {
-                    Some(raw.to_string())
-                } else {
-                    None
-                }
-            })
-            .expect_err(&format!("expected '{raw}' to fail"));
-
-            let rendered = err.to_string();
-            match &err {
-                IaGetError::InvalidProxy { var, value, .. } => {
-                    assert_eq!(var, "HTTP_PROXY");
-                    assert_eq!(value, expected_redacted);
-                    assert!(
-                        value.contains("<redacted>@"),
-                        "expected redaction marker in value for '{raw}': {value}"
-                    );
-                    assert!(
-                        rendered.contains("<redacted>@"),
-                        "expected redaction marker in Display for '{raw}': {rendered}"
-                    );
-                    for needle in forbidden {
-                        assert!(
-                            !value.contains(needle),
-                            "credential fragment '{needle}' leaked in value for '{raw}': {value}"
-                        );
-                        assert!(
-                            !rendered.contains(needle),
-                            "credential fragment '{needle}' leaked in Display for '{raw}': {rendered}"
-                        );
-                    }
-                }
-                other => panic!("expected InvalidProxy for '{raw}', got {other:?}"),
-            }
-        }
+        assert_invalid_proxy(err, "HTTP_PROXY", None, &["s3cr3t"], true, "direct-ftp");
     }
 
     #[cfg(unix)]
     #[test]
-    fn proxy_config_rejects_non_utf8_uppercase_and_no_proxy_os_values() {
+    fn proxy_config_rejects_non_utf8_os_values() {
         use std::os::unix::ffi::OsStringExt;
 
-        let all_err = ProxyConfig::from_os_lookup(|name| match name {
-            "ALL_PROXY" => Some(OsString::from_vec(vec![0xff, 0x80])),
-            _ => None,
-        })
-        .expect_err("non-UTF-8 ALL_PROXY must fail");
-        match all_err {
-            IaGetError::InvalidProxy { var, value, .. } => {
-                assert_eq!(var, "ALL_PROXY");
-                assert_eq!(value, "<non-UTF-8>");
-            }
-            other => panic!("expected InvalidProxy, got {other:?}"),
-        }
+        let cases: [(&str, Vec<(&str, OsString)>); 3] = [
+            (
+                "http_proxy",
+                vec![
+                    ("http_proxy", OsString::from_vec(vec![0xff, 0xfe])),
+                    ("HTTP_PROXY", OsString::from("http://127.0.0.1:8080")),
+                ],
+            ),
+            (
+                "ALL_PROXY",
+                vec![("ALL_PROXY", OsString::from_vec(vec![0xff, 0x80]))],
+            ),
+            (
+                "NO_PROXY",
+                vec![("NO_PROXY", OsString::from_vec(vec![0xfe, 0xff]))],
+            ),
+        ];
 
-        let no_proxy_err = ProxyConfig::from_os_lookup(|name| match name {
-            "NO_PROXY" => Some(OsString::from_vec(vec![0xfe, 0xff])),
-            _ => None,
-        })
-        .expect_err("non-UTF-8 NO_PROXY must fail");
-        match no_proxy_err {
-            IaGetError::InvalidProxy { var, value, .. } => {
-                assert_eq!(var, "NO_PROXY");
-                assert_eq!(value, "<non-UTF-8>");
-            }
-            other => panic!("expected InvalidProxy, got {other:?}"),
+        for (expected_var, vars) in cases {
+            let err = ProxyConfig::from_os_lookup(|name| {
+                vars.iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| v.clone())
+            })
+            .expect_err(&format!("non-UTF-8 {expected_var} must fail"));
+            assert_invalid_proxy(
+                err,
+                expected_var,
+                Some("<non-UTF-8>"),
+                &[],
+                false,
+                expected_var,
+            );
         }
     }
 
@@ -10176,7 +8491,7 @@ mod tests {
     }
 
     impl MockSocks5Server {
-        async fn start(responses: Vec<MockResponse>) -> Self {
+        async fn start(bodies: Vec<Vec<u8>>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind mock SOCKS5 server");
@@ -10185,7 +8500,7 @@ mod tests {
             let connections_clone = Arc::clone(&connections);
 
             let handle = tokio::spawn(async move {
-                for response in responses {
+                for body in bodies {
                     let Ok((mut socket, _)) = listener.accept().await else {
                         break;
                     };
@@ -10194,14 +8509,22 @@ mod tests {
                     let Some(target) = socks5_handshake(&mut socket).await else {
                         continue;
                     };
-                    let Some(request) = read_http_request(&mut socket).await else {
+                    let Some(request) = socks5_read_http_request(&mut socket).await else {
                         continue;
                     };
                     connections_clone
                         .lock()
                         .await
                         .push(CapturedSocks5Connection { target, request });
-                    write_mock_response(&mut socket, response).await;
+                    let mut wire = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .into_bytes();
+                    wire.extend_from_slice(&body);
+                    let _ = socket.write_all(&wire).await;
+                    let _ = socket.flush().await;
+                    let _ = socket.shutdown().await;
                 }
             });
 
@@ -10223,7 +8546,7 @@ mod tests {
             self.connections.lock().await.clone()
         }
 
-        async fn abort_and_collect(mut self) -> Vec<CapturedSocks5Connection> {
+        async fn abort(mut self) -> Vec<CapturedSocks5Connection> {
             if let Some(handle) = self.handle.take() {
                 handle.abort();
                 let _ = handle.await;
@@ -10240,6 +8563,38 @@ mod tests {
         }
     }
 
+    async fn socks5_read_http_request(socket: &mut TcpStream) -> Option<CapturedRequest> {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let n = socket.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let header_end = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap_or(buf.len());
+        let header_text = String::from_utf8_lossy(&buf[..header_end]);
+        let mut lines = header_text.split("\r\n");
+        let request_line = lines.next()?.to_string();
+        let headers = lines
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                Some((name.trim().to_string(), value.trim().to_string()))
+            })
+            .collect();
+        Some(CapturedRequest {
+            request_line,
+            headers,
+        })
+    }
+
     async fn socks5_handshake(socket: &mut TcpStream) -> Option<MockSocks5Target> {
         // RFC 1928 greeting: VER=0x05, NMETHODS, METHODS[NMETHODS]
         let mut greeting = [0u8; 2];
@@ -10249,7 +8604,6 @@ mod tests {
         }
         let mut methods = vec![0u8; usize::from(greeting[1])];
         socket.read_exact(&mut methods).await.ok()?;
-        // Select NO AUTHENTICATION REQUIRED (0x00)
         socket.write_all(&[0x05, 0x00]).await.ok()?;
         socket.flush().await.ok()?;
 
@@ -10263,219 +8617,114 @@ mod tests {
         let target = match req_head[3] {
             0x01 => {
                 let mut ipv4 = [0u8; 4];
+                let mut port = [0u8; 2];
                 socket.read_exact(&mut ipv4).await.ok()?;
-                let mut port_bytes = [0u8; 2];
-                socket.read_exact(&mut port_bytes).await.ok()?;
-                MockSocks5Target::Ipv4(ipv4, u16::from_be_bytes(port_bytes))
+                socket.read_exact(&mut port).await.ok()?;
+                MockSocks5Target::Ipv4(ipv4, u16::from_be_bytes(port))
             }
             0x03 => {
                 let mut len = [0u8; 1];
                 socket.read_exact(&mut len).await.ok()?;
                 let mut domain = vec![0u8; usize::from(len[0])];
+                let mut port = [0u8; 2];
                 socket.read_exact(&mut domain).await.ok()?;
-                let mut port_bytes = [0u8; 2];
-                socket.read_exact(&mut port_bytes).await.ok()?;
-                let domain_str = String::from_utf8(domain).ok()?;
-                MockSocks5Target::Domain(domain_str, u16::from_be_bytes(port_bytes))
+                socket.read_exact(&mut port).await.ok()?;
+                MockSocks5Target::Domain(String::from_utf8(domain).ok()?, u16::from_be_bytes(port))
             }
             0x04 => {
                 let mut ipv6 = [0u8; 16];
+                let mut port = [0u8; 2];
                 socket.read_exact(&mut ipv6).await.ok()?;
-                let mut port_bytes = [0u8; 2];
-                socket.read_exact(&mut port_bytes).await.ok()?;
-                MockSocks5Target::Ipv6(ipv6, u16::from_be_bytes(port_bytes))
+                socket.read_exact(&mut port).await.ok()?;
+                MockSocks5Target::Ipv6(ipv6, u16::from_be_bytes(port))
             }
             _ => return None,
         };
 
-        // Reply: VER=0x05, REP=0x00 (succeeded), RSV=0x00, ATYP=0x01 (IPv4), 127.0.0.1:0
         socket
             .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
             .await
             .ok()?;
         socket.flush().await.ok()?;
-
         Some(target)
     }
 
     #[tokio::test]
-    async fn proxy_http_proxy_routes_download_and_verifies_md5() {
-        let payload = b"downloaded through local mock HTTP proxy".to_vec();
-        let expected_md5 = md5_hex(&payload);
-        let proxy_server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
-        let proxy_url = format!("http://127.0.0.1:{}", proxy_server.addr.port());
+    async fn proxy_http_proxy_routing_and_precedence() {
+        // 1. Direct HTTP_PROXY routing; 2. ALL_PROXY fallback; 3. HTTP_PROXY overrides ALL_PROXY.
+        for (label, use_http_proxy, use_all_proxy, filename) in [
+            ("http-proxy-route", true, false, "test.bin"),
+            ("all-proxy-fallback", false, true, "fallback.bin"),
+            ("http-proxy-precedence", true, true, "precedence.bin"),
+        ] {
+            let payload = format!("payload for {label}").into_bytes();
+            let primary = MockServer::start(vec![MockResponse::ok(&payload)]).await;
+            let primary_url = format!("http://127.0.0.1:{}", primary.port());
+            let unused = if use_http_proxy && use_all_proxy {
+                Some(MockServer::start(vec![MockResponse::ok(b"wrong-proxy")]).await)
+            } else {
+                None
+            };
+            let unused_url = unused
+                .as_ref()
+                .map(|s| format!("http://127.0.0.1:{}", s.port()));
 
-        let config = ProxyConfig::from_lookup(|name| match name {
-            "HTTP_PROXY" => Some(proxy_url.clone()),
-            _ => None,
-        })
-        .unwrap();
-        let client = http_client_builder_with_proxy(&config)
-            .unwrap()
-            .build()
-            .unwrap();
+            let mut vars = Vec::new();
+            if use_http_proxy {
+                vars.push(("HTTP_PROXY", primary_url.as_str()));
+                if let Some(ref url) = unused_url {
+                    vars.push(("ALL_PROXY", url.as_str()));
+                }
+            } else if use_all_proxy {
+                vars.push(("ALL_PROXY", primary_url.as_str()));
+            }
 
-        let temp_dir = TempTestDir::new("http-proxy-route");
-        let signal = ShutdownSignal::new();
-        let outcome = download_single_file(
-            &client,
-            &temp_dir.path,
-            "http://archive.example/download/item/test.bin",
-            "test.bin",
-            Some(&expected_md5),
-            &signal,
-            None,
-        )
-        .await
-        .expect("HTTP_PROXY download should succeed");
+            let fx = DownloadFixture::with_client(label, proxy_client(&vars));
+            let target_url = format!("http://archive.example/download/item/{filename}");
+            let outcome = fx
+                .download(&target_url, filename, Some(&md5_hex(&payload)), None)
+                .await
+                .unwrap_or_else(|err| panic!("case {label} failed: {err}"));
 
-        assert_eq!(outcome, FileOutcome::Downloaded);
-        let requests = proxy_server.finish().await;
-        assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0].request_line,
-            "GET http://archive.example/download/item/test.bin HTTP/1.1"
-        );
-
-        let saved = fs::read(temp_dir.join("test.bin")).unwrap();
-        assert_eq!(saved, payload);
-        assert_eq!(md5_hex(&saved), expected_md5);
-        assert!(!temp_dir.part_path("test.bin").exists());
-    }
-
-    #[tokio::test]
-    async fn proxy_all_proxy_fallback_and_http_proxy_precedence() {
-        // Fallback: ALL_PROXY handles HTTP when HTTP_PROXY is unset.
-        {
-            let payload = b"served via ALL_PROXY fallback".to_vec();
-            let expected_md5 = md5_hex(&payload);
-            let all_proxy_server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
-            let all_proxy_url = format!("http://127.0.0.1:{}", all_proxy_server.addr.port());
-
-            let config = ProxyConfig::from_lookup(|name| match name {
-                "ALL_PROXY" => Some(all_proxy_url.clone()),
-                _ => None,
-            })
-            .unwrap();
-            let client = http_client_builder_with_proxy(&config)
-                .unwrap()
-                .build()
-                .unwrap();
-
-            let temp_dir = TempTestDir::new("all-proxy-fallback");
-            let signal = ShutdownSignal::new();
-            let outcome = download_single_file(
-                &client,
-                &temp_dir.path,
-                "http://archive.example/download/item/fallback.bin",
-                "fallback.bin",
-                Some(&expected_md5),
-                &signal,
-                None,
-            )
-            .await
-            .expect("ALL_PROXY fallback download should succeed");
-
-            assert_eq!(outcome, FileOutcome::Downloaded);
-            let requests = all_proxy_server.finish().await;
-            assert_eq!(requests.len(), 1);
+            assert_eq!(outcome, FileOutcome::Downloaded, "{label}");
+            let requests = primary.finish().await;
+            assert_eq!(requests.len(), 1, "{label}");
             assert_eq!(
                 requests[0].request_line,
-                "GET http://archive.example/download/item/fallback.bin HTTP/1.1"
+                format!("GET {target_url} HTTP/1.1"),
+                "{label}"
             );
-            assert_eq!(fs::read(temp_dir.join("fallback.bin")).unwrap(), payload);
-        }
-
-        // Precedence: HTTP_PROXY overrides ALL_PROXY when both are set.
-        {
-            let payload = b"served via HTTP_PROXY precedence".to_vec();
-            let expected_md5 = md5_hex(&payload);
-            let http_proxy_server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
-            let all_proxy_server = MockServer::start(vec![MockResponse::ok(b"wrong-proxy")]).await;
-            let http_proxy_url = format!("http://127.0.0.1:{}", http_proxy_server.addr.port());
-            let all_proxy_url = format!("http://127.0.0.1:{}", all_proxy_server.addr.port());
-
-            let config = ProxyConfig::from_lookup(|name| match name {
-                "HTTP_PROXY" => Some(http_proxy_url.clone()),
-                "ALL_PROXY" => Some(all_proxy_url.clone()),
-                _ => None,
-            })
-            .unwrap();
-            let client = http_client_builder_with_proxy(&config)
-                .unwrap()
-                .build()
-                .unwrap();
-
-            let temp_dir = TempTestDir::new("http-proxy-precedence");
-            let signal = ShutdownSignal::new();
-            let outcome = download_single_file(
-                &client,
-                &temp_dir.path,
-                "http://archive.example/download/item/precedence.bin",
-                "precedence.bin",
-                Some(&expected_md5),
-                &signal,
-                None,
-            )
-            .await
-            .expect("HTTP_PROXY precedence download should succeed");
-
-            assert_eq!(outcome, FileOutcome::Downloaded);
-            let http_requests = http_proxy_server.finish().await;
-            let all_requests = all_proxy_server.abort_and_collect().await;
-            assert_eq!(http_requests.len(), 1);
-            assert_eq!(
-                http_requests[0].request_line,
-                "GET http://archive.example/download/item/precedence.bin HTTP/1.1"
-            );
-            assert!(
-                all_requests.is_empty(),
-                "ALL_PROXY must not be contacted when HTTP_PROXY matches"
-            );
-            assert_eq!(fs::read(temp_dir.join("precedence.bin")).unwrap(), payload);
+            if let Some(unused_server) = unused {
+                assert!(
+                    unused_server.abort().await.is_empty(),
+                    "ALL_PROXY must not be contacted when HTTP_PROXY matches"
+                );
+            }
+            fx.assert_downloaded(filename, &payload);
         }
     }
 
     #[tokio::test]
     async fn proxy_https_proxy_sends_connect_without_external_network() {
-        let proxy_server = MockServer::start(vec![MockResponse::with_headers(
-            "502 Bad Gateway",
-            vec![("Content-Length", "0".to_string())],
-            b"",
-        )])
-        .await;
-        let proxy_url = format!("http://127.0.0.1:{}", proxy_server.addr.port());
+        let proxy_server =
+            MockServer::start(vec![MockResponse::status("502 Bad Gateway", b"")]).await;
+        let proxy_url = format!("http://127.0.0.1:{}", proxy_server.port());
 
-        let config = ProxyConfig::from_lookup(|name| match name {
-            "HTTPS_PROXY" => Some(proxy_url.clone()),
-            _ => None,
-        })
-        .unwrap();
-        let client = http_client_builder_with_proxy(&config)
-            .unwrap()
-            .build()
-            .unwrap();
+        let fx = DownloadFixture::with_client(
+            "https-proxy-connect",
+            proxy_client(&[("HTTPS_PROXY", &proxy_url)]),
+        );
+        let policy = fast_retry_policy(0);
 
-        let temp_dir = TempTestDir::new("https-proxy-connect");
-        let signal = ShutdownSignal::new();
-        let policy = RetryPolicy {
-            max_retries: 0,
-            initial_delay: Duration::from_millis(5),
-            max_delay: Duration::from_millis(10),
-            max_retry_after: Duration::from_millis(50),
-        };
-
-        let result = download_single_file_with_policy(
-            &client,
-            &temp_dir.path,
-            "https://archive.example/download/item/test.bin",
-            "test.bin",
-            None,
-            &signal,
-            None,
-            &policy,
-        )
-        .await;
+        let result = fx
+            .download_with_policy(
+                "https://archive.example/download/item/test.bin",
+                "test.bin",
+                None,
+                None,
+                &policy,
+            )
+            .await;
         assert!(
             result.is_err(),
             "CONNECT rejection with 502 Bad Gateway should fail the download"
@@ -10490,238 +8739,114 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_no_proxy_bypasses_http_proxy_for_matching_host() {
-        let payload = b"served directly from local mock origin".to_vec();
-        let expected_md5 = md5_hex(&payload);
-        let origin_server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
-        let proxy_server = MockServer::start(vec![MockResponse::ok(b"wrong-from-proxy")]).await;
-        let proxy_url = format!("http://127.0.0.1:{}", proxy_server.addr.port());
+    async fn proxy_no_proxy_bypasses_http_and_socks5_proxies() {
+        // 1. NO_PROXY bypasses HTTP_PROXY
+        let http_payload = b"served directly from local mock origin".to_vec();
+        let origin_http = MockServer::start(vec![MockResponse::ok(&http_payload)]).await;
+        let http_proxy = MockServer::start(vec![MockResponse::ok(b"wrong-from-proxy")]).await;
+        let http_proxy_url = format!("http://127.0.0.1:{}", http_proxy.port());
+        let fx_http = DownloadFixture::with_client(
+            "no-proxy-http-bypass",
+            proxy_client(&[("HTTP_PROXY", &http_proxy_url), ("NO_PROXY", "127.0.0.1")]),
+        );
 
-        let config = ProxyConfig::from_lookup(|name| match name {
-            "HTTP_PROXY" => Some(proxy_url.clone()),
-            "NO_PROXY" => Some("127.0.0.1".to_string()),
-            _ => None,
-        })
-        .unwrap();
-        let client = http_client_builder_with_proxy(&config)
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let temp_dir = TempTestDir::new("no-proxy-http-bypass");
-        let signal = ShutdownSignal::new();
-        let origin_url = origin_server.url("/direct.bin");
-        let outcome = download_single_file(
-            &client,
-            &temp_dir.path,
-            &origin_url,
-            "direct.bin",
-            Some(&expected_md5),
-            &signal,
-            None,
-        )
-        .await
-        .expect("NO_PROXY bypassed download should succeed");
-
+        let outcome = fx_http
+            .download(
+                &origin_http.url("/direct.bin"),
+                "direct.bin",
+                Some(&md5_hex(&http_payload)),
+                None,
+            )
+            .await
+            .expect("NO_PROXY bypassed HTTP download should succeed");
         assert_eq!(outcome, FileOutcome::Downloaded);
-        let origin_requests = origin_server.finish().await;
-        let proxy_requests = proxy_server.abort_and_collect().await;
-        assert_eq!(origin_requests.len(), 1);
-        assert_eq!(origin_requests[0].request_line, "GET /direct.bin HTTP/1.1");
-        assert!(
-            proxy_requests.is_empty(),
-            "HTTP proxy must receive 0 requests when bypassed by NO_PROXY"
+        let origin_reqs = origin_http.finish().await;
+        assert_eq!(origin_reqs.len(), 1);
+        assert_eq!(origin_reqs[0].request_line, "GET /direct.bin HTTP/1.1");
+        assert!(http_proxy.abort().await.is_empty());
+        fx_http.assert_downloaded("direct.bin", &http_payload);
+
+        // 2. NO_PROXY bypasses SOCKS5 ALL_PROXY
+        let socks_payload = b"origin payload bypassing SOCKS5 proxy".to_vec();
+        let origin_socks = MockServer::start(vec![MockResponse::ok(&socks_payload)]).await;
+        let socks_proxy = MockSocks5Server::start(vec![b"wrong-from-socks5".to_vec()]).await;
+        let socks_url = socks_proxy.proxy_url("socks5");
+        let fx_socks = DownloadFixture::with_client(
+            "no-proxy-socks5-bypass",
+            proxy_client(&[("ALL_PROXY", &socks_url), ("NO_PROXY", "127.0.0.1")]),
         );
 
-        let saved = fs::read(temp_dir.join("direct.bin")).unwrap();
-        assert_eq!(saved, payload);
-        assert_eq!(md5_hex(&saved), expected_md5);
-        assert!(!temp_dir.part_path("direct.bin").exists());
-    }
-
-    #[tokio::test]
-    async fn proxy_all_proxy_socks5_tunnels_download_and_verifies_md5() {
-        let payload = b"tunneled through local mock SOCKS5 proxy".to_vec();
-        let expected_md5 = md5_hex(&payload);
-        let socks_server = MockSocks5Server::start(vec![MockResponse::ok(&payload)]).await;
-        let socks_url = socks_server.proxy_url("socks5");
-
-        let config = ProxyConfig::from_lookup(|name| match name {
-            "ALL_PROXY" => Some(socks_url.clone()),
-            _ => None,
-        })
-        .unwrap();
-        let client = http_client_builder_with_proxy(&config)
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let temp_dir = TempTestDir::new("socks5-tunnel");
-        let signal = ShutdownSignal::new();
-        let outcome = download_single_file(
-            &client,
-            &temp_dir.path,
-            "http://127.0.0.1:80/socks5.bin",
-            "socks5.bin",
-            Some(&expected_md5),
-            &signal,
-            None,
-        )
-        .await
-        .expect("SOCKS5 tunneled download should succeed");
-
+        let outcome = fx_socks
+            .download(
+                &origin_socks.url("/bypass-socks.bin"),
+                "bypass-socks.bin",
+                Some(&md5_hex(&socks_payload)),
+                None,
+            )
+            .await
+            .expect("NO_PROXY bypassed SOCKS5 download should succeed");
         assert_eq!(outcome, FileOutcome::Downloaded);
-        let connections = socks_server.finish().await;
-        assert_eq!(connections.len(), 1);
+        let origin_reqs = origin_socks.finish().await;
+        assert_eq!(origin_reqs.len(), 1);
         assert_eq!(
-            connections[0].target,
-            MockSocks5Target::Ipv4([127, 0, 0, 1], 80)
-        );
-        assert_eq!(
-            connections[0].request.request_line,
-            "GET /socks5.bin HTTP/1.1"
-        );
-
-        let saved = fs::read(temp_dir.join("socks5.bin")).unwrap();
-        assert_eq!(saved, payload);
-        assert_eq!(md5_hex(&saved), expected_md5);
-        assert!(!temp_dir.part_path("socks5.bin").exists());
-    }
-
-    #[tokio::test]
-    async fn proxy_all_proxy_socks5h_sends_domain_for_remote_dns_and_verifies_md5() {
-        let payload = b"tunneled through local mock SOCKS5H proxy with remote DNS".to_vec();
-        let expected_md5 = md5_hex(&payload);
-        let socks_server = MockSocks5Server::start(vec![MockResponse::ok(&payload)]).await;
-        let socks_url = socks_server.proxy_url("socks5h");
-
-        let config = ProxyConfig::from_lookup(|name| match name {
-            "ALL_PROXY" => Some(socks_url.clone()),
-            _ => None,
-        })
-        .unwrap();
-        let client = http_client_builder_with_proxy(&config)
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let temp_dir = TempTestDir::new("socks5h-tunnel");
-        let signal = ShutdownSignal::new();
-        let outcome = download_single_file(
-            &client,
-            &temp_dir.path,
-            "http://archive.example/socks5h.bin",
-            "socks5h.bin",
-            Some(&expected_md5),
-            &signal,
-            None,
-        )
-        .await
-        .expect("SOCKS5H tunneled download should succeed without local DNS");
-
-        assert_eq!(outcome, FileOutcome::Downloaded);
-        let connections = socks_server.finish().await;
-        assert_eq!(connections.len(), 1);
-        assert_eq!(
-            connections[0].target,
-            MockSocks5Target::Domain("archive.example".to_string(), 80)
-        );
-        assert_eq!(
-            connections[0].request.request_line,
-            "GET /socks5h.bin HTTP/1.1"
-        );
-        assert_eq!(
-            connections[0].request.header("Host"),
-            Some("archive.example")
-        );
-
-        let saved = fs::read(temp_dir.join("socks5h.bin")).unwrap();
-        assert_eq!(saved, payload);
-        assert_eq!(md5_hex(&saved), expected_md5);
-        assert!(!temp_dir.part_path("socks5h.bin").exists());
-    }
-
-    #[tokio::test]
-    async fn proxy_no_proxy_bypasses_socks5_all_proxy() {
-        let payload = b"origin payload bypassing SOCKS5 proxy".to_vec();
-        let expected_md5 = md5_hex(&payload);
-        let origin_server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
-        let socks_server =
-            MockSocks5Server::start(vec![MockResponse::ok(b"wrong-from-socks5")]).await;
-        let socks_url = socks_server.proxy_url("socks5");
-
-        let config = ProxyConfig::from_lookup(|name| match name {
-            "ALL_PROXY" => Some(socks_url.clone()),
-            "NO_PROXY" => Some("127.0.0.1".to_string()),
-            _ => None,
-        })
-        .unwrap();
-        let client = http_client_builder_with_proxy(&config)
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let temp_dir = TempTestDir::new("no-proxy-socks5-bypass");
-        let signal = ShutdownSignal::new();
-        let origin_url = origin_server.url("/bypass-socks.bin");
-        let outcome = download_single_file(
-            &client,
-            &temp_dir.path,
-            &origin_url,
-            "bypass-socks.bin",
-            Some(&expected_md5),
-            &signal,
-            None,
-        )
-        .await
-        .expect("NO_PROXY bypassed SOCKS5 download should succeed");
-
-        assert_eq!(outcome, FileOutcome::Downloaded);
-        let origin_requests = origin_server.finish().await;
-        let socks_connections = socks_server.abort_and_collect().await;
-        assert_eq!(origin_requests.len(), 1);
-        assert_eq!(
-            origin_requests[0].request_line,
+            origin_reqs[0].request_line,
             "GET /bypass-socks.bin HTTP/1.1"
         );
-        assert!(
-            socks_connections.is_empty(),
-            "SOCKS5 proxy must receive 0 connections when bypassed by NO_PROXY"
-        );
-
-        let saved = fs::read(temp_dir.join("bypass-socks.bin")).unwrap();
-        assert_eq!(saved, payload);
-        assert_eq!(md5_hex(&saved), expected_md5);
-        assert!(!temp_dir.part_path("bypass-socks.bin").exists());
+        assert!(socks_proxy.abort().await.is_empty());
+        fx_socks.assert_downloaded("bypass-socks.bin", &socks_payload);
     }
 
-    #[derive(Clone, Default)]
-    struct CapturedLogs {
-        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
-    }
+    #[tokio::test]
+    async fn proxy_all_proxy_socks5_and_socks5h_tunnel_downloads() {
+        let cases = [
+            (
+                "socks5",
+                "http://127.0.0.1:80/socks5.bin",
+                "socks5.bin",
+                MockSocks5Target::Ipv4([127, 0, 0, 1], 80),
+                "GET /socks5.bin HTTP/1.1",
+                None,
+            ),
+            (
+                "socks5h",
+                "http://archive.example/socks5h.bin",
+                "socks5h.bin",
+                MockSocks5Target::Domain("archive.example".to_string(), 80),
+                "GET /socks5h.bin HTTP/1.1",
+                Some("archive.example"),
+            ),
+        ];
 
-    impl CapturedLogs {
-        fn new() -> Self {
-            Self::default()
-        }
+        for (scheme, url, filename, expected_target, expected_line, expected_host) in cases {
+            let payload = format!("tunneled through {scheme} proxy").into_bytes();
+            let socks_server = MockSocks5Server::start(vec![payload.clone()]).await;
+            let socks_url = socks_server.proxy_url(scheme);
+            let fx = DownloadFixture::with_client(
+                &format!("{scheme}-tunnel"),
+                proxy_client(&[("ALL_PROXY", &socks_url)]),
+            );
 
-        fn as_bytes(&self) -> Vec<u8> {
-            self.bytes.lock().unwrap().clone()
-        }
+            let outcome = fx
+                .download(url, filename, Some(&md5_hex(&payload)), None)
+                .await
+                .unwrap_or_else(|err| panic!("{scheme} tunneled download failed: {err}"));
 
-        fn as_string(&self) -> String {
-            String::from_utf8(self.as_bytes()).expect("verbose logs must be valid UTF-8")
-        }
-    }
-
-    impl std::io::Write for CapturedLogs {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.bytes.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+            assert_eq!(outcome, FileOutcome::Downloaded, "{scheme}");
+            let connections = socks_server.finish().await;
+            assert_eq!(connections.len(), 1, "{scheme}");
+            assert_eq!(connections[0].target, expected_target, "{scheme}");
+            assert_eq!(
+                connections[0].request.request_line, expected_line,
+                "{scheme}"
+            );
+            if let Some(host) = expected_host {
+                assert_eq!(
+                    connections[0].request.header("Host"),
+                    Some(host),
+                    "{scheme}"
+                );
+            }
+            fx.assert_downloaded(filename, &payload);
         }
     }
 
@@ -10731,16 +8856,8 @@ mod tests {
         const SENTINEL_VALUE: &str = "SUPER_SECRET_SENTINEL_9f8e7d6c";
 
         let payload = b"redirected payload after protected hop".to_vec();
-        let expected_md5 = md5_hex(&payload);
         let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "302 Found",
-                vec![
-                    ("Location", "/public/final.bin".to_string()),
-                    ("Content-Length", "0".to_string()),
-                ],
-                b"",
-            ),
+            MockResponse::redirect("302 Found", "/public/final.bin"),
             MockResponse::ok(&payload),
         ])
         .await;
@@ -10749,32 +8866,25 @@ mod tests {
             format!("127.0.0.1\tFALSE\t/protected/\tFALSE\t0\t{SENTINEL_NAME}\t{SENTINEL_VALUE}\n");
         let cookie_source = CookieSource::from_netscape_str(&netscape);
 
-        let client = http_client_builder().build().unwrap();
-        let temp_dir = TempTestDir::new("verbose-redirect-cookie");
-        let signal = ShutdownSignal::new();
+        let fx = DownloadFixture::new("verbose-redirect-cookie");
         let options = DownloadOptions {
-            retry_policy: RetryPolicy {
-                max_retries: 0,
-                initial_delay: Duration::from_millis(5),
-                max_delay: Duration::from_millis(10),
-                max_retry_after: Duration::from_millis(50),
-            },
+            retry_policy: fast_retry_policy(0),
             limit_rate: None,
             verbose: true,
         };
         let captured = CapturedLogs::new();
-        let logger = VerboseLogger::with_writer(captured.clone());
+        let logger = VerboseLogger::with_writer(captured.clone_writer());
 
         let start_url = server.url("/protected/start.bin");
         let final_url = server.url("/public/final.bin");
 
         let outcome = download_single_file_with_options(
-            &client,
-            &temp_dir.path,
+            &fx.client,
+            fx.path(),
             &start_url,
             "final.bin",
-            Some(&expected_md5),
-            &signal,
+            Some(&md5_hex(&payload)),
+            &fx.signal,
             Some(&cookie_source),
             &options,
             &logger,
@@ -10782,7 +8892,7 @@ mod tests {
         .await
         .expect("redirected download with scoped cookie should succeed");
         assert_eq!(outcome, FileOutcome::Downloaded);
-        assert_eq!(fs::read(temp_dir.join("final.bin")).unwrap(), payload);
+        fx.assert_downloaded("final.bin", &payload);
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 2);
@@ -10802,13 +8912,12 @@ mod tests {
             "path-scoped cookie must not be sent on hop 2"
         );
 
-        let raw_bytes = captured.as_bytes();
         assert!(
-            !raw_bytes.contains(&0x1b),
+            !captured.as_bytes().contains(&0x1b),
             "verbose logs must contain zero ANSI escape bytes"
         );
 
-        let logs = captured.as_string();
+        let logs = captured.text();
         assert!(
             !logs.contains(SENTINEL_NAME),
             "verbose logs must never leak cookie name:\n{logs}"
@@ -10817,80 +8926,47 @@ mod tests {
             !logs.contains(SENTINEL_VALUE),
             "verbose logs must never leak cookie value:\n{logs}"
         );
-        assert!(
-            logs.contains(&format!("[verbose] http: -> GET {start_url} (cookies=yes)")),
-            "missing hop 1 GET with cookies=yes:\n{logs}"
-        );
-        assert!(
-            logs.contains(&format!(
-                "[verbose] http: <- 302 Found GET {start_url} (cookies=yes)"
-            )),
-            "missing hop 1 302 response:\n{logs}"
-        );
-        assert!(
-            logs.contains(&format!(
-                "[verbose] redirect: 302 Found {start_url} -> {final_url} (hop 1/"
-            )),
-            "missing 302 redirect from -> to line:\n{logs}"
-        );
-        assert!(
-            logs.contains(&format!("[verbose] http: -> GET {final_url} (cookies=no)")),
-            "missing hop 2 GET with cookies=no:\n{logs}"
-        );
-        assert!(
-            logs.contains(&format!(
-                "[verbose] http: <- 200 OK GET {final_url} (cookies=no)"
-            )),
-            "missing hop 2 200 OK response:\n{logs}"
-        );
+        for expected in [
+            format!("[verbose] http: -> GET {start_url} (cookies=yes)"),
+            format!("[verbose] http: <- 302 Found GET {start_url} (cookies=yes)"),
+            format!("[verbose] redirect: 302 Found {start_url} -> {final_url} (hop 1/"),
+            format!("[verbose] http: -> GET {final_url} (cookies=no)"),
+            format!("[verbose] http: <- 200 OK GET {final_url} (cookies=no)"),
+        ] {
+            assert!(
+                logs.contains(&expected),
+                "missing expected log '{expected}':\n{logs}"
+            );
+        }
     }
 
     #[tokio::test]
     async fn test_verbose_logging_retries_with_retry_after_and_backoff() {
         let payload = b"recovered after 429 and 503".to_vec();
-        let expected_md5 = md5_hex(&payload);
         let server = MockServer::start(vec![
-            MockResponse::with_headers(
-                "429 Too Many Requests",
-                vec![
-                    ("Retry-After", "0".to_string()),
-                    ("Content-Length", "0".to_string()),
-                ],
-                b"",
-            ),
-            MockResponse::with_headers(
-                "503 Service Unavailable",
-                vec![("Content-Length", "0".to_string())],
-                b"",
-            ),
+            MockResponse::retry_after("429 Too Many Requests", "0", b""),
+            MockResponse::status("503 Service Unavailable", b""),
             MockResponse::ok(&payload),
         ])
         .await;
 
-        let client = http_client_builder().build().unwrap();
-        let temp_dir = TempTestDir::new("verbose-retries");
-        let signal = ShutdownSignal::new();
+        let fx = DownloadFixture::new("verbose-retries");
         let options = DownloadOptions {
-            retry_policy: RetryPolicy {
-                max_retries: 3,
-                initial_delay: Duration::from_millis(5),
-                max_delay: Duration::from_millis(10),
-                max_retry_after: Duration::from_millis(50),
-            },
+            retry_policy: fast_retry_policy(3),
             limit_rate: None,
             verbose: true,
         };
         let captured = CapturedLogs::new();
-        let logger = VerboseLogger::with_writer(captured.clone());
+        let logger = VerboseLogger::with_writer(captured.clone_writer());
         let url = server.url("/flaky.bin");
 
         let outcome = download_single_file_with_options(
-            &client,
-            &temp_dir.path,
+            &fx.client,
+            fx.path(),
             &url,
             "flaky.bin",
-            Some(&expected_md5),
-            &signal,
+            Some(&md5_hex(&payload)),
+            &fx.signal,
             None,
             &options,
             &logger,
@@ -10898,25 +8974,21 @@ mod tests {
         .await
         .expect("download should recover after 429 and 503");
         assert_eq!(outcome, FileOutcome::Downloaded);
-        assert_eq!(fs::read(temp_dir.join("flaky.bin")).unwrap(), payload);
+        fx.assert_downloaded("flaky.bin", &payload);
+        assert_eq!(server.finish().await.len(), 3);
 
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 3);
-
-        let raw_bytes = captured.as_bytes();
         assert!(
-            !raw_bytes.contains(&0x1b),
+            !captured.as_bytes().contains(&0x1b),
             "retry verbose logs must contain zero ANSI escape bytes"
         );
 
-        let logs = captured.as_string();
+        let logs = captured.text();
         assert!(
             logs.contains(&format!(
                 "[verbose] retry: attempt 1/3 for {url} after HTTP 429 Too Many Requests; waiting 0.00s (retry-after)"
             )),
             "missing attempt 1 retry-after line:\n{logs}"
         );
-
         let backoff_line = logs
             .lines()
             .find(|line| {
@@ -10938,61 +9010,47 @@ mod tests {
     #[tokio::test]
     async fn test_verbose_logging_batch_skips_downloads_failures_and_summary() {
         let existing_payload = b"already on disk and verified".to_vec();
-        let existing_md5 = md5_hex(&existing_payload);
-
         let fresh_payload = b"freshly fetched file".to_vec();
-        let fresh_md5 = md5_hex(&fresh_payload);
 
         let server = MockServer::start(vec![
             MockResponse::ok(&fresh_payload),
-            MockResponse::with_headers(
-                "404 Not Found",
-                vec![("Content-Length", "0".to_string())],
-                b"",
-            ),
+            MockResponse::status("404 Not Found", b""),
         ])
         .await;
 
-        let temp_dir = TempTestDir::new("verbose-batch-mixed");
-        fs::write(temp_dir.join("existing.bin"), &existing_payload).unwrap();
+        let fx = DownloadFixture::new("verbose-batch-mixed");
+        fx.write("existing.bin", &existing_payload);
 
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
         let options = DownloadOptions {
-            retry_policy: RetryPolicy {
-                max_retries: 0,
-                initial_delay: Duration::from_millis(5),
-                max_delay: Duration::from_millis(10),
-                max_retry_after: Duration::from_millis(50),
-            },
+            retry_policy: fast_retry_policy(0),
             limit_rate: None,
             verbose: true,
         };
         let captured = CapturedLogs::new();
-        let logger = VerboseLogger::with_writer(captured.clone());
+        let logger = VerboseLogger::with_writer(captured.clone_writer());
 
         let batch = vec![
             (
                 server.url("/existing.bin"),
                 "existing.bin".to_string(),
-                Some(existing_md5),
+                Some(md5_hex(&existing_payload)),
             ),
             (
                 server.url("/fresh.bin"),
                 "fresh.bin".to_string(),
-                Some(fresh_md5),
+                Some(md5_hex(&fresh_payload)),
             ),
             (server.url("/missing.bin"), "missing.bin".to_string(), None),
         ];
 
         let summary = download_files_in_dir_with_logger(
-            &client,
-            &temp_dir.path,
+            &fx.client,
+            fx.path(),
             batch,
             3,
             None,
             &options,
-            &signal,
+            &fx.signal,
             &logger,
         )
         .await
@@ -11003,30 +9061,26 @@ mod tests {
         assert_eq!(summary.failed.len(), 1);
         assert_eq!(summary.failed[0].file_path, "missing.bin");
         assert!(!summary.interrupted);
-        assert_eq!(fs::read(temp_dir.join("fresh.bin")).unwrap(), fresh_payload);
+        fx.assert_downloaded("fresh.bin", &fresh_payload);
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].request_line, "GET /fresh.bin HTTP/1.1");
         assert_eq!(requests[1].request_line, "GET /missing.bin HTTP/1.1");
 
-        let raw_bytes = captured.as_bytes();
         assert!(
-            !raw_bytes.contains(&0x1b),
+            !captured.as_bytes().contains(&0x1b),
             "batch verbose logs must contain zero ANSI escape bytes"
         );
 
-        let logs = captured.as_string();
-        assert!(
-            logs.contains(
-                "[verbose] download: skipped 'existing.bin': already exists; MD5 verified"
-            ),
-            "missing skip reason:\n{logs}"
-        );
-        assert!(
-            logs.contains("[verbose] download: completed 'fresh.bin' (2/3)"),
-            "missing download completion line:\n{logs}"
-        );
+        let logs = captured.text();
+        for expected in [
+            "[verbose] download: skipped 'existing.bin': already exists; MD5 verified",
+            "[verbose] download: completed 'fresh.bin' (2/3)",
+            "[verbose] summary: ok=1 skipped=1 failed=1 interrupted=false",
+        ] {
+            assert!(logs.contains(expected), "missing '{expected}':\n{logs}");
+        }
         assert!(
             logs.lines().any(|line| {
                 line.starts_with("[verbose] download: failed 'missing.bin': ")
@@ -11034,206 +9088,75 @@ mod tests {
             }),
             "missing failure reason for missing.bin:\n{logs}"
         );
-        assert!(
-            logs.contains("[verbose] summary: ok=1 skipped=1 failed=1 interrupted=false"),
-            "missing batch summary counts:\n{logs}"
-        );
     }
 
-    #[tokio::test]
-    async fn test_verbose_logging_disabled_emits_zero_lines() {
+    #[test]
+    fn test_verbose_logging_disabled_by_default() {
         let default_options = DownloadOptions::default();
         assert!(
             !default_options.verbose,
             "DownloadOptions::default() must disable verbose logging"
         );
-
-        let disabled_from_options = VerboseLogger::from_enabled(default_options.verbose);
-        assert!(!disabled_from_options.is_enabled());
-
-        let disabled = VerboseLogger::disabled();
-        assert!(!disabled.is_enabled());
-
-        let payload = b"silent download payload".to_vec();
-        let expected_md5 = md5_hex(&payload);
-        let server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
-        let temp_dir = TempTestDir::new("verbose-disabled");
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        let summary = download_files_in_dir_with_logger(
-            &client,
-            &temp_dir.path,
-            vec![(
-                server.url("/silent.bin"),
-                "silent.bin".to_string(),
-                Some(expected_md5),
-            )],
-            1,
-            None,
-            &default_options,
-            &signal,
-            &disabled,
-        )
-        .await
-        .expect("disabled verbose batch should succeed");
-
-        assert_eq!(summary.ok, 1);
-        assert_eq!(summary.skipped, 0);
-        assert!(summary.failed.is_empty());
-        assert!(!summary.interrupted);
-        assert_eq!(fs::read(temp_dir.join("silent.bin")).unwrap(), payload);
-
-        let requests = server.finish().await;
-        assert_eq!(requests.len(), 1);
+        assert!(!VerboseLogger::from_enabled(default_options.verbose).is_enabled());
+        assert!(!VerboseLogger::disabled().is_enabled());
     }
 
     #[test]
-    fn test_validate_download_paths_rejects_final_and_staging_collisions() {
-        let dup_err = validate_download_paths([("foo?.txt", "foo_.txt"), ("foo*.txt", "foo_.txt")])
-            .unwrap_err();
-        assert!(
-            matches!(
-                dup_err,
-                IaGetError::PathCollision {
-                    ref local_path,
-                    ref first_entry,
-                    ref second_entry,
-                    ..
-                } if local_path == "foo_.txt"
-                    && first_entry == "foo?.txt"
-                    && second_entry == "foo*.txt"
-            ),
-            "unexpected duplicate collision error: {dup_err:?}"
-        );
-
-        let slash_err =
-            validate_download_paths([("a/file.txt", "a/file.txt"), ("a//file.txt", "a//file.txt")])
-                .unwrap_err();
-        assert!(
-            matches!(
-                slash_err,
-                IaGetError::PathCollision {
-                    ref local_path,
-                    ..
-                } if local_path == "a/file.txt"
-            ),
-            "unexpected normalised duplicate error: {slash_err:?}"
-        );
-
-        let part_after_err =
-            validate_download_paths([("foo.txt", "foo.txt"), ("foo.txt.part", "foo.txt.part")])
-                .unwrap_err();
-        assert!(
-            matches!(
-                part_after_err,
-                IaGetError::PathCollision {
-                    ref local_path,
-                    ref first_entry,
-                    ref second_entry,
-                    ..
-                } if local_path == "foo.txt.part"
-                    && first_entry == "foo.txt"
-                    && second_entry == "foo.txt.part"
-            ),
-            "unexpected staging collision error (foo.txt then foo.txt.part): {part_after_err:?}"
-        );
-
-        let part_before_err =
-            validate_download_paths([("foo.txt.part", "foo.txt.part"), ("foo.txt", "foo.txt")])
-                .unwrap_err();
-        assert!(
-            matches!(
-                part_before_err,
-                IaGetError::PathCollision {
-                    ref local_path,
-                    ref first_entry,
-                    ref second_entry,
-                    ..
-                } if local_path == "foo.txt.part"
-                    && first_entry == "foo.txt.part"
-                    && second_entry == "foo.txt"
-            ),
-            "unexpected staging collision error (foo.txt.part then foo.txt): {part_before_err:?}"
-        );
-
-        assert!(validate_download_paths([
-            ("foo.txt", "foo.txt"),
-            ("foo.txt.bak", "foo.txt.bak"),
-            ("a/foo.txt", "a/foo.txt"),
-            ("b/foo.txt", "b/foo.txt"),
-            ("README.md", "README.md"),
-            ("readme.md", "readme.md"),
-        ])
-        .is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_download_files_in_dir_rejects_colliding_paths_before_any_http_requests() {
-        let cases: &[(&str, Vec<(&str, &str)>)] = &[
+    fn test_validate_download_paths_exact_and_case_sensitivity_modes() {
+        // Exact mode: final duplicates, normalised slash duplicates, staging collisions in both orders
+        for (label, first, second, expected_local, check_entries) in [
             (
-                "duplicate-final",
-                vec![("/a", "foo_.txt"), ("/b", "foo_.txt")],
+                "dup-sanitised",
+                ("foo?.txt", "foo_.txt"),
+                ("foo*.txt", "foo_.txt"),
+                "foo_.txt",
+                true,
             ),
             (
-                "staging-then-final",
-                vec![("/a", "foo.txt"), ("/b", "foo.txt.part")],
+                "normalised-slash",
+                ("a/file.txt", "a/file.txt"),
+                ("a//file.txt", "a//file.txt"),
+                "a/file.txt",
+                false,
             ),
             (
-                "final-then-staging",
-                vec![("/a", "foo.txt.part"), ("/b", "foo.txt")],
+                "staging-after",
+                ("foo.txt", "foo.txt"),
+                ("foo.txt.part", "foo.txt.part"),
+                "foo.txt.part",
+                true,
             ),
-        ];
-
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        for (label, entries) in cases {
-            let server =
-                MockServer::start(vec![MockResponse::ok(b"must never be requested")]).await;
-            let sandbox = TempTestDir::new(&format!("collision-{label}"));
-            let target_dir = sandbox.join("not-created-yet");
-
-            let files: Vec<(String, String, Option<String>)> = entries
-                .iter()
-                .map(|(url_path, local_path)| {
-                    (server.url(url_path), (*local_path).to_string(), None)
-                })
-                .collect();
-            let total = files.len();
-
-            let err = download_files_in_dir(
-                &client,
-                &target_dir,
-                files,
-                total,
+            (
+                "staging-before",
+                ("foo.txt.part", "foo.txt.part"),
+                ("foo.txt", "foo.txt"),
+                "foo.txt.part",
+                true,
+            ),
+        ] {
+            let err = validate_download_paths([first, second]).unwrap_err();
+            assert_path_collision(
+                err,
+                expected_local,
+                check_entries.then_some(first.0),
+                check_entries.then_some(second.0),
                 None,
-                &RetryPolicy::default(),
-                &signal,
-            )
-            .await
-            .unwrap_err();
-            let requests = server.abort_and_collect().await;
-
-            assert!(
-                matches!(err, IaGetError::PathCollision { .. }),
-                "case {label}: expected PathCollision, got {err:?}"
-            );
-            assert!(
-                requests.is_empty(),
-                "case {label}: expected 0 HTTP requests on collision, got {requests:?}"
-            );
-            assert!(
-                !target_dir.exists(),
-                "case {label}: colliding batch must fail before creating output directory"
+                label,
             );
         }
-    }
 
-    #[test]
-    fn test_validate_download_paths_case_insensitive_rejects_case_only_final_and_staging_collisions(
-    ) {
-        let cases = [
+        assert!(validate_download_paths(same_paths(&[
+            "foo.txt",
+            "foo.txt.bak",
+            "a/foo.txt",
+            "b/foo.txt",
+            "README.md",
+            "readme.md",
+        ]))
+        .is_ok());
+
+        // Case-insensitive mode: filename/dir/staging/Unicode/sanitised case collisions
+        let ci_cases = [
             (
                 "filename-case",
                 ("Foo.txt", "Foo.txt"),
@@ -11290,26 +9213,19 @@ mod tests {
             ),
         ];
 
-        for (label, first, second, expected_local) in cases {
+        for (label, first, second, expected_local) in ci_cases {
             let err = validate_download_paths_with_case_sensitivity(
                 [first, second],
                 PathCaseSensitivity::CaseInsensitive,
             )
             .unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    IaGetError::PathCollision {
-                        ref local_path,
-                        ref first_entry,
-                        ref second_entry,
-                        ref reason,
-                    } if local_path == expected_local
-                        && first_entry == first.0
-                        && second_entry == second.0
-                        && reason.contains("case-insensitive")
-                ),
-                "case {label}: expected case-insensitive PathCollision for '{expected_local}', got {err:?}"
+            assert_path_collision(
+                err,
+                expected_local,
+                Some(first.0),
+                Some(second.0),
+                Some("case-insensitive"),
+                label,
             );
         }
 
@@ -11319,107 +9235,162 @@ mod tests {
             PathCaseSensitivity::CaseInsensitive,
         )
         .unwrap_err();
-        assert!(
-            matches!(
-                exact_err,
-                IaGetError::PathCollision {
-                    ref local_path,
-                    ref reason,
-                    ..
-                } if local_path == "foo_.txt"
-                    && reason == "both entries map to the same destination path"
-            ),
-            "expected exact collision reason, got {exact_err:?}"
+        assert_path_collision(
+            exact_err,
+            "foo_.txt",
+            None,
+            None,
+            Some("both entries map to the same destination path"),
+            "exact-in-ci",
         );
-    }
 
-    #[test]
-    fn test_validate_download_paths_case_sensitive_allows_case_only_differences() {
+        // Case-sensitive mode allows all case-only differences.
         assert!(validate_download_paths_with_case_sensitivity(
-            [
-                ("Foo.txt", "Foo.txt"),
-                ("foo.txt", "foo.txt"),
-                ("Dir/a.txt", "Dir/a.txt"),
-                ("dir/A.txt", "dir/A.txt"),
-                ("a.txt", "a.txt"),
-                ("A.TXT.part", "A.TXT.part"),
-                ("a.txt.PART", "a.txt.PART"),
-                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
-                ("CAF\u{00c9}.txt", "CAF\u{00c9}.txt"),
-            ],
+            same_paths(&[
+                "Foo.txt",
+                "foo.txt",
+                "Dir/a.txt",
+                "dir/A.txt",
+                "a.txt",
+                "A.TXT.part",
+                "a.txt.PART",
+                "Caf\u{00e9}.txt",
+                "CAF\u{00c9}.txt",
+            ]),
             PathCaseSensitivity::CaseSensitive,
         )
         .is_ok());
     }
 
-    /// Independently observes whether `dir` is hosted on a case-sensitive or case-insensitive
-    /// filesystem by creating a single file and looking up its toggled-case counterpart.
-    fn measure_host_dir_case_sensitivity(dir: &Path) -> PathCaseSensitivity {
-        let lower = dir.join("host-case-probe-file.txt");
-        let upper = dir.join("HOST-CASE-PROBE-FILE.TXT");
-        fs::write(&lower, b"probe").expect("write host case probe");
-        let sensitive = match fs::symlink_metadata(&upper) {
-            Ok(_) => PathCaseSensitivity::CaseInsensitive,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                PathCaseSensitivity::CaseSensitive
-            }
-            Err(err) => panic!("unexpected error probing host case sensitivity: {err}"),
-        };
-        let _ = fs::remove_file(&lower);
-        sensitive
+    #[tokio::test]
+    async fn test_download_files_in_dir_pre_write_validation_aborts_before_http_requests() {
+        let client = http_client_builder().build().unwrap();
+        let signal = ShutdownSignal::new();
+
+        // 1. Colliding final/staging paths abort before creating output dir or sending HTTP.
+        let cases: &[(&str, Vec<(&str, &str)>)] = &[
+            (
+                "duplicate-final",
+                vec![("/a", "foo_.txt"), ("/b", "foo_.txt")],
+            ),
+            (
+                "staging-then-final",
+                vec![("/a", "foo.txt"), ("/b", "foo.txt.part")],
+            ),
+            (
+                "final-then-staging",
+                vec![("/a", "foo.txt.part"), ("/b", "foo.txt")],
+            ),
+        ];
+
+        for (label, entries) in cases {
+            let server =
+                MockServer::start(vec![MockResponse::ok(b"must never be requested")]).await;
+            let sandbox = TempTestDir::new(&format!("collision-{label}"));
+            let target_dir = sandbox.join("not-created-yet");
+
+            let files: Vec<(String, String, Option<String>)> = entries
+                .iter()
+                .map(|(url_path, local_path)| {
+                    (server.url(url_path), (*local_path).to_string(), None)
+                })
+                .collect();
+            let total = files.len();
+
+            let err = download_files_in_dir(
+                &client,
+                &target_dir,
+                files,
+                total,
+                None,
+                &RetryPolicy::default(),
+                &signal,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, IaGetError::PathCollision { .. }),
+                "case {label}: expected PathCollision, got {err:?}"
+            );
+            assert!(
+                server.abort().await.is_empty(),
+                "case {label}: expected 0 HTTP requests on collision"
+            );
+            assert!(
+                !target_dir.exists(),
+                "case {label}: colliding batch must fail before creating output directory"
+            );
+        }
+
+        // 2. Fail-closed unprobable overlong Unicode candidates abort before any HTTP transfer.
+        let sandbox = TempTestDir::new("failclosed-aborts-transfers");
+        let server = MockServer::start(vec![
+            MockResponse::ok(b"must never be requested"),
+            MockResponse::ok(b"must never be requested"),
+        ])
+        .await;
+        let long_nfc = format!("Caf\u{00e9}-{}", "a".repeat(300));
+        let long_nfd = format!("Cafe\u{0301}-{}", "a".repeat(300));
+        let err = download_files_in_dir(
+            &client,
+            sandbox.path(),
+            vec![
+                (server.url("/nfc"), long_nfc, None),
+                (server.url("/nfd"), long_nfd, None),
+            ],
+            2,
+            None,
+            &RetryPolicy::default(),
+            &signal,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, IaGetError::FileSystem(ref msg) if msg.contains("could not verify")),
+            "expected fail-closed FileSystem error, got {err:?}"
+        );
+        assert!(
+            server.abort().await.is_empty(),
+            "fail-closed validation error must abort before any HTTP transfer requests"
+        );
+        assert_no_probe_dirs_remaining(sandbox.path());
     }
 
     #[test]
     fn test_detect_path_case_sensitivity_and_validate_for_dir_match_host_filesystem() {
         let oracle_dir = TempTestDir::new("case-oracle");
-        let expected = measure_host_dir_case_sensitivity(&oracle_dir.path);
+        let expected = measure_host_dir_case_sensitivity(oracle_dir.path());
 
         // 1. Empty existing directory (exercises temp probe file + cleanup).
         let empty_dir = TempTestDir::new("case-empty");
-        assert_eq!(detect_path_case_sensitivity(&empty_dir.path), expected);
-        assert_eq!(
-            fs::read_dir(&empty_dir.path).unwrap().count(),
-            0,
-            "temporary case probe file must be cleaned up"
-        );
+        assert_eq!(detect_path_case_sensitivity(empty_dir.path()), expected);
+        assert_eq!(fs::read_dir(empty_dir.path()).unwrap().count(), 0);
 
         // 2. Non-empty existing directory (exercises read-only child probe).
         let populated_dir = TempTestDir::new("case-populated");
-        fs::write(populated_dir.join("Existing.txt"), b"data").unwrap();
-        assert_eq!(detect_path_case_sensitivity(&populated_dir.path), expected);
-        assert_eq!(
-            fs::read_dir(&populated_dir.path).unwrap().count(),
-            1,
-            "read-only probe must not leave extra entries"
-        );
+        populated_dir.write("Existing.txt", b"data");
+        assert_eq!(detect_path_case_sensitivity(populated_dir.path()), expected);
+        assert_eq!(fs::read_dir(populated_dir.path()).unwrap().count(), 1);
 
         // 3. Not-yet-created nested directory resolves nearest existing ancestor without creating it.
         let missing_dir = empty_dir.join("not-created-yet/nested");
         assert_eq!(detect_path_case_sensitivity(&missing_dir), expected);
-        assert!(
-            !empty_dir.join("not-created-yet").exists(),
-            "case sensitivity detection must not create missing output directories"
-        );
+        assert!(!empty_dir.join("not-created-yet").exists());
 
         // 4. Read-only directory with an existing child still probes cleanly on Unix.
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let ro_dir = TempTestDir::new("case-readonly");
-            fs::write(ro_dir.join("Sample.txt"), b"ro").unwrap();
-            fs::set_permissions(&ro_dir.path, fs::Permissions::from_mode(0o555)).unwrap();
-            let detected = detect_path_case_sensitivity(&ro_dir.path);
-            fs::set_permissions(&ro_dir.path, fs::Permissions::from_mode(0o755)).unwrap();
+            ro_dir.write("Sample.txt", b"ro");
+            let detected = with_readonly_dir(ro_dir.path(), || {
+                detect_path_case_sensitivity(ro_dir.path())
+            });
             assert_eq!(detected, expected);
         }
 
         // 5. validate_download_paths_for_dir matches host sensitivity for case-only pairs.
-        let case_only_pairs = [
-            [("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
-            [("a.txt", "a.txt"), ("A.TXT.part", "A.TXT.part")],
-        ];
-        for pair in case_only_pairs {
-            let result = validate_download_paths_for_dir(&missing_dir, pair);
+        for pair in [["Foo.txt", "foo.txt"], ["a.txt", "A.TXT.part"]] {
+            let result = validate_download_paths_for_dir(&missing_dir, same_paths(&pair));
             match expected {
                 PathCaseSensitivity::CaseSensitive => assert!(
                     result.is_ok(),
@@ -11431,16 +9402,13 @@ mod tests {
                 ),
             }
         }
-        assert!(
-            !empty_dir.join("not-created-yet").exists(),
-            "validate_download_paths_for_dir must not create missing directories"
-        );
+        assert!(!empty_dir.join("not-created-yet").exists());
     }
 
     #[tokio::test]
     async fn test_download_files_in_dir_case_only_entries_follow_host_filesystem() {
         let sandbox = TempTestDir::new("case-download-host");
-        let expected = measure_host_dir_case_sensitivity(&sandbox.path);
+        let expected = measure_host_dir_case_sensitivity(sandbox.path());
         let target_dir = sandbox.join("not-created-yet");
 
         let payload_upper = b"upper-file-contents";
@@ -11457,12 +9425,12 @@ mod tests {
             (
                 server.url("/upper"),
                 "Foo.txt".to_string(),
-                Some(format!("{:x}", md5::compute(payload_upper))),
+                Some(md5_hex(payload_upper)),
             ),
             (
                 server.url("/lower"),
                 "foo.txt".to_string(),
-                Some(format!("{:x}", md5::compute(payload_lower))),
+                Some(md5_hex(payload_lower)),
             ),
         ];
 
@@ -11479,29 +9447,20 @@ mod tests {
 
         match expected {
             PathCaseSensitivity::CaseInsensitive => {
-                let err = result.unwrap_err();
-                assert!(
-                    matches!(err, IaGetError::PathCollision { .. }),
-                    "expected PathCollision on case-insensitive volume, got {err:?}"
-                );
-                let requests = server.abort_and_collect().await;
-                assert!(
-                    requests.is_empty(),
-                    "expected 0 HTTP requests on case collision, got {requests:?}"
-                );
-                assert!(
-                    !target_dir.exists(),
-                    "case collision must abort before creating output directory"
-                );
+                assert!(matches!(
+                    result.unwrap_err(),
+                    IaGetError::PathCollision { .. }
+                ));
+                assert!(server.abort().await.is_empty());
+                assert!(!target_dir.exists());
             }
             PathCaseSensitivity::CaseSensitive => {
                 let summary = result.expect("case-sensitive volume should download both files");
                 assert_eq!(summary.ok, 2);
                 assert!(summary.failed.is_empty());
-                assert_eq!(fs::read(target_dir.join("Foo.txt")).unwrap(), payload_upper);
-                assert_eq!(fs::read(target_dir.join("foo.txt")).unwrap(), payload_lower);
-                let requests = server.finish().await;
-                assert_eq!(requests.len(), 2);
+                assert_downloaded_file(&target_dir, "Foo.txt", payload_upper);
+                assert_downloaded_file(&target_dir, "foo.txt", payload_lower);
+                assert_eq!(server.finish().await.len(), 2);
             }
         }
     }
@@ -11648,160 +9607,159 @@ mod tests {
     }
 
     #[test]
-    fn test_per_parent_lookup_case_insensitive_subdir_under_case_sensitive_root() {
-        let lookup = MockDirectoryLookup::new([
+    fn test_per_parent_lookup_mixed_mounts_and_merged_parents() {
+        // 1. Case-insensitive subdir under case-sensitive root
+        let cs_root = MockDirectoryLookup::new([
             ("/root", MockDirRule::Exact),
             ("/root/sub", MockDirRule::CaseInsensitiveAscii),
         ]);
         let root = Path::new("/root");
 
-        // Case-only difference in the case-sensitive root is allowed.
         assert!(validate_download_paths_with_lookup(
             root,
-            &[("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
-            &lookup,
+            &same_paths(&["Foo.txt", "foo.txt"]),
+            &cs_root
         )
         .is_ok());
-        assert_eq!(lookup.probed(), vec![PathBuf::from("/root")]);
+        assert_eq!(cs_root.probed(), vec![PathBuf::from("/root")]);
 
-        // Case-only collisions inside the case-insensitive sub-mount are rejected.
-        let sub_cases = [
+        for (label, first, second, expected_local) in [
             (
                 "final-vs-final",
-                ("sub/Foo.txt", "sub/Foo.txt"),
-                ("sub/foo.txt", "sub/foo.txt"),
+                "sub/Foo.txt",
+                "sub/foo.txt",
                 "sub/foo.txt",
             ),
             (
                 "staging-vs-final",
-                ("sub/a.txt", "sub/a.txt"),
-                ("sub/A.TXT.part", "sub/A.TXT.part"),
+                "sub/a.txt",
+                "sub/A.TXT.part",
                 "sub/A.TXT.part",
             ),
             (
                 "final-vs-staging",
-                ("sub/A.TXT.part", "sub/A.TXT.part"),
-                ("sub/a.txt", "sub/a.txt"),
+                "sub/A.TXT.part",
+                "sub/a.txt",
                 "sub/a.txt.part",
             ),
             (
                 "missing-nested-under-submount",
-                ("sub/newdir/Foo.txt", "sub/newdir/Foo.txt"),
-                ("sub/newdir/foo.txt", "sub/newdir/foo.txt"),
+                "sub/newdir/Foo.txt",
+                "sub/newdir/foo.txt",
                 "sub/newdir/foo.txt",
             ),
-        ];
-
-        for (label, first, second, expected_local) in sub_cases {
-            lookup.clear_probed();
+        ] {
+            cs_root.clear_probed();
             let err =
-                validate_download_paths_with_lookup(root, &[first, second], &lookup).unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    IaGetError::PathCollision {
-                        ref local_path,
-                        ref first_entry,
-                        ref second_entry,
-                        ref reason,
-                    } if local_path == expected_local
-                        && first_entry == first.0
-                        && second_entry == second.0
-                        && reason.contains("filesystem lookup rules")
-                ),
-                "case {label}: expected PathCollision for '{expected_local}', got {err:?}"
+                validate_download_paths_with_lookup(root, &same_paths(&[first, second]), &cs_root)
+                    .unwrap_err();
+            assert_path_collision(
+                err,
+                expected_local,
+                Some(first),
+                Some(second),
+                Some("filesystem lookup rules"),
+                label,
             );
             assert_eq!(
-                lookup.probed(),
+                cs_root.probed(),
                 vec![PathBuf::from("/root/sub")],
                 "case {label}: expected probe inside /root/sub"
             );
         }
-    }
 
-    #[test]
-    fn test_per_parent_lookup_case_sensitive_subdir_under_case_insensitive_root() {
-        let lookup = MockDirectoryLookup::new([
+        // 2. Case-sensitive subdir under case-insensitive root (including merged parent spellings)
+        let ci_root = MockDirectoryLookup::new([
             ("/root", MockDirRule::CaseInsensitiveAscii),
             ("/root/sub", MockDirRule::Exact),
         ]);
-        let root = Path::new("/root");
 
-        // Case-only collision in the case-insensitive root is rejected.
         let root_err = validate_download_paths_with_lookup(
             root,
-            &[("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
-            &lookup,
+            &same_paths(&["Foo.txt", "foo.txt"]),
+            &ci_root,
         )
         .unwrap_err();
-        assert!(matches!(
-            root_err,
-            IaGetError::PathCollision {
-                ref local_path,
-                ..
-            } if local_path == "foo.txt"
-        ));
+        assert_path_collision(root_err, "foo.txt", None, None, None, "ci-root");
 
-        // Case-only difference inside the case-sensitive subdirectory is allowed.
-        lookup.clear_probed();
+        ci_root.clear_probed();
         assert!(validate_download_paths_with_lookup(
             root,
-            &[
-                ("sub/Foo.txt", "sub/Foo.txt"),
-                ("sub/foo.txt", "sub/foo.txt")
-            ],
-            &lookup,
+            &same_paths(&["sub/Foo.txt", "sub/foo.txt"]),
+            &ci_root,
         )
         .is_ok());
-        assert_eq!(lookup.probed(), vec![PathBuf::from("/root/sub")]);
+        assert_eq!(ci_root.probed(), vec![PathBuf::from("/root/sub")]);
 
-        // Equivalent parent spellings (`Sub` and `sub`) merge onto the existing case-sensitive
-        // `/root/sub`, where `Foo.txt` and `foo.txt` remain distinct.
-        lookup.clear_probed();
+        // Equivalent parent spellings (`Sub` and `sub`) merge onto the existing case-sensitive `/root/sub`.
+        ci_root.clear_probed();
         assert!(validate_download_paths_with_lookup(
             root,
-            &[
-                ("Sub/Foo.txt", "Sub/Foo.txt"),
-                ("sub/foo.txt", "sub/foo.txt")
-            ],
-            &lookup,
+            &same_paths(&["Sub/Foo.txt", "sub/foo.txt"]),
+            &ci_root,
         )
         .is_ok());
         assert_eq!(
-            lookup.probed(),
+            ci_root.probed(),
             vec![PathBuf::from("/root"), PathBuf::from("/root/sub")]
         );
 
-        // Merging `Sub` and `sub` with an identical leaf filename still collides!
         let merged_leaf_err = validate_download_paths_with_lookup(
             root,
-            &[
-                ("Sub/Foo.txt", "Sub/Foo.txt"),
-                ("sub/Foo.txt", "sub/Foo.txt"),
-            ],
-            &lookup,
+            &same_paths(&["Sub/Foo.txt", "sub/Foo.txt"]),
+            &ci_root,
         )
         .unwrap_err();
-        assert!(
-            matches!(
-                merged_leaf_err,
-                IaGetError::PathCollision {
-                    ref local_path,
-                    ref first_entry,
-                    ref second_entry,
-                    ref reason,
-                } if local_path == "sub/Foo.txt"
-                    && first_entry == "Sub/Foo.txt"
-                    && second_entry == "sub/Foo.txt"
-                    && reason.contains("filesystem lookup rules")
-            ),
-            "unexpected merged-parent collision error: {merged_leaf_err:?}"
+        assert_path_collision(
+            merged_leaf_err,
+            "sub/Foo.txt",
+            Some("Sub/Foo.txt"),
+            Some("sub/Foo.txt"),
+            Some("filesystem lookup rules"),
+            "merged-parent-identical-leaf",
         );
+
+        // 3. Merging case-equivalent parent subdirectories on a CI volume
+        let ci = MockDirectoryLookup::new([("/ci", MockDirRule::CaseInsensitiveAscii)]);
+        for (label, first, second, expected_local) in [
+            (
+                "dir-case-and-file-case",
+                "Dir/a.txt",
+                "dir/A.txt",
+                "dir/A.txt",
+            ),
+            (
+                "dir-case-and-staging-upper-part",
+                "Dir/a.txt",
+                "dir/a.txt.PART",
+                "dir/a.txt.PART",
+            ),
+            (
+                "dir-case-and-staging-before-final",
+                "Dir/a.txt.PART",
+                "dir/a.txt",
+                "dir/a.txt.part",
+            ),
+        ] {
+            let err = validate_download_paths_with_lookup(
+                Path::new("/ci"),
+                &same_paths(&[first, second]),
+                &ci,
+            )
+            .unwrap_err();
+            assert_path_collision(err, expected_local, Some(first), Some(second), None, label);
+        }
+        assert!(validate_download_paths_with_lookup(
+            Path::new("/ci"),
+            &same_paths(&["Dir/a.txt", "dir/b.txt"]),
+            &ci,
+        )
+        .is_ok());
     }
 
     #[test]
     fn test_per_parent_lookup_unicode_nfc_nfd_and_folding_equivalence() {
-        let norm_only = MockDirectoryLookup::new([
+        let lookup = MockDirectoryLookup::new([
             ("/apfs-cs", MockDirRule::NormalizationInsensitive),
             ("/ext4", MockDirRule::Exact),
             ("/apfs-ci", MockDirRule::CaseAndNormalizationInsensitive),
@@ -11810,156 +9768,70 @@ mod tests {
         // Case-sensitive but normalisation-insensitive directory allows ASCII case differences.
         assert!(validate_download_paths_with_lookup(
             Path::new("/apfs-cs"),
-            &[("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
-            &norm_only,
+            &same_paths(&["Foo.txt", "foo.txt"]),
+            &lookup,
         )
         .is_ok());
 
-        // NFC vs NFD collisions (final, staging in both orders, and colliding parent dirs).
-        let nfc_nfd_collisions = [
+        for (label, first, second, expected_local) in [
             (
                 "nfc-vs-nfd-final",
-                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
-                ("Cafe\u{0301}.txt", "Cafe\u{0301}.txt"),
+                "Caf\u{00e9}.txt",
+                "Cafe\u{0301}.txt",
                 "Cafe\u{0301}.txt",
             ),
             (
                 "nfc-vs-nfd-staging-after",
-                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
-                ("Cafe\u{0301}.txt.part", "Cafe\u{0301}.txt.part"),
+                "Caf\u{00e9}.txt",
+                "Cafe\u{0301}.txt.part",
                 "Cafe\u{0301}.txt.part",
             ),
             (
                 "nfd-staging-before-nfc",
-                ("Cafe\u{0301}.txt.part", "Cafe\u{0301}.txt.part"),
-                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
+                "Cafe\u{0301}.txt.part",
+                "Caf\u{00e9}.txt",
                 "Caf\u{00e9}.txt.part",
             ),
             (
                 "nfc-vs-nfd-parent-dir",
-                ("Dir_Caf\u{00e9}/a.txt", "Dir_Caf\u{00e9}/a.txt"),
-                ("Dir_Cafe\u{0301}/a.txt", "Dir_Cafe\u{0301}/a.txt"),
+                "Dir_Caf\u{00e9}/a.txt",
+                "Dir_Cafe\u{0301}/a.txt",
                 "Dir_Cafe\u{0301}/a.txt",
             ),
-        ];
-
-        for (label, first, second, expected_local) in nfc_nfd_collisions {
-            let err = validate_download_paths_with_lookup(
-                Path::new("/apfs-cs"),
-                &[first, second],
-                &norm_only,
-            )
-            .unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    IaGetError::PathCollision {
-                        ref local_path,
-                        ref first_entry,
-                        ref second_entry,
-                        ref reason,
-                    } if local_path == expected_local
-                        && first_entry == first.0
-                        && second_entry == second.0
-                        && reason.contains("filesystem lookup rules")
-                ),
-                "case {label}: expected NFC/NFD PathCollision for '{expected_local}', got {err:?}"
+        ] {
+            let pair = same_paths(&[first, second]);
+            let err = validate_download_paths_with_lookup(Path::new("/apfs-cs"), &pair, &lookup)
+                .unwrap_err();
+            assert_path_collision(
+                err,
+                expected_local,
+                Some(first),
+                Some(second),
+                Some("filesystem lookup rules"),
+                label,
             );
-
-            // On a normalisation-sensitive filesystem, the exact same pair is allowed.
             assert!(
-                validate_download_paths_with_lookup(
-                    Path::new("/ext4"),
-                    &[first, second],
-                    &norm_only,
-                )
-                .is_ok(),
-                "case {label}: normalisation-sensitive directory should allow {first:?} and {second:?}"
+                validate_download_paths_with_lookup(Path::new("/ext4"), &pair, &lookup).is_ok(),
+                "case {label}: normalisation-sensitive directory should allow {pair:?}"
             );
         }
 
         // Equivalent NFC/NFD parent directories with distinct child filenames are allowed.
         assert!(validate_download_paths_with_lookup(
             Path::new("/apfs-cs"),
-            &[
-                ("Dir_Caf\u{00e9}/a.txt", "Dir_Caf\u{00e9}/a.txt"),
-                ("Dir_Cafe\u{0301}/b.txt", "Dir_Cafe\u{0301}/b.txt"),
-            ],
-            &norm_only,
+            &same_paths(&["Dir_Caf\u{00e9}/a.txt", "Dir_Cafe\u{0301}/b.txt"]),
+            &lookup,
         )
         .is_ok());
 
         // Non-ASCII entry colliding with a pure-ASCII entry under Unicode full case folding.
         let folding_err = validate_download_paths_with_lookup(
             Path::new("/apfs-ci"),
-            &[
-                ("Stra\u{00df}e.txt", "Stra\u{00df}e.txt"),
-                ("STRASSE.TXT", "STRASSE.TXT"),
-            ],
-            &norm_only,
-        )
-        .unwrap_err();
-        assert!(matches!(
-            folding_err,
-            IaGetError::PathCollision {
-                ref local_path,
-                ..
-            } if local_path == "STRASSE.TXT"
-        ));
-    }
-
-    #[test]
-    fn test_per_parent_lookup_merges_colliding_parent_subdirectories() {
-        let lookup = MockDirectoryLookup::new([("/ci", MockDirRule::CaseInsensitiveAscii)]);
-        let root = Path::new("/ci");
-
-        let cases = [
-            (
-                "dir-case-and-file-case",
-                ("Dir/a.txt", "Dir/a.txt"),
-                ("dir/A.txt", "dir/A.txt"),
-                "dir/A.txt",
-            ),
-            (
-                "dir-case-and-staging-upper-part",
-                ("Dir/a.txt", "Dir/a.txt"),
-                ("dir/a.txt.PART", "dir/a.txt.PART"),
-                "dir/a.txt.PART",
-            ),
-            (
-                "dir-case-and-staging-before-final",
-                ("Dir/a.txt.PART", "Dir/a.txt.PART"),
-                ("dir/a.txt", "dir/a.txt"),
-                "dir/a.txt.part",
-            ),
-        ];
-
-        for (label, first, second, expected_local) in cases {
-            let err =
-                validate_download_paths_with_lookup(root, &[first, second], &lookup).unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    IaGetError::PathCollision {
-                        ref local_path,
-                        ref first_entry,
-                        ref second_entry,
-                        ..
-                    } if local_path == expected_local
-                        && first_entry == first.0
-                        && second_entry == second.0
-                ),
-                "case {label}: expected PathCollision for '{expected_local}', got {err:?}"
-            );
-        }
-
-        // Distinct files under merged case-equivalent parent directories are allowed.
-        assert!(validate_download_paths_with_lookup(
-            root,
-            &[("Dir/a.txt", "Dir/a.txt"), ("dir/b.txt", "dir/b.txt")],
+            &same_paths(&["Stra\u{00df}e.txt", "STRASSE.TXT"]),
             &lookup,
         )
-        .is_ok());
+        .unwrap_err();
+        assert_path_collision(folding_err, "STRASSE.TXT", None, None, None, "eszett-fold");
     }
 
     #[test]
@@ -11970,38 +9842,26 @@ mod tests {
         ]);
 
         // Exact file-vs-directory and staging-vs-directory collisions fail with zero probing.
-        let exact_cases = [
-            (("foo", "foo"), ("foo/bar.txt", "foo/bar.txt"), "foo"),
-            (("foo/bar.txt", "foo/bar.txt"), ("foo", "foo"), "foo"),
-            (
-                ("foo", "foo"),
-                ("foo.part/bar.txt", "foo.part/bar.txt"),
-                "foo.part",
-            ),
-            (
-                ("foo.part/bar.txt", "foo.part/bar.txt"),
-                ("foo", "foo"),
-                "foo.part",
-            ),
-        ];
-        for (first, second, expected_local) in exact_cases {
+        for (first, second, expected_local) in [
+            ("foo", "foo/bar.txt", "foo"),
+            ("foo/bar.txt", "foo", "foo"),
+            ("foo", "foo.part/bar.txt", "foo.part"),
+            ("foo.part/bar.txt", "foo", "foo.part"),
+        ] {
             lookup.clear_probed();
-            let err =
-                validate_download_paths_with_lookup(Path::new("/exact"), &[first, second], &lookup)
-                    .unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    IaGetError::PathCollision {
-                        ref local_path,
-                        ref first_entry,
-                        ref second_entry,
-                        ..
-                    } if local_path == expected_local
-                        && first_entry == first.0
-                        && second_entry == second.0
-                ),
-                "expected exact file-vs-dir PathCollision for '{expected_local}', got {err:?}"
+            let err = validate_download_paths_with_lookup(
+                Path::new("/exact"),
+                &same_paths(&[first, second]),
+                &lookup,
+            )
+            .unwrap_err();
+            assert_path_collision(
+                err,
+                expected_local,
+                Some(first),
+                Some(second),
+                None,
+                "exact-fvd",
             );
             assert!(
                 lookup.probed().is_empty(),
@@ -12012,37 +9872,29 @@ mod tests {
         // Case-only file-vs-directory collision is allowed on exact dir and rejected on CI dir.
         assert!(validate_download_paths_with_lookup(
             Path::new("/exact"),
-            &[("foo", "foo"), ("FOO/bar.txt", "FOO/bar.txt")],
+            &same_paths(&["foo", "FOO/bar.txt"]),
             &lookup,
         )
         .is_ok());
 
-        let ci_cases = [
-            (("foo", "foo"), ("FOO/bar.txt", "FOO/bar.txt"), "FOO"),
-            (("FOO/bar.txt", "FOO/bar.txt"), ("foo", "foo"), "foo"),
-            (
-                ("foo", "foo"),
-                ("FOO.PART/bar.txt", "FOO.PART/bar.txt"),
-                "FOO.PART",
-            ),
-        ];
-        for (first, second, expected_local) in ci_cases {
-            let err =
-                validate_download_paths_with_lookup(Path::new("/ci"), &[first, second], &lookup)
-                    .unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    IaGetError::PathCollision {
-                        ref local_path,
-                        ref first_entry,
-                        ref second_entry,
-                        ..
-                    } if local_path == expected_local
-                        && first_entry == first.0
-                        && second_entry == second.0
-                ),
-                "expected CI file-vs-dir PathCollision for '{expected_local}', got {err:?}"
+        for (first, second, expected_local) in [
+            ("foo", "FOO/bar.txt", "FOO"),
+            ("FOO/bar.txt", "foo", "foo"),
+            ("foo", "FOO.PART/bar.txt", "FOO.PART"),
+        ] {
+            let err = validate_download_paths_with_lookup(
+                Path::new("/ci"),
+                &same_paths(&[first, second]),
+                &lookup,
+            )
+            .unwrap_err();
+            assert_path_collision(
+                err,
+                expected_local,
+                Some(first),
+                Some(second),
+                None,
+                "ci-fvd",
             );
         }
     }
@@ -12057,12 +9909,7 @@ mod tests {
         // Pure-ASCII batch with no ASCII case duplicates performs zero probing.
         assert!(validate_download_paths_with_lookup(
             Path::new("/ancestor"),
-            &[
-                ("a.txt", "a.txt"),
-                ("b.txt", "b.txt"),
-                ("sub/c.txt", "sub/c.txt"),
-                ("sub/d.txt", "sub/d.txt"),
-            ],
+            &same_paths(&["a.txt", "b.txt", "sub/c.txt", "sub/d.txt"]),
             &lookup,
         )
         .is_ok());
@@ -12071,39 +9918,20 @@ mod tests {
         // Single non-ASCII entry performs zero probing.
         assert!(validate_download_paths_with_lookup(
             Path::new("/ancestor"),
-            &[("Caf\u{00e9}.txt", "Caf\u{00e9}.txt")],
+            &same_paths(&["Caf\u{00e9}.txt"]),
             &lookup,
         )
         .is_ok());
         assert!(lookup.probed().is_empty());
 
-        // When the output root does not exist yet (`/ancestor/missing`), planned child `sub` must
-        // NOT resolve to the unrelated sibling `/ancestor/sub`; it must inherit `/ancestor`.
+        // Missing output root (`/ancestor/missing`) must inherit `/ancestor`, not sibling `/ancestor/sub`.
         assert!(validate_download_paths_with_lookup(
             Path::new("/ancestor/missing"),
-            &[
-                ("sub/Foo.txt", "sub/Foo.txt"),
-                ("sub/foo.txt", "sub/foo.txt")
-            ],
+            &same_paths(&["sub/Foo.txt", "sub/foo.txt"]),
             &lookup,
         )
         .is_ok());
         assert_eq!(lookup.probed(), vec![PathBuf::from("/ancestor")]);
-    }
-
-    /// Independently observes whether `dir` treats NFC (`Caf\u{00e9}`) and NFD (`Cafe\u{0301}`)
-    /// filenames as equivalent.
-    fn measure_host_dir_nfc_nfd_equivalent(dir: &Path) -> bool {
-        let nfc = dir.join("host-nfc-probe-caf\u{00e9}.txt");
-        let nfd = dir.join("host-nfc-probe-cafe\u{0301}.txt");
-        fs::write(&nfc, b"probe").expect("write host NFC probe");
-        let equivalent = match fs::symlink_metadata(&nfd) {
-            Ok(_) => true,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-            Err(err) => panic!("unexpected error probing host NFC/NFD equivalence: {err}"),
-        };
-        let _ = fs::remove_file(&nfc);
-        equivalent
     }
 
     /// Asserts that `dir` contains no leftover `.ia-get-fs-probe-*` entries.
@@ -12120,294 +9948,258 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_real_host_probe_unicode_cleanup_symlink_safety_and_readonly_fallback() {
-        let sandbox = TempTestDir::new("real-host-per-parent-probe");
-        let host_case = measure_host_dir_case_sensitivity(&sandbox.path);
-        let host_nfc_nfd = measure_host_dir_nfc_nfd_equivalent(&sandbox.path);
-
-        // 1. NFC vs NFD final and `.part` pairs match the real host filesystem and leave no probe
-        // directories behind.
-        let nfc_pairs = [
-            [
-                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
-                ("Cafe\u{0301}.txt", "Cafe\u{0301}.txt"),
-            ],
-            [
-                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
-                ("Cafe\u{0301}.txt.part", "Cafe\u{0301}.txt.part"),
-            ],
-        ];
-        for pair in nfc_pairs {
-            let result = validate_download_paths_for_dir(&sandbox.path, pair);
-            if host_nfc_nfd {
-                assert!(
-                    matches!(result, Err(IaGetError::PathCollision { .. })),
-                    "normalisation-insensitive host should reject {pair:?}, got {result:?}"
-                );
-            } else {
+    fn assert_matches_host_case(result: &Result<()>, host_case: PathCaseSensitivity, ctx: &str) {
+        match host_case {
+            PathCaseSensitivity::CaseSensitive => {
                 assert!(
                     result.is_ok(),
-                    "normalisation-sensitive host should allow {pair:?}, got {result:?}"
-                );
+                    "{ctx}: CS host should allow, got {result:?}"
+                )
             }
-            assert_no_probe_dirs_remaining(&sandbox.path);
+            PathCaseSensitivity::CaseInsensitive => assert!(
+                matches!(result, Err(IaGetError::PathCollision { .. })),
+                "{ctx}: CI host should reject, got {result:?}"
+            ),
+        }
+    }
+
+    fn assert_matches_host_nfc(result: &Result<()>, host_nfc_nfd: bool, ctx: &str) {
+        if host_nfc_nfd {
+            assert!(
+                matches!(result, Err(IaGetError::PathCollision { .. })),
+                "{ctx}: normalisation-insensitive host should reject, got {result:?}"
+            );
+        } else {
+            assert!(
+                result.is_ok(),
+                "{ctx}: normalisation-sensitive host should allow, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_real_host_probe_unicode_cleanup_symlink_safety_readonly_and_overlong_fallback() {
+        let sandbox = TempTestDir::new("real-host-per-parent-probe");
+        let host_case = measure_host_dir_case_sensitivity(sandbox.path());
+        let host_nfc_nfd = probe_host_dir_equivalent(
+            sandbox.path(),
+            "host-nfc-probe-caf\u{00e9}.txt",
+            "host-nfc-probe-cafe\u{0301}.txt",
+        );
+
+        // 1. NFC vs NFD final and `.part` pairs match host semantics and leave no probe dirs.
+        for pair in [
+            ["Caf\u{00e9}.txt", "Cafe\u{0301}.txt"],
+            ["Caf\u{00e9}.txt", "Cafe\u{0301}.txt.part"],
+        ] {
+            let result = validate_download_paths_for_dir(sandbox.path(), same_paths(&pair));
+            assert_matches_host_nfc(&result, host_nfc_nfd, "real-host-nfc");
+            assert_no_probe_dirs_remaining(sandbox.path());
         }
 
-        // 2. Missing output dir is never created and leaves no probe dirs in its existing parent.
+        // 2. Missing output dir is never created and leaves no probe dirs in its parent.
         let missing_dir = sandbox.join("never-created/nested");
-        let case_res = validate_download_paths_for_dir(
-            &missing_dir,
-            [("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
-        );
-        match host_case {
-            PathCaseSensitivity::CaseSensitive => assert!(case_res.is_ok()),
-            PathCaseSensitivity::CaseInsensitive => {
-                assert!(matches!(case_res, Err(IaGetError::PathCollision { .. })));
-            }
-        }
-        assert!(
-            !sandbox.join("never-created").exists(),
-            "validate_download_paths_for_dir must not create missing directories"
-        );
-        assert_no_probe_dirs_remaining(&sandbox.path);
+        let case_res =
+            validate_download_paths_for_dir(&missing_dir, same_paths(&["Foo.txt", "foo.txt"]));
+        assert_matches_host_case(&case_res, host_case, "missing-dir");
+        assert!(!sandbox.join("never-created").exists());
+        assert_no_probe_dirs_remaining(sandbox.path());
 
-        // 3. Overlong filenames trigger `create_new` error -> clean probe dir removal -> fail closed.
+        // 3. Overlong ASCII & Unicode names fail closed in both empty and populated dirs, and via prefixed probe.
         let long_lower = "a".repeat(300);
         let long_upper = "A".repeat(300);
-        let long_res = validate_download_paths_for_dir(
-            &sandbox.path,
-            [
-                (long_lower.as_str(), long_lower.as_str()),
-                (long_upper.as_str(), long_upper.as_str()),
-            ],
-        );
-        assert!(
-            matches!(long_res, Err(IaGetError::FileSystem(_))),
-            "overlong unprobable names in empty dir must fail closed, got {long_res:?}"
-        );
-        assert_no_probe_dirs_remaining(&sandbox.path);
+        let long_nfc = format!("Caf\u{00e9}-{}", "a".repeat(300));
+        let long_nfd = format!("Cafe\u{0301}-{}", "a".repeat(300));
+        assert!(matches!(
+            validate_download_paths_for_dir(
+                sandbox.path(),
+                same_paths(&[long_lower.as_str(), long_upper.as_str()])
+            ),
+            Err(IaGetError::FileSystem(_))
+        ));
+        assert_no_probe_dirs_remaining(sandbox.path());
 
-        // 4. Symlinks inside output_dir are never followed for probing, and read-only directories
-        // preserve the zero-I/O fast path while failing closed when candidates cannot be verified.
+        let populated = TempTestDir::new("overlong-populated-failclosed");
+        populated.write("Sample.txt", b"existing");
+        let ascii_pop = validate_download_paths_for_dir(
+            populated.path(),
+            same_paths(&[long_lower.as_str(), long_upper.as_str()]),
+        );
+        match host_case {
+            PathCaseSensitivity::CaseSensitive => {
+                assert!(matches!(ascii_pop, Err(IaGetError::FileSystem(_))));
+            }
+            PathCaseSensitivity::CaseInsensitive => {
+                assert!(matches!(
+                    ascii_pop,
+                    Err(IaGetError::PathCollision { .. } | IaGetError::FileSystem(_))
+                ));
+            }
+        }
+        assert!(matches!(
+            validate_download_paths_for_dir(
+                populated.path(),
+                same_paths(&[long_nfc.as_str(), long_nfd.as_str()])
+            ),
+            Err(IaGetError::FileSystem(_))
+        ));
+        let no_subdir_lookup = OsDirectoryLookup::without_temp_subdir_probe();
+        assert!(matches!(
+            validate_download_paths_with_lookup(
+                populated.path(),
+                &same_paths(&[long_nfc.as_str(), long_nfd.as_str()]),
+                &no_subdir_lookup,
+            ),
+            Err(IaGetError::FileSystem(_))
+        ));
+        assert_no_probe_dirs_remaining(populated.path());
+
+        // 4. Symlinks inside output_dir are never followed for probing; read-only dirs preserve
+        // zero-I/O fast path and fail closed when candidates cannot be verified.
         #[cfg(unix)]
         {
-            use std::os::unix::fs::{symlink, PermissionsExt};
+            use std::os::unix::fs::symlink;
 
             let external_target = TempTestDir::new("symlink-probe-external");
-            fs::set_permissions(&external_target.path, fs::Permissions::from_mode(0o555)).unwrap();
-            let link_path = sandbox.join("linked_sub");
-            symlink(&external_target.path, &link_path).unwrap();
+            symlink(external_target.path(), sandbox.join("linked_sub")).unwrap();
+            let link_res = with_readonly_dir(external_target.path(), || {
+                validate_download_paths_for_dir(
+                    sandbox.path(),
+                    same_paths(&["linked_sub/Foo.txt", "linked_sub/foo.txt"]),
+                )
+            });
+            assert_matches_host_case(&link_res, host_case, "symlink-external");
+            assert_eq!(fs::read_dir(external_target.path()).unwrap().count(), 0);
+            assert_no_probe_dirs_remaining(sandbox.path());
 
-            let link_res = validate_download_paths_for_dir(
-                &sandbox.path,
-                [
-                    ("linked_sub/Foo.txt", "linked_sub/Foo.txt"),
-                    ("linked_sub/foo.txt", "linked_sub/foo.txt"),
-                ],
-            );
-            fs::set_permissions(&external_target.path, fs::Permissions::from_mode(0o755)).unwrap();
-            match host_case {
-                PathCaseSensitivity::CaseSensitive => assert!(link_res.is_ok()),
-                PathCaseSensitivity::CaseInsensitive => {
-                    assert!(matches!(link_res, Err(IaGetError::PathCollision { .. })));
-                }
-            }
-            assert_eq!(
-                fs::read_dir(&external_target.path).unwrap().count(),
-                0,
-                "symlink target outside output_dir must never be written to during probing"
-            );
-            assert_no_probe_dirs_remaining(&sandbox.path);
-
-            // Populated read-only directory:
-            // - Non-colliding pure-ASCII entries succeed via zero-I/O fast path.
-            // - Plain-ASCII case-only pair resolves via read-only child probe.
-            // - Unicode NFC/NFD pair and trailing-dot ASCII pair fail closed.
+            // Populated read-only dir: zero-I/O ASCII ok, case-only via child probe, Unicode & trailing-dot fail closed.
             let ro_populated = TempTestDir::new("ro-probe-populated");
-            fs::write(ro_populated.join("Sample.txt"), b"ro").unwrap();
-            fs::set_permissions(&ro_populated.path, fs::Permissions::from_mode(0o555)).unwrap();
-            let ro_pop_ascii_distinct = validate_download_paths_for_dir(
-                &ro_populated.path,
-                [("alpha.txt", "alpha.txt"), ("beta.txt", "beta.txt")],
-            );
-            let ro_pop_case_res = validate_download_paths_for_dir(
-                &ro_populated.path,
-                [("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
-            );
-            let ro_pop_unicode_res = validate_download_paths_for_dir(
-                &ro_populated.path,
-                [
-                    ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
-                    ("Cafe\u{0301}.txt", "Cafe\u{0301}.txt"),
-                ],
-            );
-            let ro_pop_trailing_dot_res = validate_download_paths_for_dir(
-                &ro_populated.path,
-                [("foo.", "foo."), ("foo", "foo")],
-            );
-            fs::set_permissions(&ro_populated.path, fs::Permissions::from_mode(0o755)).unwrap();
+            ro_populated.write("Sample.txt", b"ro");
+            let (pop_distinct, pop_case, pop_unicode, pop_dot) =
+                with_readonly_dir(ro_populated.path(), || {
+                    (
+                        validate_download_paths_for_dir(
+                            ro_populated.path(),
+                            same_paths(&["alpha.txt", "beta.txt"]),
+                        ),
+                        validate_download_paths_for_dir(
+                            ro_populated.path(),
+                            same_paths(&["Foo.txt", "foo.txt"]),
+                        ),
+                        validate_download_paths_for_dir(
+                            ro_populated.path(),
+                            same_paths(&["Caf\u{00e9}.txt", "Cafe\u{0301}.txt"]),
+                        ),
+                        validate_download_paths_for_dir(
+                            ro_populated.path(),
+                            same_paths(&["foo.", "foo"]),
+                        ),
+                    )
+                });
+            assert!(pop_distinct.is_ok());
+            assert_matches_host_case(&pop_case, host_case, "ro-populated-case");
+            assert!(matches!(pop_unicode, Err(IaGetError::FileSystem(_))));
+            assert!(matches!(pop_dot, Err(IaGetError::FileSystem(_))));
+            assert_no_probe_dirs_remaining(ro_populated.path());
 
-            assert!(
-                ro_pop_ascii_distinct.is_ok(),
-                "non-colliding pure-ASCII entries must succeed with zero I/O in read-only dir: {ro_pop_ascii_distinct:?}"
-            );
-            match host_case {
-                PathCaseSensitivity::CaseSensitive => assert!(
-                    ro_pop_case_res.is_ok(),
-                    "populated read-only CS dir should allow Foo.txt and foo.txt via child probe, got {ro_pop_case_res:?}"
-                ),
-                PathCaseSensitivity::CaseInsensitive => {
-                    assert!(
-                        matches!(ro_pop_case_res, Err(IaGetError::PathCollision { .. })),
-                        "populated read-only CI dir should reject Foo.txt and foo.txt, got {ro_pop_case_res:?}"
-                    );
-                }
-            }
-            assert!(
-                matches!(ro_pop_unicode_res, Err(IaGetError::FileSystem(_))),
-                "read-only populated dir with Unicode candidates must fail closed, got {ro_pop_unicode_res:?}"
-            );
-            assert!(
-                matches!(ro_pop_trailing_dot_res, Err(IaGetError::FileSystem(_))),
-                "read-only populated dir with trailing-dot ASCII candidates must fail closed, got {ro_pop_trailing_dot_res:?}"
-            );
-            assert_no_probe_dirs_remaining(&ro_populated.path);
-
-            // Empty read-only directory:
-            // - Non-colliding pure-ASCII entries succeed via zero-I/O fast path.
-            // - ASCII case-only and Unicode candidates fail closed (no child probe possible).
+            // Empty read-only dir: zero-I/O ASCII ok; case-only and Unicode fail closed.
             let ro_empty = TempTestDir::new("ro-probe-empty");
-            fs::set_permissions(&ro_empty.path, fs::Permissions::from_mode(0o555)).unwrap();
-            let ro_empty_ascii_distinct = validate_download_paths_for_dir(
-                &ro_empty.path,
-                [("alpha.txt", "alpha.txt"), ("beta.txt", "beta.txt")],
-            );
-            let ro_empty_case_res = validate_download_paths_for_dir(
-                &ro_empty.path,
-                [("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
-            );
-            let ro_empty_unicode_res = validate_download_paths_for_dir(
-                &ro_empty.path,
-                [
-                    ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
-                    ("Cafe\u{0301}.txt", "Cafe\u{0301}.txt"),
-                ],
-            );
-            fs::set_permissions(&ro_empty.path, fs::Permissions::from_mode(0o755)).unwrap();
-
-            assert!(
-                ro_empty_ascii_distinct.is_ok(),
-                "non-colliding pure-ASCII entries must succeed with zero I/O in empty read-only dir: {ro_empty_ascii_distinct:?}"
-            );
-            assert!(
-                matches!(ro_empty_case_res, Err(IaGetError::FileSystem(_))),
-                "empty read-only dir with ASCII case-only candidates must fail closed, got {ro_empty_case_res:?}"
-            );
-            assert!(
-                matches!(ro_empty_unicode_res, Err(IaGetError::FileSystem(_))),
-                "empty read-only dir with Unicode candidates must fail closed, got {ro_empty_unicode_res:?}"
-            );
-            assert_no_probe_dirs_remaining(&ro_empty.path);
+            let (empty_distinct, empty_case, empty_unicode) =
+                with_readonly_dir(ro_empty.path(), || {
+                    (
+                        validate_download_paths_for_dir(
+                            ro_empty.path(),
+                            same_paths(&["alpha.txt", "beta.txt"]),
+                        ),
+                        validate_download_paths_for_dir(
+                            ro_empty.path(),
+                            same_paths(&["Foo.txt", "foo.txt"]),
+                        ),
+                        validate_download_paths_for_dir(
+                            ro_empty.path(),
+                            same_paths(&["Caf\u{00e9}.txt", "Cafe\u{0301}.txt"]),
+                        ),
+                    )
+                });
+            assert!(empty_distinct.is_ok());
+            assert!(matches!(empty_case, Err(IaGetError::FileSystem(_))));
+            assert!(matches!(empty_unicode, Err(IaGetError::FileSystem(_))));
+            assert_no_probe_dirs_remaining(ro_empty.path());
         }
     }
 
     #[test]
     fn test_prefixed_file_probe_fallback_when_temp_subdir_unavailable() {
         let sandbox = TempTestDir::new("prefixed-probe-fallback");
-        let host_case = measure_host_dir_case_sensitivity(&sandbox.path);
-        let host_nfc_nfd = measure_host_dir_nfc_nfd_equivalent(&sandbox.path);
+        let host_case = measure_host_dir_case_sensitivity(sandbox.path());
+        let host_nfc_nfd = probe_host_dir_equivalent(
+            sandbox.path(),
+            "host-nfc-probe-caf\u{00e9}.txt",
+            "host-nfc-probe-cafe\u{0301}.txt",
+        );
         let no_subdir_lookup = OsDirectoryLookup::without_temp_subdir_probe();
 
         // 1. ASCII case-only pair matches host semantics when temp subdir creation is unavailable.
         let case_res = validate_download_paths_with_lookup(
-            &sandbox.path,
-            &[("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
+            sandbox.path(),
+            &same_paths(&["Foo.txt", "foo.txt"]),
             &no_subdir_lookup,
         );
-        match host_case {
-            PathCaseSensitivity::CaseSensitive => assert!(
-                case_res.is_ok(),
-                "prefixed probe on CS host should allow Foo.txt and foo.txt, got {case_res:?}"
-            ),
-            PathCaseSensitivity::CaseInsensitive => assert!(
-                matches!(case_res, Err(IaGetError::PathCollision { .. })),
-                "prefixed probe on CI host should reject Foo.txt and foo.txt, got {case_res:?}"
-            ),
-        }
-        assert_no_probe_dirs_remaining(&sandbox.path);
+        assert_matches_host_case(&case_res, host_case, "prefixed-case");
+        assert_no_probe_dirs_remaining(sandbox.path());
 
         // 2. Unicode NFC vs NFD final and `.part` pairs match host semantics via prefixed files.
-        let nfc_pairs = [
-            [
-                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
-                ("Cafe\u{0301}.txt", "Cafe\u{0301}.txt"),
-            ],
-            [
-                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
-                ("Cafe\u{0301}.txt.part", "Cafe\u{0301}.txt.part"),
-            ],
-        ];
-        for pair in nfc_pairs {
-            let result =
-                validate_download_paths_with_lookup(&sandbox.path, &pair, &no_subdir_lookup);
-            if host_nfc_nfd {
-                assert!(
-                    matches!(result, Err(IaGetError::PathCollision { .. })),
-                    "prefixed probe on normalisation-insensitive host should reject {pair:?}, got {result:?}"
-                );
-            } else {
-                assert!(
-                    result.is_ok(),
-                    "prefixed probe on normalisation-sensitive host should allow {pair:?}, got {result:?}"
-                );
-            }
-            assert_no_probe_dirs_remaining(&sandbox.path);
+        for pair in [
+            ["Caf\u{00e9}.txt", "Cafe\u{0301}.txt"],
+            ["Caf\u{00e9}.txt", "Cafe\u{0301}.txt.part"],
+        ] {
+            let result = validate_download_paths_with_lookup(
+                sandbox.path(),
+                &same_paths(&pair),
+                &no_subdir_lookup,
+            );
+            assert_matches_host_nfc(&result, host_nfc_nfd, "prefixed-nfc");
+            assert_no_probe_dirs_remaining(sandbox.path());
         }
 
-        // 3. Direct prefixed probe verifies both collision detection and distinctness, leaving zero
-        // `.ia-get-fs-probe-*` entries behind.
+        // 3. Direct prefixed probe verifies collision detection and distinctness with clean teardown.
         let colliding_names = vec!["same.txt".to_string(), "same.txt".to_string()];
         assert_eq!(
-            probe_prefixed_names_in_dir(&sandbox.path, &colliding_names, &[0, 1]),
+            probe_prefixed_names_in_dir(sandbox.path(), &colliding_names, &[0, 1]),
             PrefixedProbeOutcome::Resolved(vec![0, 0])
         );
-        assert_no_probe_dirs_remaining(&sandbox.path);
+        assert_no_probe_dirs_remaining(sandbox.path());
 
         let distinct_names = vec!["alpha.txt".to_string(), "beta.txt".to_string()];
         assert_eq!(
-            probe_prefixed_names_in_dir(&sandbox.path, &distinct_names, &[0, 1]),
+            probe_prefixed_names_in_dir(sandbox.path(), &distinct_names, &[0, 1]),
             PrefixedProbeOutcome::Resolved(vec![0, 1])
         );
-        assert_no_probe_dirs_remaining(&sandbox.path);
+        assert_no_probe_dirs_remaining(sandbox.path());
 
-        // 4. Pre-existing foreign file matching the first probe filename is never mistaken for a
-        // collision and is never removed; the probe retries cleanly with the next sequence number.
+        // 4. Pre-existing foreign file matching the first probe filename is never removed or mistaken.
         let pid = std::process::id();
         let initial_seq: u64 = 900_000_000;
-        let foreign_path = sandbox.join(&format!(".ia-get-fs-probe-{pid}-{initial_seq}-beta.txt"));
-        fs::write(&foreign_path, b"pre-existing-foreign-file").unwrap();
+        let foreign_path = sandbox.write(
+            format!(".ia-get-fs-probe-{pid}-{initial_seq}-beta.txt"),
+            b"pre-existing-foreign-file",
+        );
 
         let mut seq = initial_seq;
         let foreign_res =
-            probe_prefixed_names_in_dir_with_seq(&sandbox.path, &distinct_names, &[0, 1], || {
+            probe_prefixed_names_in_dir_with_seq(sandbox.path(), &distinct_names, &[0, 1], || {
                 let current = seq;
                 seq += 1;
                 current
             });
         assert_eq!(foreign_res, PrefixedProbeOutcome::Resolved(vec![0, 1]));
-        assert_eq!(
-            seq,
-            initial_seq + 2,
-            "probe should retry with next sequence after foreign collision"
-        );
+        assert_eq!(seq, initial_seq + 2);
         assert_eq!(
             fs::read(&foreign_path).unwrap(),
-            b"pre-existing-foreign-file",
-            "pre-existing foreign file must remain untouched"
+            b"pre-existing-foreign-file"
         );
         fs::remove_file(&foreign_path).unwrap();
-        assert_no_probe_dirs_remaining(&sandbox.path);
+        assert_no_probe_dirs_remaining(sandbox.path());
     }
 
     #[test]
@@ -12421,7 +10213,7 @@ mod tests {
         // Zero-I/O fast path still succeeds on an unverifiable directory for non-colliding ASCII.
         assert!(validate_download_paths_with_lookup(
             Path::new("/unverifiable"),
-            &[("alpha.txt", "alpha.txt"), ("beta.txt", "beta.txt")],
+            &same_paths(&["alpha.txt", "beta.txt"]),
             &lookup,
         )
         .is_ok());
@@ -12429,16 +10221,16 @@ mod tests {
 
         // Unicode and case-only candidates fail closed when the probe is inconclusive.
         for entries in [
-            [
-                ("Caf\u{00e9}.txt", "Caf\u{00e9}.txt"),
-                ("Cafe\u{0301}.txt", "Cafe\u{0301}.txt"),
-            ],
-            [("Foo.txt", "Foo.txt"), ("foo.txt", "foo.txt")],
+            ["Caf\u{00e9}.txt", "Cafe\u{0301}.txt"],
+            ["Foo.txt", "foo.txt"],
         ] {
             lookup.clear_probed();
-            let err =
-                validate_download_paths_with_lookup(Path::new("/unverifiable"), &entries, &lookup)
-                    .unwrap_err();
+            let err = validate_download_paths_with_lookup(
+                Path::new("/unverifiable"),
+                &same_paths(&entries),
+                &lookup,
+            )
+            .unwrap_err();
             assert!(
                 matches!(err, IaGetError::FileSystem(ref msg) if msg.contains("could not verify")),
                 "inconclusive probe must fail closed with IaGetError::FileSystem, got {err:?}"
@@ -12450,16 +10242,10 @@ mod tests {
         lookup.clear_probed();
         let subdir_err = validate_download_paths_with_lookup(
             Path::new("/exact"),
-            &[
-                (
-                    "unverifiable/Caf\u{00e9}.txt",
-                    "unverifiable/Caf\u{00e9}.txt",
-                ),
-                (
-                    "unverifiable/Cafe\u{0301}.txt",
-                    "unverifiable/Cafe\u{0301}.txt",
-                ),
-            ],
+            &same_paths(&[
+                "unverifiable/Caf\u{00e9}.txt",
+                "unverifiable/Cafe\u{0301}.txt",
+            ]),
             &lookup,
         )
         .unwrap_err();
@@ -12468,115 +10254,5 @@ mod tests {
             "inconclusive child directory probe must fail closed, got {subdir_err:?}"
         );
         assert_eq!(lookup.probed(), vec![PathBuf::from("/exact/unverifiable")]);
-    }
-
-    #[test]
-    fn test_overlong_and_unprobable_names_fail_closed_even_in_populated_dir() {
-        let populated = TempTestDir::new("overlong-populated-failclosed");
-        fs::write(populated.join("Sample.txt"), b"existing").unwrap();
-        let host_case = measure_host_dir_case_sensitivity(&populated.path);
-
-        // Overlong ASCII names cannot be probed and must never silently pass even when read-only
-        // child probing can observe host case sensitivity.
-        let long_lower = "a".repeat(300);
-        let long_upper = "A".repeat(300);
-        let ascii_res = validate_download_paths_for_dir(
-            &populated.path,
-            [
-                (long_lower.as_str(), long_lower.as_str()),
-                (long_upper.as_str(), long_upper.as_str()),
-            ],
-        );
-        match host_case {
-            PathCaseSensitivity::CaseSensitive => assert!(
-                matches!(ascii_res, Err(IaGetError::FileSystem(_))),
-                "overlong ASCII pair on CS host must fail closed with FileSystem error, got {ascii_res:?}"
-            ),
-            PathCaseSensitivity::CaseInsensitive => assert!(
-                matches!(
-                    ascii_res,
-                    Err(IaGetError::PathCollision { .. } | IaGetError::FileSystem(_))
-                ),
-                "overlong ASCII pair on CI host must not silently pass, got {ascii_res:?}"
-            ),
-        }
-        assert_no_probe_dirs_remaining(&populated.path);
-
-        // Overlong Unicode names always fail closed with FileSystem error.
-        let long_nfc = format!("Caf\u{00e9}-{}", "a".repeat(300));
-        let long_nfd = format!("Cafe\u{0301}-{}", "a".repeat(300));
-        let unicode_res = validate_download_paths_for_dir(
-            &populated.path,
-            [
-                (long_nfc.as_str(), long_nfc.as_str()),
-                (long_nfd.as_str(), long_nfd.as_str()),
-            ],
-        );
-        assert!(
-            matches!(unicode_res, Err(IaGetError::FileSystem(_))),
-            "overlong Unicode pair must fail closed, got {unicode_res:?}"
-        );
-        assert_no_probe_dirs_remaining(&populated.path);
-
-        // Prefixed-file probe also fails closed for overlong names and leaves zero files behind.
-        let no_subdir_lookup = OsDirectoryLookup::without_temp_subdir_probe();
-        let prefixed_res = validate_download_paths_with_lookup(
-            &populated.path,
-            &[
-                (long_nfc.as_str(), long_nfc.as_str()),
-                (long_nfd.as_str(), long_nfd.as_str()),
-            ],
-            &no_subdir_lookup,
-        );
-        assert!(
-            matches!(prefixed_res, Err(IaGetError::FileSystem(_))),
-            "prefixed probe for overlong Unicode pair must fail closed, got {prefixed_res:?}"
-        );
-        assert_no_probe_dirs_remaining(&populated.path);
-    }
-
-    #[tokio::test]
-    async fn test_download_files_in_dir_fail_closed_probe_aborts_before_http_requests() {
-        let sandbox = TempTestDir::new("failclosed-aborts-transfers");
-        let server = MockServer::start(vec![
-            MockResponse::ok(b"must never be requested"),
-            MockResponse::ok(b"must never be requested"),
-        ])
-        .await;
-
-        let client = http_client_builder().build().unwrap();
-        let signal = ShutdownSignal::new();
-
-        // Overlong Unicode candidates cannot be verified by live probing and must abort before
-        // any HTTP transfer starts on every platform.
-        let long_nfc = format!("Caf\u{00e9}-{}", "a".repeat(300));
-        let long_nfd = format!("Cafe\u{0301}-{}", "a".repeat(300));
-        let files = vec![
-            (server.url("/nfc"), long_nfc, None),
-            (server.url("/nfd"), long_nfd, None),
-        ];
-
-        let err = download_files_in_dir(
-            &client,
-            &sandbox.path,
-            files,
-            2,
-            None,
-            &RetryPolicy::default(),
-            &signal,
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            matches!(err, IaGetError::FileSystem(ref msg) if msg.contains("could not verify")),
-            "expected fail-closed FileSystem error, got {err:?}"
-        );
-
-        let requests = server.abort_and_collect().await;
-        assert!(
-            requests.is_empty(),
-            "fail-closed validation error must abort before any HTTP transfer requests: {requests:?}"
-        );
-        assert_no_probe_dirs_remaining(&sandbox.path);
     }
 }
