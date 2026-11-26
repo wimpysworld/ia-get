@@ -13,7 +13,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use colored::*;
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::HeaderValue;
 use reqwest::{Client, ClientBuilder, RequestBuilder, Response, StatusCode, Url};
 use tokio::sync::Notify;
 
@@ -23,8 +23,8 @@ use crate::constants::{
 use crate::cookie::CookieSource;
 use crate::error::IaGetError; // Import IaGetError for explicit error conversion
 use crate::utils::{
-    create_progress_bar, format_duration, format_size, format_transfer_rate, sanitize_url_for_log,
-    VerboseLogger,
+    create_progress_bar, format_duration, format_run_summary, format_size, format_transfer_rate,
+    print_run_summary, sanitize_url_for_log, VerboseLogger,
 };
 use crate::Result; // Import utility functions
 
@@ -291,23 +291,13 @@ fn interrupted_error() -> IaGetError {
 
 /// Sleeps for `duration`, waking immediately with an interrupted error if `signal` triggers.
 pub async fn sleep_interruptible(duration: Duration, signal: &ShutdownSignal) -> Result<()> {
-    let notified = signal.notify.notified();
-    tokio::pin!(notified);
-    notified.as_mut().enable();
-
     if !signal.is_running() {
         return Err(interrupted_error());
     }
-
     if duration.is_zero() {
         return Ok(());
     }
-
-    tokio::select! {
-        biased;
-        () = &mut notified => Err(interrupted_error()),
-        () = tokio::time::sleep(duration) => Ok(()),
-    }
+    await_interruptible(tokio::time::sleep(duration), signal).await
 }
 
 async fn await_interruptible<Fut, T>(future: Fut, signal: &ShutdownSignal) -> Result<T>
@@ -341,18 +331,12 @@ pub fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
     !err.is_builder() && !err.is_redirect() && err.status().is_none_or(is_retryable_status)
 }
 
-fn parse_fixed_u8(input: &str, expected_len: usize) -> Option<u8> {
-    if input.len() != expected_len || !input.bytes().all(|b| b.is_ascii_digit()) {
+fn parse_ascii_uint<T: std::str::FromStr>(input: &str, expected_len: Option<usize>) -> Option<T> {
+    let valid_len = expected_len.map_or(!input.is_empty(), |len| input.len() == len);
+    if !valid_len || !input.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    input.parse::<u8>().ok()
-}
-
-fn parse_fixed_i64(input: &str, expected_len: usize) -> Option<i64> {
-    if input.len() != expected_len || !input.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    input.parse::<i64>().ok()
+    input.parse::<T>().ok()
 }
 
 fn is_short_weekday(input: &str) -> bool {
@@ -389,9 +373,9 @@ fn parse_hms(input: &str) -> Option<(u8, u8, u8)> {
     if bytes.len() != 8 || bytes[2] != b':' || bytes[5] != b':' {
         return None;
     }
-    let hour = parse_fixed_u8(&input[0..2], 2)?;
-    let minute = parse_fixed_u8(&input[3..5], 2)?;
-    let second = parse_fixed_u8(&input[6..8], 2)?;
+    let hour = parse_ascii_uint::<u8>(&input[0..2], Some(2))?;
+    let minute = parse_ascii_uint::<u8>(&input[3..5], Some(2))?;
+    let second = parse_ascii_uint::<u8>(&input[6..8], Some(2))?;
     if hour > 23 || minute > 59 || second > 59 {
         return None;
     }
@@ -466,9 +450,9 @@ fn parse_imf_fixdate(input: &str) -> Option<(i64, u8, u8, u8, u8, u8)> {
     {
         return None;
     }
-    let day = parse_fixed_u8(&input[5..7], 2)?;
+    let day = parse_ascii_uint::<u8>(&input[5..7], Some(2))?;
     let month = parse_month(&input[8..11])?;
-    let year = parse_fixed_i64(&input[12..16], 4)?;
+    let year = parse_ascii_uint::<i64>(&input[12..16], Some(4))?;
     let (hour, minute, second) = parse_hms(&input[17..25])?;
     Some((year, month, day, hour, minute, second))
 }
@@ -482,9 +466,9 @@ fn parse_rfc850_date(input: &str, now_year: i64) -> Option<(i64, u8, u8, u8, u8,
     if bytes[2] != b'-' || bytes[6] != b'-' || bytes[9] != b' ' || &rest[18..22] != " GMT" {
         return None;
     }
-    let day = parse_fixed_u8(&rest[0..2], 2)?;
+    let day = parse_ascii_uint::<u8>(&rest[0..2], Some(2))?;
     let month = parse_month(&rest[3..6])?;
-    let two_digit_year = parse_fixed_i64(&rest[7..9], 2)?;
+    let two_digit_year = parse_ascii_uint::<i64>(&rest[7..9], Some(2))?;
     let (hour, minute, second) = parse_hms(&rest[10..18])?;
 
     let mut year = (now_year / 100) * 100 + two_digit_year;
@@ -513,12 +497,12 @@ fn parse_asctime_date(input: &str) -> Option<(i64, u8, u8, u8, u8, u8)> {
     let month = parse_month(&input[4..7])?;
     let day_str = &input[8..10];
     let day = if let Some(single_digit) = day_str.strip_prefix(' ') {
-        parse_fixed_u8(single_digit, 1)?
+        parse_ascii_uint::<u8>(single_digit, Some(1))?
     } else {
-        parse_fixed_u8(day_str, 2)?
+        parse_ascii_uint::<u8>(day_str, Some(2))?
     };
     let (hour, minute, second) = parse_hms(&input[11..19])?;
-    let year = parse_fixed_i64(&input[20..24], 4)?;
+    let year = parse_ascii_uint::<i64>(&input[20..24], Some(4))?;
     Some((year, month, day, hour, minute, second))
 }
 
@@ -531,7 +515,7 @@ pub fn parse_retry_after(value: &str, now: SystemTime, max_delay: Duration) -> O
     }
 
     if trimmed.bytes().all(|b| b.is_ascii_digit()) {
-        return Some(match parse_ascii_u64(trimmed) {
+        return Some(match parse_ascii_uint::<u64>(trimmed, None) {
             Some(secs) => Duration::from_secs(secs).min(max_delay),
             None => max_delay,
         });
@@ -1187,6 +1171,61 @@ where
     }
 }
 
+/// Attaches a scoped `Cookie` header to `request` when `cookie_source` yields one for `target_url`.
+pub fn attach_cookie_header(
+    request: RequestBuilder,
+    cookie_source: Option<&CookieSource>,
+    target_url: &Url,
+) -> Result<RequestBuilder> {
+    if let Some(cookie_value) = cookie_source
+        .map(|source| source.header_value_for_url(target_url))
+        .transpose()?
+        .flatten()
+    {
+        Ok(request.header(reqwest::header::COOKIE, cookie_value))
+    } else {
+        Ok(request)
+    }
+}
+
+/// Logs a retry attempt, notifies `on_retry`, and sleeps interruptibly for `delay`.
+#[allow(clippy::too_many_arguments)]
+async fn log_and_wait_retry<H>(
+    retry_count: &mut u32,
+    policy: &RetryPolicy,
+    initial_url: &Url,
+    delay: Duration,
+    delay_source: &str,
+    reason: &str,
+    signal: &ShutdownSignal,
+    logger: &VerboseLogger,
+    on_retry: &mut H,
+) -> Result<()>
+where
+    H: FnMut(&RetryEvent<'_>),
+{
+    *retry_count += 1;
+    logger.log(
+        "retry",
+        format_args!(
+            "attempt {}/{} for {} after {}; waiting {:.2}s ({})",
+            *retry_count,
+            policy.max_retries,
+            sanitize_url_for_log(initial_url),
+            reason,
+            delay.as_secs_f64(),
+            delay_source
+        ),
+    );
+    on_retry(&RetryEvent {
+        attempt: *retry_count,
+        max_retries: policy.max_retries,
+        delay,
+        reason,
+    });
+    sleep_interruptible(delay, signal).await
+}
+
 /// Sends an HTTP request with retries on transient transport errors and retryable HTTP statuses,
 /// following redirects manually per attempt and honouring `Retry-After` headers and `ShutdownSignal`.
 pub async fn send_with_retry<F, H>(
@@ -1245,26 +1284,18 @@ where
                 delay_source,
                 reason,
             } => {
-                retry_count += 1;
-                logger.log(
-                    "retry",
-                    format_args!(
-                        "attempt {}/{} for {} after {}; waiting {:.2}s ({})",
-                        retry_count,
-                        policy.max_retries,
-                        sanitize_url_for_log(initial_url),
-                        reason,
-                        delay.as_secs_f64(),
-                        delay_source
-                    ),
-                );
-                on_retry(&RetryEvent {
-                    attempt: retry_count,
-                    max_retries: policy.max_retries,
+                log_and_wait_retry(
+                    &mut retry_count,
+                    policy,
+                    initial_url,
                     delay,
-                    reason: &reason,
-                });
-                sleep_interruptible(delay, signal).await?;
+                    delay_source,
+                    &reason,
+                    signal,
+                    logger,
+                    &mut on_retry,
+                )
+                .await?;
             }
         }
     }
@@ -1328,26 +1359,18 @@ where
                 delay_source,
                 reason,
             } => {
-                retry_count += 1;
-                logger.log(
-                    "retry",
-                    format_args!(
-                        "attempt {}/{} for {} after {}; waiting {:.2}s ({})",
-                        retry_count,
-                        policy.max_retries,
-                        sanitize_url_for_log(initial_url),
-                        reason,
-                        delay.as_secs_f64(),
-                        delay_source
-                    ),
-                );
-                on_retry(&RetryEvent {
-                    attempt: retry_count,
-                    max_retries: policy.max_retries,
+                log_and_wait_retry(
+                    &mut retry_count,
+                    policy,
+                    initial_url,
                     delay,
-                    reason: &reason,
-                });
-                sleep_interruptible(delay, signal).await?;
+                    delay_source,
+                    &reason,
+                    signal,
+                    logger,
+                    &mut on_retry,
+                )
+                .await?;
             }
             AttemptOutcome::Ready(response) => {
                 match await_interruptible(response.text(), signal).await? {
@@ -1368,33 +1391,25 @@ where
                             }
                             return Err(err.into());
                         }
-                        retry_count += 1;
                         let (delay, delay_source) = compute_retry_delay_with_source(
-                            retry_count,
+                            retry_count + 1,
                             None,
                             SystemTime::now(),
                             policy,
                         );
                         let reason = err.to_string();
-                        logger.log(
-                            "retry",
-                            format_args!(
-                                "attempt {}/{} for {} after {}; waiting {:.2}s ({})",
-                                retry_count,
-                                policy.max_retries,
-                                sanitize_url_for_log(initial_url),
-                                reason,
-                                delay.as_secs_f64(),
-                                delay_source
-                            ),
-                        );
-                        on_retry(&RetryEvent {
-                            attempt: retry_count,
-                            max_retries: policy.max_retries,
+                        log_and_wait_retry(
+                            &mut retry_count,
+                            policy,
+                            initial_url,
                             delay,
-                            reason: &reason,
-                        });
-                        sleep_interruptible(delay, signal).await?;
+                            delay_source,
+                            &reason,
+                            signal,
+                            logger,
+                            &mut on_retry,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1424,13 +1439,6 @@ enum ResponseAction {
     DiscardAndRefetchUnranged,
 }
 
-fn parse_ascii_u64(input: &str) -> Option<u64> {
-    if input.is_empty() || !input.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    input.parse::<u64>().ok()
-}
-
 /// Parses an RFC 9110 Section 14.4 `Content-Range` header value for the `bytes` unit.
 fn parse_content_range(header: &str) -> Option<ContentRange> {
     let trimmed = header.trim();
@@ -1442,13 +1450,13 @@ fn parse_content_range(header: &str) -> Option<ContentRange> {
     let (range_part, total_part) = range_spec.split_once('/')?;
 
     if range_part == "*" {
-        let complete_length = parse_ascii_u64(total_part)?;
+        let complete_length = parse_ascii_uint::<u64>(total_part, None)?;
         return Some(ContentRange::Unsatisfied { complete_length });
     }
 
     let (start_str, end_str) = range_part.split_once('-')?;
-    let start = parse_ascii_u64(start_str)?;
-    let end = parse_ascii_u64(end_str)?;
+    let start = parse_ascii_uint::<u64>(start_str, None)?;
+    let end = parse_ascii_uint::<u64>(end_str, None)?;
 
     if start > end {
         return None;
@@ -1457,7 +1465,7 @@ fn parse_content_range(header: &str) -> Option<ContentRange> {
     let complete_length = if total_part == "*" {
         None
     } else {
-        let total = parse_ascii_u64(total_part)?;
+        let total = parse_ascii_uint::<u64>(total_part, None)?;
         if end >= total {
             return None;
         }
@@ -1557,32 +1565,60 @@ pub(crate) fn resolve_destination_root(root: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-/// Validates and prepares the destination output directory, creating missing directories
-/// when needed and returning its canonical path.
-pub fn prepare_output_dir(path: &Path) -> Result<PathBuf> {
+/// Validates a target directory (optionally creating missing directories when
+/// `create_if_missing` is `true`) and returns its canonical path.
+///
+/// When `create_if_missing` is `false`, this helper is strictly read-only: it never creates or
+/// modifies directories and verifies search access via `canonical.join(".")`.
+pub(crate) fn validate_or_prepare_dir(
+    path: &Path,
+    label_cap: &str,
+    label_lower: &str,
+    create_if_missing: bool,
+) -> Result<PathBuf> {
     if path.as_os_str().is_empty() {
-        return Err(IaGetError::FileSystem(
-            "Output directory path must not be empty".to_string(),
-        ));
+        return Err(IaGetError::FileSystem(format!(
+            "{label_cap} directory path must not be empty"
+        )));
     }
 
     match fs::metadata(path) {
-        Ok(meta) if meta.is_dir() => resolve_destination_root(path),
+        Ok(meta) if meta.is_dir() => {
+            let canonical = resolve_destination_root(path)?;
+            if !create_if_missing {
+                // Confirm search access into the directory itself without modifying anything.
+                fs::metadata(canonical.join(".")).map_err(|err| {
+                    IaGetError::FileSystem(format!(
+                        "Failed to access {label_lower} directory '{}': {}",
+                        path.display(),
+                        err
+                    ))
+                })?;
+            }
+            Ok(canonical)
+        }
         Ok(_) => Err(IaGetError::FileSystem(format!(
-            "Output path '{}' exists and is not a directory",
+            "{label_cap} path '{}' exists and is not a directory",
             path.display()
         ))),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             if fs::symlink_metadata(path).is_ok() {
                 return Err(IaGetError::FileSystem(format!(
-                    "Output path '{}' is a broken symlink",
+                    "{label_cap} path '{}' is a broken symlink",
+                    path.display()
+                )));
+            }
+
+            if !create_if_missing {
+                return Err(IaGetError::FileSystem(format!(
+                    "{label_cap} directory '{}' does not exist",
                     path.display()
                 )));
             }
 
             fs::create_dir_all(path).map_err(|create_err| {
                 IaGetError::FileSystem(format!(
-                    "Failed to create output directory '{}': {}",
+                    "Failed to create {label_lower} directory '{}': {}",
                     path.display(),
                     create_err
                 ))
@@ -1591,11 +1627,17 @@ pub fn prepare_output_dir(path: &Path) -> Result<PathBuf> {
             resolve_destination_root(path)
         }
         Err(err) => Err(IaGetError::FileSystem(format!(
-            "Failed to access output directory '{}': {}",
+            "Failed to access {label_lower} directory '{}': {}",
             path.display(),
             err
         ))),
     }
+}
+
+/// Validates and prepares the destination output directory, creating missing directories
+/// when needed and returning its canonical path.
+pub fn prepare_output_dir(path: &Path) -> Result<PathBuf> {
+    validate_or_prepare_dir(path, "Output", "output", true)
 }
 
 /// Validates that a destination path is a non-empty relative path made solely of normal segments.
@@ -1632,13 +1674,30 @@ pub(crate) fn validate_relative_path(path: &Path) -> Result<PathBuf> {
     Ok(clean)
 }
 
-/// Validates that `rel_path` stays inside `canonical_root` with no symlinks or non-regular leaves.
-pub(crate) fn validate_contained_path(
+/// Typed internal failure classification for contained-file inspection, opening, and hashing.
+enum ContainedFileError {
+    /// Path containment or safety refusal (symlink, non-regular file, escape, unsafe path).
+    Containment(IaGetError),
+    /// Operation was interrupted by a shutdown signal.
+    Interrupted(IaGetError),
+    /// Ordinary filesystem I/O failure.
+    Io(IaGetError),
+}
+
+impl ContainedFileError {
+    fn into_ia_get_error(self) -> IaGetError {
+        match self {
+            Self::Containment(err) | Self::Interrupted(err) | Self::Io(err) => err,
+        }
+    }
+}
+
+fn validate_contained_path_inner(
     canonical_root: &Path,
     rel_path: &Path,
     allow_missing_leaf: bool,
-) -> Result<PathBuf> {
-    let clean_rel = validate_relative_path(rel_path)?;
+) -> std::result::Result<(PathBuf, Option<fs::Metadata>), ContainedFileError> {
+    let clean_rel = validate_relative_path(rel_path).map_err(ContainedFileError::Containment)?;
     let segments: Vec<&OsStr> = clean_rel
         .components()
         .map(|component| match component {
@@ -1656,23 +1715,30 @@ pub(crate) fn validate_contained_path(
         match fs::symlink_metadata(&current) {
             Ok(meta) => {
                 if meta.file_type().is_symlink() {
-                    return Err(IaGetError::FileSystem(format!(
-                        "Refusing symlinked directory component '{}'",
-                        current.display()
+                    return Err(ContainedFileError::Containment(IaGetError::FileSystem(
+                        format!(
+                            "Refusing symlinked directory component '{}'",
+                            current.display()
+                        ),
                     )));
                 }
                 if !meta.file_type().is_dir() {
-                    return Err(IaGetError::FileSystem(format!(
-                        "Expected directory at '{}', found non-directory",
-                        current.display()
+                    return Err(ContainedFileError::Containment(IaGetError::FileSystem(
+                        format!(
+                            "Expected directory at '{}', found non-directory",
+                            current.display()
+                        ),
                     )));
                 }
-                let canonical_current = fs::canonicalize(&current)?;
+                let canonical_current =
+                    fs::canonicalize(&current).map_err(|e| ContainedFileError::Io(e.into()))?;
                 if !canonical_current.starts_with(canonical_root) {
-                    return Err(IaGetError::FileSystem(format!(
-                        "Path '{}' escapes destination root '{}'",
-                        current.display(),
-                        canonical_root.display()
+                    return Err(ContainedFileError::Containment(IaGetError::FileSystem(
+                        format!(
+                            "Path '{}' escapes destination root '{}'",
+                            current.display(),
+                            canonical_root.display()
+                        ),
                     )));
                 }
             }
@@ -1682,11 +1748,11 @@ pub(crate) fn validate_contained_path(
                         current.push(remaining);
                     }
                     current.push(leaf);
-                    return Ok(current);
+                    return Ok((current, None));
                 }
-                return Err(err.into());
+                return Err(ContainedFileError::Io(err.into()));
             }
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(ContainedFileError::Io(err.into())),
         }
     }
 
@@ -1694,35 +1760,61 @@ pub(crate) fn validate_contained_path(
     match fs::symlink_metadata(&current) {
         Ok(meta) => {
             if meta.file_type().is_symlink() {
-                return Err(IaGetError::FileSystem(format!(
-                    "Refusing symlink target '{}'",
-                    current.display()
+                return Err(ContainedFileError::Containment(IaGetError::FileSystem(
+                    format!("Refusing symlink target '{}'", current.display()),
                 )));
             }
             if !meta.file_type().is_file() {
-                return Err(IaGetError::FileSystem(format!(
-                    "Refusing non-regular file target '{}'",
-                    current.display()
+                return Err(ContainedFileError::Containment(IaGetError::FileSystem(
+                    format!("Refusing non-regular file target '{}'", current.display()),
                 )));
             }
-            let canonical_leaf = fs::canonicalize(&current)?;
+            let canonical_leaf =
+                fs::canonicalize(&current).map_err(|e| ContainedFileError::Io(e.into()))?;
             if !canonical_leaf.starts_with(canonical_root) {
-                return Err(IaGetError::FileSystem(format!(
-                    "Target '{}' escapes destination root '{}'",
-                    current.display(),
-                    canonical_root.display()
+                return Err(ContainedFileError::Containment(IaGetError::FileSystem(
+                    format!(
+                        "Target '{}' escapes destination root '{}'",
+                        current.display(),
+                        canonical_root.display()
+                    ),
                 )));
             }
-            Ok(current)
+            Ok((current, Some(meta)))
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             if allow_missing_leaf {
-                Ok(current)
+                Ok((current, None))
             } else {
-                Err(err.into())
+                Err(ContainedFileError::Io(err.into()))
             }
         }
-        Err(err) => Err(err.into()),
+        Err(err) => Err(ContainedFileError::Io(err.into())),
+    }
+}
+
+/// Validates that `rel_path` stays inside `canonical_root` with no symlinks or non-regular leaves.
+pub(crate) fn validate_contained_path(
+    canonical_root: &Path,
+    rel_path: &Path,
+    allow_missing_leaf: bool,
+) -> Result<PathBuf> {
+    validate_contained_path_inner(canonical_root, rel_path, allow_missing_leaf)
+        .map(|(path, _)| path)
+        .map_err(ContainedFileError::into_ia_get_error)
+}
+
+/// Validates that `rel_path` stays inside `canonical_root` with no symlinks or non-regular leaves,
+/// returning `Ok(Some((path, metadata)))` for an existing regular file or `Ok(None)` when absent.
+pub(crate) fn inspect_contained_regular_file(
+    canonical_root: &Path,
+    rel_path: &Path,
+) -> Result<Option<(PathBuf, fs::Metadata)>> {
+    match validate_contained_path_inner(canonical_root, rel_path, true)
+        .map_err(ContainedFileError::into_ia_get_error)?
+    {
+        (path, Some(meta)) => Ok(Some((path, meta))),
+        (_, None) => Ok(None),
     }
 }
 
@@ -1795,24 +1887,36 @@ fn configure_no_follow(options: &mut fs::OpenOptions) {
     }
 }
 
-/// Opens a verified regular file inside `root` for reading without following symlinks.
-pub(crate) fn open_regular_file_for_read(root: &Path, rel_path: &Path) -> Result<File> {
-    let canonical_root = resolve_destination_root(root)?;
-    let target_path = validate_contained_path(&canonical_root, rel_path, false)?;
+fn open_regular_file_for_read_in_canonical_root_typed(
+    canonical_root: &Path,
+    rel_path: &Path,
+) -> std::result::Result<File, ContainedFileError> {
+    let (target_path, _) = validate_contained_path_inner(canonical_root, rel_path, false)?;
 
     let mut options = fs::OpenOptions::new();
     options.read(true);
     configure_no_follow(&mut options);
 
-    let file = options.open(&target_path)?;
-    if !file.metadata()?.file_type().is_file() {
-        return Err(IaGetError::FileSystem(format!(
-            "Refusing non-regular file '{}'",
-            target_path.display()
+    let file = options
+        .open(&target_path)
+        .map_err(|e| ContainedFileError::Io(e.into()))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| ContainedFileError::Io(e.into()))?;
+    if !meta.file_type().is_file() {
+        return Err(ContainedFileError::Containment(IaGetError::FileSystem(
+            format!("Refusing non-regular file '{}'", target_path.display()),
         )));
     }
 
     Ok(file)
+}
+
+/// Opens a verified regular file inside `root` for reading without following symlinks.
+pub(crate) fn open_regular_file_for_read(root: &Path, rel_path: &Path) -> Result<File> {
+    let canonical_root = resolve_destination_root(root)?;
+    open_regular_file_for_read_in_canonical_root_typed(&canonical_root, rel_path)
+        .map_err(ContainedFileError::into_ia_get_error)
 }
 
 /// Safely removes a contained regular `.part` file inside `root`, ignoring `NotFound`.
@@ -2319,39 +2423,6 @@ fn create_temp_probe_dir(parent: &Path) -> std::io::Result<ProbeDirGuard> {
     ))
 }
 
-/// Returns `true` if `name` is a Windows reserved DOS device name that must not be opened during
-/// filesystem probing.
-#[cfg(windows)]
-fn is_windows_reserved_probe_name(name: &str) -> bool {
-    let base = name.split('.').next().unwrap_or(name);
-    let trimmed = base.trim_end_matches([' ', '.']);
-    matches!(
-        trimmed.to_ascii_uppercase().as_str(),
-        "CON"
-            | "PRN"
-            | "AUX"
-            | "NUL"
-            | "COM1"
-            | "COM2"
-            | "COM3"
-            | "COM4"
-            | "COM5"
-            | "COM6"
-            | "COM7"
-            | "COM8"
-            | "COM9"
-            | "LPT1"
-            | "LPT2"
-            | "LPT3"
-            | "LPT4"
-            | "LPT5"
-            | "LPT6"
-            | "LPT7"
-            | "LPT8"
-            | "LPT9"
-    )
-}
-
 /// Selects indices in `names` that could collide under non-exact filesystem lookup rules.
 ///
 /// Returns an empty vector when all component names are pure ASCII and have pairwise distinct
@@ -2381,14 +2452,18 @@ fn select_probe_candidates(names: &[String]) -> Vec<usize> {
         .collect()
 }
 
-/// Maximum bytes read from a prefixed probe file token (`"<pid>:<seq>:<idx>"`).
+/// Maximum bytes read from a probe file token (`"<idx>"` or `"<pid>:<seq>:<idx>"`).
 const MAX_PROBE_TOKEN_BYTES: u64 = 128;
 
 /// Returns `true` when `name` is a single normal path component safe to probe on the host OS.
 fn is_probable_component_name(name: &str) -> bool {
     #[cfg(windows)]
-    if is_windows_reserved_probe_name(name) {
-        return false;
+    {
+        let base = name.split('.').next().unwrap_or(name);
+        let trimmed_stem = base.trim_end_matches(|c: char| c.is_whitespace() || c == '.');
+        if crate::utils::is_windows_reserved_name(trimmed_stem) {
+            return false;
+        }
     }
 
     let mut comps = Path::new(name).components();
@@ -2439,6 +2514,52 @@ enum PrefixedProbeOutcome {
     Inconclusive,
 }
 
+/// Outcome of reading a bounded probe token back from an already-existing probe file.
+enum ProbeTokenRead {
+    Matched(usize),
+    ForeignOrUnreadable,
+    InvalidIndex,
+}
+
+/// Reads and validates a bounded probe token from `probe_path` without following symlinks.
+fn read_probe_token_index(
+    probe_path: &Path,
+    token_prefix: &str,
+    current_idx: usize,
+    names_len: usize,
+) -> ProbeTokenRead {
+    let mut read_opts = fs::OpenOptions::new();
+    read_opts.read(true);
+    configure_no_follow(&mut read_opts);
+    let Ok(mut file) = read_opts.open(probe_path) else {
+        return ProbeTokenRead::ForeignOrUnreadable;
+    };
+    if !file.metadata().ok().map(|m| m.is_file()).unwrap_or(false) {
+        return ProbeTokenRead::ForeignOrUnreadable;
+    }
+    let mut bytes = Vec::new();
+    let read_res = (&mut file)
+        .take(MAX_PROBE_TOKEN_BYTES)
+        .read_to_end(&mut bytes);
+    drop(file);
+    if read_res.is_err() || bytes.len() as u64 == MAX_PROBE_TOKEN_BYTES {
+        return ProbeTokenRead::ForeignOrUnreadable;
+    }
+    let Some(idx_str) = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|tag| tag.trim().strip_prefix(token_prefix))
+    else {
+        return ProbeTokenRead::ForeignOrUnreadable;
+    };
+    let Ok(earlier_idx) = idx_str.parse::<usize>() else {
+        return ProbeTokenRead::InvalidIndex;
+    };
+    if earlier_idx >= current_idx || earlier_idx >= names_len {
+        return ProbeTokenRead::InvalidIndex;
+    }
+    ProbeTokenRead::Matched(earlier_idx)
+}
+
 /// Probes actual filename equivalence inside a private temporary directory created in `probe_dir`.
 fn probe_names_in_dir(
     probe_dir: &Path,
@@ -2474,29 +2595,12 @@ fn probe_names_in_dir(
                 groups[idx] = idx;
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                let mut read_opts = fs::OpenOptions::new();
-                read_opts.read(true);
-                configure_no_follow(&mut read_opts);
-                let Ok(mut file) = read_opts.open(&probe_path) else {
-                    return TempDirProbeOutcome::Inconclusive;
-                };
-                if !file.metadata().ok().map(|m| m.is_file()).unwrap_or(false) {
-                    drop(file);
-                    return TempDirProbeOutcome::Inconclusive;
+                match read_probe_token_index(&probe_path, "", idx, names.len()) {
+                    ProbeTokenRead::Matched(earlier_idx) => groups[idx] = groups[earlier_idx],
+                    ProbeTokenRead::ForeignOrUnreadable | ProbeTokenRead::InvalidIndex => {
+                        return TempDirProbeOutcome::Inconclusive;
+                    }
                 }
-                let mut tag = String::new();
-                let read_res = file.read_to_string(&mut tag);
-                drop(file);
-                if read_res.is_err() {
-                    return TempDirProbeOutcome::Inconclusive;
-                }
-                let Ok(earlier_idx) = tag.trim().parse::<usize>() else {
-                    return TempDirProbeOutcome::Inconclusive;
-                };
-                if earlier_idx >= idx || earlier_idx >= names.len() {
-                    return TempDirProbeOutcome::Inconclusive;
-                }
-                groups[idx] = groups[earlier_idx];
             }
             Err(_) => return TempDirProbeOutcome::Inconclusive,
         }
@@ -2564,41 +2668,16 @@ where
                     groups[idx] = idx;
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let mut read_opts = fs::OpenOptions::new();
-                    read_opts.read(true);
-                    configure_no_follow(&mut read_opts);
-                    let Ok(mut file) = read_opts.open(&probe_path) else {
-                        retry_with_new_seq = true;
-                        break;
-                    };
-                    if !file.metadata().ok().map(|m| m.is_file()).unwrap_or(false) {
-                        drop(file);
-                        retry_with_new_seq = true;
-                        break;
+                    match read_probe_token_index(&probe_path, &token_prefix, idx, names.len()) {
+                        ProbeTokenRead::Matched(earlier_idx) => groups[idx] = groups[earlier_idx],
+                        ProbeTokenRead::ForeignOrUnreadable => {
+                            retry_with_new_seq = true;
+                            break;
+                        }
+                        ProbeTokenRead::InvalidIndex => {
+                            return PrefixedProbeOutcome::Inconclusive;
+                        }
                     }
-                    let mut bytes = Vec::new();
-                    let read_res = (&mut file)
-                        .take(MAX_PROBE_TOKEN_BYTES)
-                        .read_to_end(&mut bytes);
-                    drop(file);
-                    if read_res.is_err() || bytes.len() as u64 == MAX_PROBE_TOKEN_BYTES {
-                        retry_with_new_seq = true;
-                        break;
-                    }
-                    let Some(idx_str) = std::str::from_utf8(&bytes)
-                        .ok()
-                        .and_then(|tag| tag.trim().strip_prefix(&token_prefix))
-                    else {
-                        retry_with_new_seq = true;
-                        break;
-                    };
-                    let Ok(earlier_idx) = idx_str.parse::<usize>() else {
-                        return PrefixedProbeOutcome::Inconclusive;
-                    };
-                    if earlier_idx >= idx || earlier_idx >= names.len() {
-                        return PrefixedProbeOutcome::Inconclusive;
-                    }
-                    groups[idx] = groups[earlier_idx];
                 }
                 Err(err)
                     if matches!(
@@ -2764,6 +2843,16 @@ enum CollisionRole {
     Subdir,
 }
 
+impl CollisionRole {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Final => "destination path",
+            Self::Staging => "staging '.part' path",
+            Self::Subdir => "directory path",
+        }
+    }
+}
+
 /// Normalised planned path placement (either final destination or `.part` staging file).
 #[derive(Debug)]
 struct PlannedPathItem<'a> {
@@ -2849,33 +2938,11 @@ fn build_level_collision_error(
         CollisionRole::Subdir => second.segments[..=depth].join("/"),
     };
     let reason = match (first_role, second_role) {
-        (CollisionRole::Final, CollisionRole::Final) => {
-            format!("both entries map to the same destination path{suffix}")
-        }
-        (CollisionRole::Staging, CollisionRole::Final) => {
-            format!("destination path collides with staging '.part' path{suffix}")
-        }
-        (CollisionRole::Final, CollisionRole::Staging) => {
-            format!("staging '.part' path collides with destination path{suffix}")
-        }
-        (CollisionRole::Staging, CollisionRole::Staging) => {
-            format!("both entries map to the same staging '.part' path{suffix}")
-        }
-        (CollisionRole::Subdir, CollisionRole::Final) => {
-            format!("destination path collides with directory path{suffix}")
-        }
-        (CollisionRole::Final, CollisionRole::Subdir) => {
-            format!("directory path collides with destination path{suffix}")
-        }
-        (CollisionRole::Subdir, CollisionRole::Staging) => {
-            format!("staging '.part' path collides with directory path{suffix}")
-        }
-        (CollisionRole::Staging, CollisionRole::Subdir) => {
-            format!("directory path collides with staging '.part' path{suffix}")
-        }
         (CollisionRole::Subdir, CollisionRole::Subdir) => {
             unreachable!("matching subdirectories merge instead of colliding")
         }
+        (a, b) if a == b => format!("both entries map to the same {}{suffix}", b.label()),
+        (a, b) => format!("{} collides with {}{suffix}", b.label(), a.label()),
     };
 
     IaGetError::PathCollision {
@@ -2906,98 +2973,51 @@ fn check_level_groups(
         let group_id = groups[name_id];
         let item = &all_items[item_idx];
         let occ = &mut occupancy[group_id];
-
-        if depth + 1 < item.segments.len() {
-            if let Some(first_idx) = occ.final_item {
-                if all_items[first_idx].entry_idx != item.entry_idx {
-                    return Err(build_level_collision_error(
-                        &all_items[first_idx],
-                        item,
-                        depth,
-                        CollisionRole::Final,
-                        CollisionRole::Subdir,
-                        level_reason_suffix,
-                        inherited_reason_suffix,
-                    ));
-                }
-            }
-            if let Some(first_idx) = occ.staging_item {
-                if all_items[first_idx].entry_idx != item.entry_idx {
-                    return Err(build_level_collision_error(
-                        &all_items[first_idx],
-                        item,
-                        depth,
-                        CollisionRole::Staging,
-                        CollisionRole::Subdir,
-                        level_reason_suffix,
-                        inherited_reason_suffix,
-                    ));
-                }
-            }
-            if occ.subdir_first_item.is_none() {
-                occ.subdir_first_item = Some(item_idx);
-            }
-            occ.subdir_items.push(item_idx);
-            if !occ.subdir_name_ids.contains(&name_id) {
-                occ.subdir_name_ids.push(name_id);
-            }
+        let role = if depth + 1 < item.segments.len() {
+            CollisionRole::Subdir
         } else {
-            let role = match item.kind {
+            match item.kind {
                 PlannedPathKind::Final => CollisionRole::Final,
                 PlannedPathKind::Staging => CollisionRole::Staging,
-            };
+            }
+        };
 
-            if let Some(first_idx) = occ.final_item {
+        for (existing_role, existing_idx) in [
+            (CollisionRole::Final, occ.final_item),
+            (CollisionRole::Staging, occ.staging_item),
+            (CollisionRole::Subdir, occ.subdir_first_item),
+        ] {
+            if role == CollisionRole::Subdir && existing_role == CollisionRole::Subdir {
+                continue;
+            }
+            if let Some(first_idx) = existing_idx {
                 if all_items[first_idx].entry_idx != item.entry_idx {
                     return Err(build_level_collision_error(
                         &all_items[first_idx],
                         item,
                         depth,
-                        CollisionRole::Final,
+                        existing_role,
                         role,
                         level_reason_suffix,
                         inherited_reason_suffix,
                     ));
                 }
             }
-            if let Some(first_idx) = occ.staging_item {
-                if all_items[first_idx].entry_idx != item.entry_idx {
-                    return Err(build_level_collision_error(
-                        &all_items[first_idx],
-                        item,
-                        depth,
-                        CollisionRole::Staging,
-                        role,
-                        level_reason_suffix,
-                        inherited_reason_suffix,
-                    ));
-                }
-            }
-            if let Some(first_idx) = occ.subdir_first_item {
-                if all_items[first_idx].entry_idx != item.entry_idx {
-                    return Err(build_level_collision_error(
-                        &all_items[first_idx],
-                        item,
-                        depth,
-                        CollisionRole::Subdir,
-                        role,
-                        level_reason_suffix,
-                        inherited_reason_suffix,
-                    ));
-                }
-            }
+        }
 
-            match item.kind {
-                PlannedPathKind::Final => {
-                    if occ.final_item.is_none() {
-                        occ.final_item = Some(item_idx);
-                    }
+        match role {
+            CollisionRole::Subdir => {
+                occ.subdir_first_item.get_or_insert(item_idx);
+                occ.subdir_items.push(item_idx);
+                if !occ.subdir_name_ids.contains(&name_id) {
+                    occ.subdir_name_ids.push(name_id);
                 }
-                PlannedPathKind::Staging => {
-                    if occ.staging_item.is_none() {
-                        occ.staging_item = Some(item_idx);
-                    }
-                }
+            }
+            CollisionRole::Final => {
+                occ.final_item.get_or_insert(item_idx);
+            }
+            CollisionRole::Staging => {
+                occ.staging_item.get_or_insert(item_idx);
             }
         }
     }
@@ -3206,26 +3226,10 @@ where
 /// Returns the current byte length of a `.part` file inside `root`, or `0` if it does not exist.
 fn existing_part_size(root: &Path, rel_part_path: &Path) -> Result<u64> {
     let canonical_root = resolve_destination_root(root)?;
-    let part_path = validate_contained_path(&canonical_root, rel_part_path, true)?;
-    match fs::symlink_metadata(&part_path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(IaGetError::FileSystem(format!(
-                    "Refusing symlinked partial file '{}'",
-                    part_path.display()
-                )));
-            }
-            if !metadata.file_type().is_file() {
-                return Err(IaGetError::FileSystem(format!(
-                    "Refusing non-regular partial file '{}'",
-                    part_path.display()
-                )));
-            }
-            Ok(metadata.len())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(e) => Err(e.into()),
-    }
+    Ok(
+        inspect_contained_regular_file(&canonical_root, rel_part_path)?
+            .map_or(0, |(_, meta)| meta.len()),
+    )
 }
 
 /// Atomically promote a verified `.part` file to its final destination path inside `root`.
@@ -3237,16 +3241,17 @@ fn promote_part_file(root: &Path, rel_part_path: &Path, rel_final_path: &Path) -
     Ok(())
 }
 
-/// Calculates the MD5 hash of a verified regular file inside `root`,
-/// optionally displaying a progress bar for large files.
-pub(crate) fn calculate_md5_with_progress(
-    root: &Path,
+fn calculate_md5_in_canonical_root_typed(
+    canonical_root: &Path,
     rel_path: &Path,
     running: &Arc<AtomicBool>,
     show_progress: bool,
-) -> Result<String> {
-    let file = open_regular_file_for_read(root, rel_path)?;
-    let file_size = file.metadata()?.len();
+) -> std::result::Result<String, ContainedFileError> {
+    let file = open_regular_file_for_read_in_canonical_root_typed(canonical_root, rel_path)?;
+    let file_size = file
+        .metadata()
+        .map_err(|e| ContainedFileError::Io(e.into()))?
+        .len();
     let is_large_file = show_progress && file_size > LARGE_FILE_THRESHOLD;
 
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
@@ -3267,7 +3272,9 @@ pub(crate) fn calculate_md5_with_progress(
     let mut bytes_processed: u64 = 0;
 
     loop {
-        let bytes_read = reader.read(&mut buffer)?;
+        let bytes_read = reader
+            .read(&mut buffer)
+            .map_err(|e| ContainedFileError::Io(e.into()))?;
         if bytes_read == 0 {
             break;
         }
@@ -3276,11 +3283,13 @@ pub(crate) fn calculate_md5_with_progress(
             if let Some(ref progress_bar) = pb {
                 progress_bar.finish_and_clear();
             }
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "Hash calculation interrupted by signal",
-            )
-            .into());
+            return Err(ContainedFileError::Interrupted(
+                std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "Hash calculation interrupted by signal",
+                )
+                .into(),
+            ));
         }
 
         context.consume(&buffer[..bytes_read]);
@@ -3297,6 +3306,19 @@ pub(crate) fn calculate_md5_with_progress(
 
     let hash = context.finalize();
     Ok(format!("{:x}", hash))
+}
+
+/// Calculates the MD5 hash of a verified regular file inside `root`,
+/// optionally displaying a progress bar for large files.
+pub(crate) fn calculate_md5_with_progress(
+    root: &Path,
+    rel_path: &Path,
+    running: &Arc<AtomicBool>,
+    show_progress: bool,
+) -> Result<String> {
+    let canonical_root = resolve_destination_root(root)?;
+    calculate_md5_in_canonical_root_typed(&canonical_root, rel_path, running, show_progress)
+        .map_err(ContainedFileError::into_ia_get_error)
 }
 
 /// Calculates the MD5 hash of a verified regular file inside `root`.
@@ -3326,58 +3348,48 @@ fn check_existing_file(
 ) -> Result<ExistingFileStatus> {
     let canonical_root = resolve_destination_root(root)?;
     let rel_path = Path::new(file_path);
-    let target_path = validate_contained_path(&canonical_root, rel_path, true)?;
 
-    match fs::symlink_metadata(&target_path) {
-        Ok(meta) => {
-            if meta.file_type().is_symlink() {
-                return Err(IaGetError::FileSystem(format!(
-                    "Refusing symlink target '{}'",
-                    target_path.display()
-                )));
-            }
-            if !meta.file_type().is_file() {
-                return Err(IaGetError::FileSystem(format!(
-                    "Refusing non-regular file target '{}'",
-                    target_path.display()
-                )));
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ExistingFileStatus::Missing)
-        }
-        Err(e) => return Err(e.into()),
+    if inspect_contained_regular_file(&canonical_root, rel_path)?.is_none() {
+        return Ok(ExistingFileStatus::Missing);
     }
 
     let Some(expected) = expected_md5 else {
         return Ok(ExistingFileStatus::CompleteNoMd5);
     };
 
-    let local_md5 = match calculate_md5(root, rel_path, running) {
-        Ok(hash) => hash,
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("interrupted by signal")
-                || msg.contains("Refusing")
-                || msg.contains("escapes destination root")
-            {
-                return Err(e);
-            }
+    match calculate_md5_in_canonical_root_typed(&canonical_root, rel_path, running, true) {
+        Ok(local_md5) if local_md5 == expected => Ok(ExistingFileStatus::CompleteMd5Verified),
+        Ok(_) => Ok(ExistingFileStatus::NeedsRedownload),
+        Err(ContainedFileError::Containment(err) | ContainedFileError::Interrupted(err)) => {
+            Err(err)
+        }
+        Err(ContainedFileError::Io(err)) => {
             println!(
                 "{} {} to calculate MD5 hash: {}",
                 "╰╼".cyan().dimmed(),
                 "Failed".red().bold(),
-                e
+                err
             );
-            return Ok(ExistingFileStatus::NeedsRedownload);
+            Ok(ExistingFileStatus::NeedsRedownload)
         }
-    };
-
-    if local_md5 == expected {
-        Ok(ExistingFileStatus::CompleteMd5Verified)
-    } else {
-        Ok(ExistingFileStatus::NeedsRedownload)
     }
+}
+
+/// Verifies that `path` is a real directory and not a symlink or non-directory entry.
+fn verify_non_symlink_dir(path: &Path, meta: &fs::Metadata) -> Result<()> {
+    if meta.file_type().is_symlink() {
+        return Err(IaGetError::FileSystem(format!(
+            "Refusing symlinked directory '{}'",
+            path.display()
+        )));
+    }
+    if !meta.file_type().is_dir() {
+        return Err(IaGetError::FileSystem(format!(
+            "Cannot create directory '{}': existing path is not a directory",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Ensure parent directories exist inside `root` for a relative destination path.
@@ -3397,20 +3409,7 @@ fn ensure_parent_directories(root: &Path, rel_path: &Path) -> Result<PathBuf> {
             current.push(segment);
 
             match fs::symlink_metadata(&current) {
-                Ok(meta) => {
-                    if meta.file_type().is_symlink() {
-                        return Err(IaGetError::FileSystem(format!(
-                            "Refusing symlinked directory '{}'",
-                            current.display()
-                        )));
-                    }
-                    if !meta.file_type().is_dir() {
-                        return Err(IaGetError::FileSystem(format!(
-                            "Cannot create directory '{}': existing path is not a directory",
-                            current.display()
-                        )));
-                    }
-                }
+                Ok(meta) => verify_non_symlink_dir(&current, &meta)?,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     match fs::create_dir(&current) {
                         Ok(()) => {}
@@ -3418,18 +3417,7 @@ fn ensure_parent_directories(root: &Path, rel_path: &Path) -> Result<PathBuf> {
                             if create_err.kind() == std::io::ErrorKind::AlreadyExists =>
                         {
                             let meta = fs::symlink_metadata(&current)?;
-                            if meta.file_type().is_symlink() {
-                                return Err(IaGetError::FileSystem(format!(
-                                    "Refusing symlinked directory '{}'",
-                                    current.display()
-                                )));
-                            }
-                            if !meta.file_type().is_dir() {
-                                return Err(IaGetError::FileSystem(format!(
-                                    "Cannot create directory '{}': existing path is not a directory",
-                                    current.display()
-                                )));
-                            }
+                            verify_non_symlink_dir(&current, &meta)?;
                         }
                         Err(create_err) => return Err(create_err.into()),
                     }
@@ -3478,6 +3466,123 @@ fn prepare_file_for_download(root: &Path, rel_part_path: &Path, truncate: bool) 
     Ok(file)
 }
 
+/// Kind of retryable failure encountered while downloading file content.
+enum DownloadRetryKind<'a> {
+    Transport(&'a reqwest::Error),
+    HttpStatus {
+        status: StatusCode,
+        retry_after: Option<&'a str>,
+    },
+    MidStream(&'a IaGetError),
+}
+
+/// Logs, prints, and waits for a retryable download failure, returning `Ok(false)` when retries
+/// are exhausted or `Ok(true)` once ready for the next attempt.
+async fn wait_for_download_retry(
+    retry_count: &mut u32,
+    policy: &RetryPolicy,
+    safe_initial_url: &str,
+    kind: DownloadRetryKind<'_>,
+    signal: &ShutdownSignal,
+    logger: &VerboseLogger,
+) -> Result<bool> {
+    if *retry_count >= policy.max_retries {
+        let exhausted_detail = match kind {
+            DownloadRetryKind::Transport(err) => format!(": {err}"),
+            DownloadRetryKind::HttpStatus { status, .. } => format!(" after HTTP {status}"),
+            DownloadRetryKind::MidStream(err) => format!(" mid-stream: {err}"),
+        };
+        logger.log(
+            "retry",
+            format_args!(
+                "exhausted ({}/{}) for {}{}",
+                *retry_count, policy.max_retries, safe_initial_url, exhausted_detail
+            ),
+        );
+        println!(
+            "{} {}      {} Maximum retries ({}) exceeded",
+            "├╼".cyan().dimmed(),
+            "Failed".red().bold(),
+            "✘".red().bold(),
+            policy.max_retries
+        );
+        return Ok(false);
+    }
+
+    *retry_count += 1;
+    let retry_after = match kind {
+        DownloadRetryKind::HttpStatus { retry_after, .. } => retry_after,
+        _ => None,
+    };
+    let (delay, delay_source) =
+        compute_retry_delay_with_source(*retry_count, retry_after, SystemTime::now(), policy);
+    let wait_secs = delay.as_secs_f64();
+    let (log_reason, status_line) = match kind {
+        DownloadRetryKind::Transport(err) => (
+            err.to_string(),
+            format!(
+                "Connection error (attempt {}/{}): {err}",
+                *retry_count, policy.max_retries
+            ),
+        ),
+        DownloadRetryKind::HttpStatus { status, .. } => (
+            format!("HTTP {status}"),
+            format!(
+                "HTTP {status} (attempt {}/{})",
+                *retry_count, policy.max_retries
+            ),
+        ),
+        DownloadRetryKind::MidStream(err) => (
+            format!("mid-stream error ({err})"),
+            format!(
+                "Download error (attempt {}/{}): {err}",
+                *retry_count, policy.max_retries
+            ),
+        ),
+    };
+    logger.log(
+        "retry",
+        format_args!(
+            "attempt {}/{} for {} after {log_reason}; waiting {wait_secs:.2}s ({delay_source})",
+            *retry_count, policy.max_retries, safe_initial_url
+        ),
+    );
+    println!(
+        "{} {}      {} {status_line}",
+        "├╼".cyan().dimmed(),
+        "Retry".yellow().bold(),
+        "⟳".yellow().bold()
+    );
+    println!(
+        "{} {}      Waiting {wait_secs:.1}s before retry...",
+        "├╼".cyan().dimmed(),
+        "Wait".white()
+    );
+
+    sleep_interruptible(delay, signal).await?;
+    Ok(true)
+}
+
+/// Discards a partial file once so the next attempt refetches without `Range`, failing if a range
+/// reset already happened during this download.
+fn reset_partial_for_unranged_refetch(
+    has_reset_range: &mut bool,
+    root: &Path,
+    part_path: &Path,
+    logger: &VerboseLogger,
+    reset_log: std::fmt::Arguments<'_>,
+    repeat_log: std::fmt::Arguments<'_>,
+    repeat_err: impl FnOnce() -> IaGetError,
+) -> Result<()> {
+    if *has_reset_range {
+        logger.log("download", repeat_log);
+        return Err(repeat_err());
+    }
+    logger.log("download", reset_log);
+    *has_reset_range = true;
+    remove_part_file_safely(root, part_path)
+}
+
 /// Download file content into a `.part` file with progress reporting and automatic retry on failure
 #[allow(clippy::too_many_arguments)]
 async fn download_file_content(
@@ -3522,21 +3627,13 @@ async fn download_file_content(
 
         let send_outcome =
             send_following_redirects(&initial_url, signal, MAX_REDIRECTS, logger, |target_url| {
-                let mut headers = HeaderMap::new();
-                if let Some(cookie_value) = cookie_source
-                    .map(|source| source.header_value_for_url(target_url))
-                    .transpose()?
-                    .flatten()
-                {
-                    headers.insert(reqwest::header::COOKIE, cookie_value);
-                }
+                let mut request = attach_cookie_header(
+                    client.get(target_url.clone()),
+                    cookie_source,
+                    target_url,
+                )?;
                 if let Some(range_header) = range_header.as_ref() {
-                    headers.insert(reqwest::header::RANGE, range_header.clone());
-                }
-
-                let mut request = client.get(target_url.clone());
-                if !headers.is_empty() {
-                    request = request.headers(headers);
+                    request = request.header(reqwest::header::RANGE, range_header.clone());
                 }
                 Ok(request)
             })
@@ -3545,64 +3642,23 @@ async fn download_file_content(
         let mut response = match send_outcome {
             RedirectSendOutcome::Response(resp) => resp,
             RedirectSendOutcome::TransportError(e) => {
-                // Request failed before we even got a response
-                if !is_retryable_reqwest_error(&e) {
-                    return Err(e.without_url().into());
-                }
-
                 let safe_err = e.without_url();
-                if retry_count >= policy.max_retries {
-                    logger.log(
-                        "retry",
-                        format_args!(
-                            "exhausted ({}/{}) for {}: {}",
-                            retry_count, policy.max_retries, safe_initial_url, safe_err
-                        ),
-                    );
-                    println!(
-                        "{} {}      {} Maximum retries ({}) exceeded",
-                        "├╼".cyan().dimmed(),
-                        "Failed".red().bold(),
-                        "✘".red().bold(),
-                        policy.max_retries
-                    );
+                if !is_retryable_reqwest_error(&safe_err) {
                     return Err(safe_err.into());
                 }
-
-                retry_count += 1;
-                let (delay, delay_source) =
-                    compute_retry_delay_with_source(retry_count, None, SystemTime::now(), policy);
-                logger.log(
-                    "retry",
-                    format_args!(
-                        "attempt {}/{} for {} after {}; waiting {:.2}s ({})",
-                        retry_count,
-                        policy.max_retries,
-                        safe_initial_url,
-                        safe_err,
-                        delay.as_secs_f64(),
-                        delay_source
-                    ),
-                );
-                println!(
-                    "{} {}      {} Connection error (attempt {}/{}): {}",
-                    "├╼".cyan().dimmed(),
-                    "Retry".yellow().bold(),
-                    "⟳".yellow().bold(),
-                    retry_count,
-                    policy.max_retries,
-                    safe_err
-                );
-                println!(
-                    "{} {}      Waiting {:.1}s before retry...",
-                    "├╼".cyan().dimmed(),
-                    "Wait".white(),
-                    delay.as_secs_f64()
-                );
-
-                sleep_interruptible(delay, signal).await?;
-
-                continue; // Retry from the top of the loop
+                if !wait_for_download_retry(
+                    &mut retry_count,
+                    policy,
+                    &safe_initial_url,
+                    DownloadRetryKind::Transport(&safe_err),
+                    signal,
+                    logger,
+                )
+                .await?
+                {
+                    return Err(safe_err.into());
+                }
+                continue;
             }
         };
 
@@ -3615,61 +3671,22 @@ async fn download_file_content(
                 .map(str::to_owned);
             drop(response);
 
-            if retry_count < policy.max_retries {
-                retry_count += 1;
-                let (delay, delay_source) = compute_retry_delay_with_source(
-                    retry_count,
-                    retry_after.as_deref(),
-                    SystemTime::now(),
-                    policy,
-                );
-                logger.log(
-                    "retry",
-                    format_args!(
-                        "attempt {}/{} for {} after HTTP {}; waiting {:.2}s ({})",
-                        retry_count,
-                        policy.max_retries,
-                        safe_initial_url,
-                        status,
-                        delay.as_secs_f64(),
-                        delay_source
-                    ),
-                );
-                println!(
-                    "{} {}      {} HTTP {} (attempt {}/{})",
-                    "├╼".cyan().dimmed(),
-                    "Retry".yellow().bold(),
-                    "⟳".yellow().bold(),
+            if !wait_for_download_retry(
+                &mut retry_count,
+                policy,
+                &safe_initial_url,
+                DownloadRetryKind::HttpStatus {
                     status,
-                    retry_count,
-                    policy.max_retries
-                );
-                println!(
-                    "{} {}      Waiting {:.1}s before retry...",
-                    "├╼".cyan().dimmed(),
-                    "Wait".white(),
-                    delay.as_secs_f64()
-                );
-
-                sleep_interruptible(delay, signal).await?;
-                continue;
+                    retry_after: retry_after.as_deref(),
+                },
+                signal,
+                logger,
+            )
+            .await?
+            {
+                return Err(IaGetError::Network(format!("HTTP error {}", status)));
             }
-
-            logger.log(
-                "retry",
-                format_args!(
-                    "exhausted ({}/{}) for {} after HTTP {}",
-                    retry_count, policy.max_retries, safe_initial_url, status
-                ),
-            );
-            println!(
-                "{} {}      {} Maximum retries ({}) exceeded",
-                "├╼".cyan().dimmed(),
-                "Failed".red().bold(),
-                "✘".red().bold(),
-                policy.max_retries
-            );
-            return Err(IaGetError::Network(format!("HTTP error {}", status)));
+            continue;
         }
 
         let content_range_header = response
@@ -3732,28 +3749,21 @@ async fn download_file_content(
                         );
                         return Ok((current_file_size, true));
                     }
-                    if has_reset_range {
-                        logger.log(
-                            "download",
-                            format_args!(
-                                "complete partial file '{}' failed MD5 verification after range reset",
-                                part_path.display()
-                            ),
-                        );
-                        return Err(IaGetError::Integrity(format!(
-                            "MD5 mismatch for {}",
-                            part_path.display()
-                        )));
-                    }
-                    logger.log(
-                        "download",
+                    reset_partial_for_unranged_refetch(
+                        &mut has_reset_range,
+                        root,
+                        part_path,
+                        logger,
                         format_args!(
                             "complete partial file '{}' failed MD5 verification; discarding partial file and refetching without Range",
                             part_path.display()
                         ),
-                    );
-                    has_reset_range = true;
-                    remove_part_file_safely(root, part_path)?;
+                        format_args!(
+                            "complete partial file '{}' failed MD5 verification after range reset",
+                            part_path.display()
+                        ),
+                        || IaGetError::Integrity(format!("MD5 mismatch for {}", part_path.display())),
+                    )?;
                     continue;
                 }
                 if !signal.is_running() {
@@ -3769,28 +3779,26 @@ async fn download_file_content(
                 return Ok((current_file_size, false));
             }
             ResponseAction::DiscardAndRefetchUnranged => {
-                if has_reset_range {
-                    logger.log(
-                        "download",
-                        format_args!(
-                            "HTTP {status} for '{}': repeated invalid range response after reset",
-                            part_path.display()
-                        ),
-                    );
-                    return Err(IaGetError::Network(format!(
-                        "HTTP error {}: repeated invalid range response after reset",
-                        status
-                    )));
-                }
-                logger.log(
-                    "download",
+                reset_partial_for_unranged_refetch(
+                    &mut has_reset_range,
+                    root,
+                    part_path,
+                    logger,
                     format_args!(
                         "HTTP {status} for '{}': discarding partial file ({current_file_size} bytes) and refetching without Range",
                         part_path.display()
                     ),
-                );
-                has_reset_range = true;
-                remove_part_file_safely(root, part_path)?;
+                    format_args!(
+                        "HTTP {status} for '{}': repeated invalid range response after reset",
+                        part_path.display()
+                    ),
+                    || {
+                        IaGetError::Network(format!(
+                            "HTTP error {}: repeated invalid range response after reset",
+                            status
+                        ))
+                    },
+                )?;
                 continue;
             }
         };
@@ -3886,62 +3894,27 @@ async fn download_file_content(
                     return Err(e);
                 }
 
+                // Ensure file is flushed and closed before sleeping or returning
                 if retry_count >= policy.max_retries {
                     let _ = file.flush();
                     drop(file);
-                    logger.log(
-                        "retry",
-                        format_args!(
-                            "exhausted ({}/{}) for {} mid-stream: {}",
-                            retry_count, policy.max_retries, safe_initial_url, e
-                        ),
-                    );
-                    println!(
-                        "{} {}      {} Maximum retries ({}) exceeded",
-                        "├╼".cyan().dimmed(),
-                        "Failed".red().bold(),
-                        "✘".red().bold(),
-                        policy.max_retries
-                    );
-                    return Err(e);
+                } else {
+                    file.flush()?;
+                    drop(file);
                 }
 
-                retry_count += 1;
-                let (delay, delay_source) =
-                    compute_retry_delay_with_source(retry_count, None, SystemTime::now(), policy);
-                logger.log(
-                    "retry",
-                    format_args!(
-                        "attempt {}/{} for {} after mid-stream error ({}); waiting {:.2}s ({})",
-                        retry_count,
-                        policy.max_retries,
-                        safe_initial_url,
-                        e,
-                        delay.as_secs_f64(),
-                        delay_source
-                    ),
-                );
-                println!(
-                    "{} {}      {} Download error (attempt {}/{}): {}",
-                    "├╼".cyan().dimmed(),
-                    "Retry".yellow().bold(),
-                    "⟳".yellow().bold(),
-                    retry_count,
-                    policy.max_retries,
-                    e
-                );
-                println!(
-                    "{} {}      Waiting {:.1}s before retry...",
-                    "├╼".cyan().dimmed(),
-                    "Wait".white(),
-                    delay.as_secs_f64()
-                );
-
-                // Ensure file is flushed and closed before sleeping and starting next attempt
-                file.flush()?;
-                drop(file);
-
-                sleep_interruptible(delay, signal).await?;
+                if !wait_for_download_retry(
+                    &mut retry_count,
+                    policy,
+                    &safe_initial_url,
+                    DownloadRetryKind::MidStream(&e),
+                    signal,
+                    logger,
+                )
+                .await?
+                {
+                    return Err(e);
+                }
             }
         }
     }
@@ -4016,67 +3989,30 @@ pub struct BatchSummary {
 
 /// Formats a plain-text summary of a batch download session, including any failed files.
 pub fn format_batch_summary(summary: &BatchSummary) -> String {
-    let mut text = format!(
-        "Summary: {} ok, {} skipped, {} failed",
+    format_run_summary(
+        "Summary:",
         summary.ok,
-        summary.skipped,
-        summary.failed.len()
-    );
-    if summary.interrupted {
-        text.push_str(", interrupted");
-    }
-
-    if !summary.failed.is_empty() {
-        text.push_str("\nFailed files:");
-        for failed in &summary.failed {
-            text.push_str(&format!("\n  - {}: {}", failed.file_path, failed.error));
-        }
-    }
-
-    text
+        Some(summary.skipped),
+        summary
+            .failed
+            .iter()
+            .map(|failed| (failed.file_path.as_str(), failed.error.as_str())),
+        summary.interrupted,
+    )
 }
 
 /// Prints a coloured end-of-batch summary to stdout.
 fn print_batch_summary(summary: &BatchSummary) {
-    let status_icon = if summary.interrupted || !summary.failed.is_empty() {
-        "✘".red().bold()
-    } else {
-        "✔".green().bold()
-    };
-
-    let failed_count = if summary.failed.is_empty() {
-        summary.failed.len().to_string().bold()
-    } else {
-        summary.failed.len().to_string().red().bold()
-    };
-
-    let interrupted_suffix = if summary.interrupted {
-        format!(", {}", "interrupted".yellow().bold())
-    } else {
-        String::new()
-    };
-
-    println!(
-        "\n{} {} {} ok, {} skipped, {} failed{}",
-        status_icon,
-        "Summary:".bold(),
-        summary.ok.to_string().green().bold(),
-        summary.skipped.to_string().cyan().bold(),
-        failed_count,
-        interrupted_suffix
+    print_run_summary(
+        "Summary:",
+        summary.ok,
+        Some(summary.skipped),
+        summary
+            .failed
+            .iter()
+            .map(|failed| (failed.file_path.as_str(), failed.error.as_str())),
+        summary.interrupted,
     );
-
-    if !summary.failed.is_empty() {
-        println!("{}", "Failed files:".red().bold());
-        for failed in &summary.failed {
-            println!(
-                "  {} {}: {}",
-                "✘".red().bold(),
-                failed.file_path.bold(),
-                failed.error
-            );
-        }
-    }
 }
 
 /// Download a single file inside `root` via `.part` staging, MD5 verification, and atomic promotion
@@ -4179,61 +4115,17 @@ async fn download_single_file_with_options(
     }
 }
 
-/// Download a single file inside `root` via `.part` staging, MD5 verification, and atomic promotion
-/// using an explicit `RetryPolicy`.
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-async fn download_single_file_with_policy(
-    client: &Client,
-    root: &Path,
-    url: &str,
-    file_path: &str,
-    expected_md5: Option<&str>,
-    signal: &ShutdownSignal,
-    cookie_source: Option<&CookieSource>,
-    policy: &RetryPolicy,
-) -> Result<FileOutcome> {
-    let options = DownloadOptions {
-        retry_policy: *policy,
-        limit_rate: None,
-        verbose: false,
-    };
-    download_single_file_with_options(
-        client,
-        root,
-        url,
-        file_path,
-        expected_md5,
-        signal,
-        cookie_source,
-        &options,
-        &VerboseLogger::disabled(),
-    )
-    .await
-}
-
-/// Download a single file inside `root` via `.part` staging, MD5 verification, and atomic promotion.
-#[cfg(test)]
-async fn download_single_file(
-    client: &Client,
-    root: &Path,
-    url: &str,
-    file_path: &str,
-    expected_md5: Option<&str>,
-    signal: &ShutdownSignal,
-    cookie_source: Option<&CookieSource>,
-) -> Result<FileOutcome> {
-    download_single_file_with_policy(
-        client,
-        root,
-        url,
-        file_path,
-        expected_md5,
-        signal,
-        cookie_source,
-        &RetryPolicy::default(),
-    )
-    .await
+fn record_batch_interrupted(
+    summary: &mut BatchSummary,
+    logger: &VerboseLogger,
+    reason: std::fmt::Arguments<'_>,
+) {
+    summary.interrupted = true;
+    logger.log("download", reason);
+    println!(
+        "\n{} Download interrupted. Run the command again to resume remaining files.",
+        "✘".red().bold()
+    );
 }
 
 /// Downloads multiple files into destination `root` with explicit [`DownloadOptions`],
@@ -4269,17 +4161,13 @@ where
 
     for (index, (url, file_path, expected_md5)) in files.into_iter().enumerate() {
         if !signal.is_running() {
-            summary.interrupted = true;
-            logger.log(
-                "download",
+            record_batch_interrupted(
+                &mut summary,
+                logger,
                 format_args!(
                     "interrupted before file {}/{total_files} ('{file_path}')",
                     index + 1
                 ),
-            );
-            println!(
-                "\n{} Download interrupted. Run the command again to resume remaining files.",
-                "✘".red().bold()
             );
             break;
         }
@@ -4323,17 +4211,13 @@ where
             Ok(FileOutcome::Skipped) => summary.skipped += 1,
             Err(err) => {
                 if !signal.is_running() {
-                    summary.interrupted = true;
-                    logger.log(
-                        "download",
+                    record_batch_interrupted(
+                        &mut summary,
+                        logger,
                         format_args!(
                             "interrupted while downloading '{file_path}' ({}/{total_files})",
                             index + 1
                         ),
-                    );
-                    println!(
-                        "\n{} Download interrupted. Run the command again to resume remaining files.",
-                        "✘".red().bold()
                     );
                     break;
                 }
@@ -4508,6 +4392,58 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Mutex;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn download_single_file_with_policy(
+        client: &Client,
+        root: &Path,
+        url: &str,
+        file_path: &str,
+        expected_md5: Option<&str>,
+        signal: &ShutdownSignal,
+        cookie_source: Option<&CookieSource>,
+        policy: &RetryPolicy,
+    ) -> Result<FileOutcome> {
+        let options = DownloadOptions {
+            retry_policy: *policy,
+            limit_rate: None,
+            verbose: false,
+        };
+        download_single_file_with_options(
+            client,
+            root,
+            url,
+            file_path,
+            expected_md5,
+            signal,
+            cookie_source,
+            &options,
+            &VerboseLogger::disabled(),
+        )
+        .await
+    }
+
+    async fn download_single_file(
+        client: &Client,
+        root: &Path,
+        url: &str,
+        file_path: &str,
+        expected_md5: Option<&str>,
+        signal: &ShutdownSignal,
+        cookie_source: Option<&CookieSource>,
+    ) -> Result<FileOutcome> {
+        download_single_file_with_policy(
+            client,
+            root,
+            url,
+            file_path,
+            expected_md5,
+            signal,
+            cookie_source,
+            &RetryPolicy::default(),
+        )
+        .await
+    }
 
     struct DownloadFixture {
         dir: TempTestDir,

@@ -1,7 +1,6 @@
 //! Strictly read-only local file verification against archive.org `_files.xml` metadata.
 
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use colored::*;
@@ -89,48 +88,7 @@ pub struct VerificationSummary {
 /// Validates that `path` is an existing, accessible directory without creating or modifying it,
 /// returning its canonical path.
 pub fn validate_check_dir(path: &Path) -> Result<PathBuf> {
-    if path.as_os_str().is_empty() {
-        return Err(IaGetError::FileSystem(
-            "Check directory path must not be empty".to_string(),
-        ));
-    }
-
-    match fs::metadata(path) {
-        Ok(meta) if meta.is_dir() => {
-            let canonical = downloader::resolve_destination_root(path)?;
-            // Confirm search access into the directory itself without modifying anything.
-            fs::metadata(canonical.join(".")).map_err(|err| {
-                IaGetError::FileSystem(format!(
-                    "Failed to access check directory '{}': {}",
-                    path.display(),
-                    err
-                ))
-            })?;
-            Ok(canonical)
-        }
-        Ok(_) => Err(IaGetError::FileSystem(format!(
-            "Check path '{}' exists and is not a directory",
-            path.display()
-        ))),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            if fs::symlink_metadata(path).is_ok() {
-                return Err(IaGetError::FileSystem(format!(
-                    "Check path '{}' is a broken symlink",
-                    path.display()
-                )));
-            }
-
-            Err(IaGetError::FileSystem(format!(
-                "Check directory '{}' does not exist",
-                path.display()
-            )))
-        }
-        Err(err) => Err(IaGetError::FileSystem(format!(
-            "Failed to access check directory '{}': {}",
-            path.display(),
-            err
-        ))),
-    }
+    downloader::validate_or_prepare_dir(path, "Check", "check", false)
 }
 
 fn error_reason(err: IaGetError) -> String {
@@ -154,75 +112,42 @@ fn format_issues(issues: &[VerificationIssue]) -> String {
         .join("; ")
 }
 
-fn print_interrupted_notice() {
+fn record_verify_interrupted(
+    summary: &mut VerificationSummary,
+    logger: &VerboseLogger,
+    reason: fmt::Arguments<'_>,
+) {
+    summary.interrupted = true;
+    logger.log("verify", reason);
     println!("\n{} Verification interrupted by user.", "✘".red().bold());
 }
 
 /// Formats a plain-text summary of a verification run, including any failed files.
 pub fn format_verification_summary(summary: &VerificationSummary) -> String {
-    let mut text = format!(
-        "Verification summary: {} ok, {} failed",
+    utils::format_run_summary(
+        "Verification summary:",
         summary.ok,
-        summary.failed.len()
-    );
-    if summary.interrupted {
-        text.push_str(", interrupted");
-    }
-
-    if !summary.failed.is_empty() {
-        text.push_str("\nFailed files:");
-        for failed in &summary.failed {
-            text.push_str(&format!(
-                "\n  - {}: {}",
-                failed.file_path,
-                format_issues(&failed.issues)
-            ));
-        }
-    }
-
-    text
+        None,
+        summary
+            .failed
+            .iter()
+            .map(|failed| (failed.file_path.as_str(), format_issues(&failed.issues))),
+        summary.interrupted,
+    )
 }
 
 /// Prints a coloured end-of-verification summary to stdout.
 fn print_verification_summary(summary: &VerificationSummary) {
-    let status_icon = if summary.interrupted || !summary.failed.is_empty() {
-        "✘".red().bold()
-    } else {
-        "✔".green().bold()
-    };
-
-    let failed_count = if summary.failed.is_empty() {
-        summary.failed.len().to_string().bold()
-    } else {
-        summary.failed.len().to_string().red().bold()
-    };
-
-    let interrupted_suffix = if summary.interrupted {
-        format!(", {}", "interrupted".yellow().bold())
-    } else {
-        String::new()
-    };
-
-    println!(
-        "\n{} {} {} ok, {} failed{}",
-        status_icon,
-        "Verification summary:".bold(),
-        summary.ok.to_string().green().bold(),
-        failed_count,
-        interrupted_suffix
+    utils::print_run_summary(
+        "Verification summary:",
+        summary.ok,
+        None,
+        summary
+            .failed
+            .iter()
+            .map(|failed| (failed.file_path.as_str(), format_issues(&failed.issues))),
+        summary.interrupted,
     );
-
-    if !summary.failed.is_empty() {
-        println!("{}", "Failed files:".red().bold());
-        for failed in &summary.failed {
-            println!(
-                "  {} {}: {}",
-                "✘".red().bold(),
-                failed.file_path.bold(),
-                format_issues(&failed.issues)
-            );
-        }
-    }
 }
 
 /// Verifies local files inside `root` against `files` without creating, modifying, or deleting
@@ -248,9 +173,7 @@ pub fn verify_files_with_logger(
 
     for file in files {
         if !signal.is_running() {
-            summary.interrupted = true;
-            logger.log("verify", "interrupted by user");
-            print_interrupted_notice();
+            record_verify_interrupted(&mut summary, logger, format_args!("interrupted by user"));
             break;
         }
 
@@ -259,46 +182,14 @@ pub fn verify_files_with_logger(
 
         // Check for leftover `.part` file regardless of whether the final file exists.
         let part_rel = downloader::part_file_path(&sanitized_name);
-        match downloader::validate_contained_path(&canonical_root, &part_rel, true) {
-            Ok(part_full) => match fs::symlink_metadata(&part_full) {
-                Ok(meta) => {
-                    if meta.file_type().is_symlink() {
-                        push_unique_issue(
-                            &mut issues,
-                            VerificationIssue::UnreadableTarget {
-                                reason: format!(
-                                    "Refusing symlinked partial file '{}'",
-                                    part_full.display()
-                                ),
-                            },
-                        );
-                    } else if !meta.file_type().is_file() {
-                        push_unique_issue(
-                            &mut issues,
-                            VerificationIssue::UnreadableTarget {
-                                reason: format!(
-                                    "Refusing non-regular partial file '{}'",
-                                    part_full.display()
-                                ),
-                            },
-                        );
-                    } else {
-                        issues.push(VerificationIssue::LeftoverPart {
-                            part_path: part_rel.to_string_lossy().into_owned(),
-                            size: meta.len(),
-                        });
-                    }
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    push_unique_issue(
-                        &mut issues,
-                        VerificationIssue::UnreadableTarget {
-                            reason: err.to_string(),
-                        },
-                    );
-                }
-            },
+        match downloader::inspect_contained_regular_file(&canonical_root, &part_rel) {
+            Ok(Some((_, meta))) => {
+                issues.push(VerificationIssue::LeftoverPart {
+                    part_path: part_rel.to_string_lossy().into_owned(),
+                    size: meta.len(),
+                });
+            }
+            Ok(None) => {}
             Err(err) => {
                 push_unique_issue(
                     &mut issues,
@@ -311,136 +202,96 @@ pub fn verify_files_with_logger(
 
         // Check final target file presence, safety, readability, byte length, and MD5 digest.
         let rel_path = Path::new(&sanitized_name);
-        match downloader::validate_contained_path(&canonical_root, rel_path, true) {
-            Ok(target_full) => match fs::symlink_metadata(&target_full) {
-                Ok(meta) => {
-                    if meta.file_type().is_symlink() {
-                        push_unique_issue(
-                            &mut issues,
-                            VerificationIssue::UnreadableTarget {
-                                reason: format!(
-                                    "Refusing symlink target '{}'",
-                                    target_full.display()
-                                ),
-                            },
-                        );
-                    } else if !meta.file_type().is_file() {
-                        push_unique_issue(
-                            &mut issues,
-                            VerificationIssue::UnreadableTarget {
-                                reason: format!(
-                                    "Refusing non-regular file target '{}'",
-                                    target_full.display()
-                                ),
-                            },
-                        );
-                    } else {
-                        match downloader::open_regular_file_for_read(&canonical_root, rel_path) {
-                            Ok(opened) => match opened.metadata() {
-                                Ok(opened_meta) => {
-                                    let actual_size = opened_meta.len();
-                                    drop(opened);
+        match downloader::inspect_contained_regular_file(&canonical_root, rel_path) {
+            Ok(Some(_)) => {
+                match downloader::open_regular_file_for_read(&canonical_root, rel_path) {
+                    Ok(opened) => match opened.metadata() {
+                        Ok(opened_meta) => {
+                            let actual_size = opened_meta.len();
+                            drop(opened);
 
-                                    let size_mismatch = match file.size {
-                                        Some(expected) if actual_size != expected => {
-                                            issues.push(VerificationIssue::SizeMismatch {
-                                                expected,
-                                                actual: actual_size,
-                                            });
-                                            true
+                            let size_mismatch = match file.size {
+                                Some(expected) if actual_size != expected => {
+                                    issues.push(VerificationIssue::SizeMismatch {
+                                        expected,
+                                        actual: actual_size,
+                                    });
+                                    true
+                                }
+                                _ => false,
+                            };
+
+                            if !size_mismatch {
+                                if let Some(expected_md5) = file.md5.as_deref() {
+                                    if !signal.is_running() {
+                                        record_verify_interrupted(
+                                            &mut summary,
+                                            logger,
+                                            format_args!(
+                                                "interrupted while verifying '{sanitized_name}'"
+                                            ),
+                                        );
+                                        break;
+                                    }
+                                    match downloader::calculate_md5(
+                                        &canonical_root,
+                                        rel_path,
+                                        signal.running_flag(),
+                                    ) {
+                                        Ok(actual_md5) => {
+                                            if !actual_md5.eq_ignore_ascii_case(expected_md5) {
+                                                issues.push(VerificationIssue::Md5Mismatch {
+                                                    expected: expected_md5.to_string(),
+                                                    actual: actual_md5,
+                                                });
+                                            }
                                         }
-                                        _ => false,
-                                    };
-
-                                    if !size_mismatch {
-                                        if let Some(expected_md5) = file.md5.as_deref() {
-                                            if !signal.is_running() {
-                                                summary.interrupted = true;
-                                                logger.log(
-                                                    "verify",
+                                        Err(err) => {
+                                            if !signal.is_running()
+                                                || err.to_string().contains("interrupted by signal")
+                                            {
+                                                record_verify_interrupted(
+                                                    &mut summary,
+                                                    logger,
                                                     format_args!(
-                                                        "interrupted while verifying '{sanitized_name}'"
-                                                    ),
+                                                    "interrupted while verifying '{sanitized_name}'"
+                                                ),
                                                 );
-                                                print_interrupted_notice();
                                                 break;
                                             }
-                                            match downloader::calculate_md5(
-                                                &canonical_root,
-                                                rel_path,
-                                                signal.running_flag(),
-                                            ) {
-                                                Ok(actual_md5) => {
-                                                    if !actual_md5
-                                                        .eq_ignore_ascii_case(expected_md5)
-                                                    {
-                                                        issues.push(
-                                                            VerificationIssue::Md5Mismatch {
-                                                                expected: expected_md5.to_string(),
-                                                                actual: actual_md5,
-                                                            },
-                                                        );
-                                                    }
-                                                }
-                                                Err(err) => {
-                                                    if !signal.is_running()
-                                                        || err
-                                                            .to_string()
-                                                            .contains("interrupted by signal")
-                                                    {
-                                                        summary.interrupted = true;
-                                                        logger.log(
-                                                            "verify",
-                                                            format_args!(
-                                                                "interrupted while verifying '{sanitized_name}'"
-                                                            ),
-                                                        );
-                                                        print_interrupted_notice();
-                                                        break;
-                                                    }
-                                                    push_unique_issue(
-                                                        &mut issues,
-                                                        VerificationIssue::UnreadableTarget {
-                                                            reason: error_reason(err),
-                                                        },
-                                                    );
-                                                }
-                                            }
+                                            push_unique_issue(
+                                                &mut issues,
+                                                VerificationIssue::UnreadableTarget {
+                                                    reason: error_reason(err),
+                                                },
+                                            );
                                         }
                                     }
                                 }
-                                Err(err) => {
-                                    push_unique_issue(
-                                        &mut issues,
-                                        VerificationIssue::UnreadableTarget {
-                                            reason: err.to_string(),
-                                        },
-                                    );
-                                }
-                            },
-                            Err(err) => {
-                                push_unique_issue(
-                                    &mut issues,
-                                    VerificationIssue::UnreadableTarget {
-                                        reason: error_reason(err),
-                                    },
-                                );
                             }
                         }
+                        Err(err) => {
+                            push_unique_issue(
+                                &mut issues,
+                                VerificationIssue::UnreadableTarget {
+                                    reason: err.to_string(),
+                                },
+                            );
+                        }
+                    },
+                    Err(err) => {
+                        push_unique_issue(
+                            &mut issues,
+                            VerificationIssue::UnreadableTarget {
+                                reason: error_reason(err),
+                            },
+                        );
                     }
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    issues.push(VerificationIssue::Missing);
-                }
-                Err(err) => {
-                    push_unique_issue(
-                        &mut issues,
-                        VerificationIssue::UnreadableTarget {
-                            reason: err.to_string(),
-                        },
-                    );
-                }
-            },
+            }
+            Ok(None) => {
+                issues.push(VerificationIssue::Missing);
+            }
             Err(err) => {
                 push_unique_issue(
                     &mut issues,
@@ -488,6 +339,8 @@ pub fn verify_files_with_logger(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::test_support::{md5_hex, snapshot_dir, xml_file, CapturedLogs, TempTestDir};
 

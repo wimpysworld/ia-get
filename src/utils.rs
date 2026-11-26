@@ -391,17 +391,10 @@ pub fn create_progress_bar(
         action.to_string()
     };
 
-    let template = if with_eta {
-        format!(
-            "{}{{elapsed_precise}} {{bar:40.{}}} {{bytes}}/{{total_bytes}} (ETA: {{eta}})",
-            styled_action, color_str
-        )
-    } else {
-        format!(
-            "{}{{elapsed_precise}} {{bar:40.{}}} {{bytes}}/{{total_bytes}}",
-            styled_action, color_str
-        )
-    };
+    let eta_suffix = if with_eta { " (ETA: {eta})" } else { "" };
+    let template = format!(
+        "{styled_action}{{elapsed_precise}} {{bar:40.{color_str}}} {{bytes}}/{{total_bytes}}{eta_suffix}"
+    );
 
     pb.set_style(
         ProgressStyle::default_bar()
@@ -453,13 +446,10 @@ pub fn format_duration(duration: std::time::Duration) -> String {
 /// Format a size in bytes to a human-readable string
 pub fn format_size(size: u64) -> String {
     if size < KB {
-        format!("{}B", size)
-    } else if size < MB {
-        format!("{:.2}KB", size as f64 / KB as f64)
-    } else if size < GB {
-        format!("{:.2}MB", size as f64 / MB as f64)
+        format!("{size}B")
     } else {
-        format!("{:.2}GB", size as f64 / GB as f64)
+        let (value, unit) = format_transfer_rate(size as f64);
+        format!("{value:.2}{unit}")
     }
 }
 
@@ -480,8 +470,93 @@ pub fn format_transfer_rate(bytes_per_sec: f64) -> (f64, &'static str) {
     }
 }
 
+/// Formats a plain-text end-of-run summary, including any failed files.
+pub(crate) fn format_run_summary<'a, D>(
+    heading: &str,
+    ok: usize,
+    skipped: Option<usize>,
+    failed: impl IntoIterator<Item = (&'a str, D)>,
+    interrupted: bool,
+) -> String
+where
+    D: fmt::Display,
+{
+    let failed: Vec<(&str, D)> = failed.into_iter().collect();
+    let mut text = match skipped {
+        Some(skipped) => format!(
+            "{heading} {ok} ok, {skipped} skipped, {} failed",
+            failed.len()
+        ),
+        None => format!("{heading} {ok} ok, {} failed", failed.len()),
+    };
+    if interrupted {
+        text.push_str(", interrupted");
+    }
+
+    if !failed.is_empty() {
+        text.push_str("\nFailed files:");
+        for (file_path, detail) in failed {
+            text.push_str(&format!("\n  - {file_path}: {detail}"));
+        }
+    }
+
+    text
+}
+
+/// Prints a coloured end-of-run summary to stdout.
+pub(crate) fn print_run_summary<'a, D>(
+    heading: &str,
+    ok: usize,
+    skipped: Option<usize>,
+    failed: impl IntoIterator<Item = (&'a str, D)>,
+    interrupted: bool,
+) where
+    D: fmt::Display,
+{
+    let failed: Vec<(&str, D)> = failed.into_iter().collect();
+    let status_icon = if interrupted || !failed.is_empty() {
+        "✘".red().bold()
+    } else {
+        "✔".green().bold()
+    };
+
+    let failed_count = if failed.is_empty() {
+        failed.len().to_string().bold()
+    } else {
+        failed.len().to_string().red().bold()
+    };
+
+    let interrupted_suffix = if interrupted {
+        format!(", {}", "interrupted".yellow().bold())
+    } else {
+        String::new()
+    };
+
+    let skipped_segment = match skipped {
+        Some(skipped) => format!(" {} skipped,", skipped.to_string().cyan().bold()),
+        None => String::new(),
+    };
+
+    println!(
+        "\n{} {} {} ok,{} {} failed{}",
+        status_icon,
+        heading.bold(),
+        ok.to_string().green().bold(),
+        skipped_segment,
+        failed_count,
+        interrupted_suffix
+    );
+
+    if !failed.is_empty() {
+        println!("{}", "Failed files:".red().bold());
+        for (file_path, detail) in failed {
+            println!("  {} {}: {}", "✘".red().bold(), file_path.bold(), detail);
+        }
+    }
+}
+
 /// Checks whether a filename stem matches a Windows reserved device name.
-fn is_windows_reserved_name(name: &str) -> bool {
+pub(crate) fn is_windows_reserved_name(name: &str) -> bool {
     const RESERVED_NAMES: &[&str] = &[
         "CON",
         "PRN",
@@ -587,25 +662,13 @@ pub fn sanitize_filename(filename: &str) -> (String, bool) {
 
         let mut sanitized_component = String::with_capacity(component.len());
 
-        // Replace invalid characters
+        // Replace invalid characters: Windows invalid chars, backslash, control chars (0-31), and DEL (127)
         for ch in component.chars() {
             match ch {
-                // Windows invalid characters
-                '<' | '>' | ':' | '"' | '|' | '?' | '*' => {
+                '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\' | '\x00'..='\x1F' | '\x7F' => {
                     sanitized_component.push('_');
                     was_modified = true;
                 }
-                // Backslash (path separator on Windows, invalid in filenames on Unix)
-                '\\' => {
-                    sanitized_component.push('_');
-                    was_modified = true;
-                }
-                // Control characters (0-31) and DEL (127)
-                '\x00'..='\x1F' | '\x7F' => {
-                    sanitized_component.push('_');
-                    was_modified = true;
-                }
-                // Valid character
                 _ => sanitized_component.push(ch),
             }
         }

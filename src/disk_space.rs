@@ -1,6 +1,5 @@
 //! Pre-download disk-space estimation and verification for destination volumes.
 
-use std::fs;
 use std::path::Path;
 
 use crate::downloader::{self, ShutdownSignal};
@@ -27,16 +26,9 @@ fn has_verified_final_file(
     signal: &ShutdownSignal,
 ) -> Result<bool> {
     let rel_path = Path::new(&item.file_path);
-    let Ok(full_path) = downloader::validate_contained_path(canonical_root, rel_path, true) else {
+    let Ok(Some(_)) = downloader::inspect_contained_regular_file(canonical_root, rel_path) else {
         return Ok(false);
     };
-
-    let Ok(meta) = fs::symlink_metadata(&full_path) else {
-        return Ok(false);
-    };
-    if !meta.file_type().is_file() {
-        return Ok(false);
-    }
 
     let Some(expected_hash) = item.expected_md5.as_deref() else {
         return Ok(true);
@@ -73,12 +65,8 @@ fn has_verified_final_file(
 /// Returns the byte length of a contained regular `.part` file, or `0` if absent or untrusted.
 fn trusted_part_file_len(canonical_root: &Path, file_path: &str) -> u64 {
     let part_rel = downloader::part_file_path(file_path);
-    let Ok(part_full) = downloader::validate_contained_path(canonical_root, &part_rel, true) else {
-        return 0;
-    };
-
-    match fs::symlink_metadata(&part_full) {
-        Ok(meta) if meta.file_type().is_file() => meta.len(),
+    match downloader::inspect_contained_regular_file(canonical_root, &part_rel) {
+        Ok(Some((_, meta))) => meta.len(),
         _ => 0,
     }
 }
@@ -140,6 +128,17 @@ pub fn calculate_required_bytes(
     calculate_required_bytes_in_canonical_root(&canonical_root, items, signal)
 }
 
+fn ensure_sufficient_space(root: &Path, required: u64, available: u64) -> Result<()> {
+    if required > available {
+        return Err(IaGetError::InsufficientDiskSpace {
+            required,
+            available,
+            path: root.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 /// Checks whether `available_bytes` is sufficient for `items` in `root`, honouring `signal`.
 pub fn check_disk_space_with_available_and_signal(
     root: &Path,
@@ -152,15 +151,7 @@ pub fn check_disk_space_with_available_and_signal(
         return Ok(());
     }
 
-    if required > available_bytes {
-        return Err(IaGetError::InsufficientDiskSpace {
-            required,
-            available: available_bytes,
-            path: root.to_path_buf(),
-        });
-    }
-
-    Ok(())
+    ensure_sufficient_space(root, required, available_bytes)
 }
 
 /// Checks whether `available_bytes` is sufficient for `items` in `root`.
@@ -193,15 +184,7 @@ pub fn check_disk_space_with_signal(
         ))
     })?;
 
-    if required > available {
-        return Err(IaGetError::InsufficientDiskSpace {
-            required,
-            available,
-            path: root.to_path_buf(),
-        });
-    }
-
-    Ok(())
+    ensure_sufficient_space(root, required, available)
 }
 
 /// Checks available disk space on the destination volume for `root` against `items`.
@@ -211,6 +194,8 @@ pub fn check_disk_space(root: &Path, items: &[PlannedDownload]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::test_support::{md5_hex, TempTestDir};
 

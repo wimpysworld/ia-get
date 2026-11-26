@@ -20,7 +20,6 @@ use ia_get::utils::{
 use ia_get::verify;
 use ia_get::{CookieSource, FileFilter, IaGetError, Result, VerboseLogger};
 use indicatif::ProgressStyle;
-use reqwest::header::{HeaderMap, COOKIE};
 use reqwest::{Client, Url};
 
 /// Extended timeout for large file downloads (10 minutes for connection, no read timeout)
@@ -41,63 +40,16 @@ async fn is_url_accessible_with_logger(
         signal,
         logger,
         |target_url| {
-            let mut request = client
+            let request = client
                 .head(target_url.clone())
                 .timeout(std::time::Duration::from_secs(60));
-            if let Some(cookie_header) = cookie_source
-                .map(|source| source.header_value_for_url(target_url))
-                .transpose()?
-                .flatten()
-            {
-                let mut headers = HeaderMap::new();
-                headers.insert(COOKIE, cookie_header);
-                request = request.headers(headers);
-            }
-            Ok(request)
+            downloader::attach_cookie_header(request, cookie_source, target_url)
         },
         |_| {},
     )
     .await?;
 
     Ok(())
-}
-
-/// Checks if a URL is accessible by sending a HEAD request with an explicit retry policy.
-#[allow(dead_code)]
-async fn is_url_accessible_with_policy(
-    url: &Url,
-    client: &Client,
-    cookie_source: Option<&CookieSource>,
-    policy: &downloader::RetryPolicy,
-    signal: &downloader::ShutdownSignal,
-) -> Result<()> {
-    is_url_accessible_with_logger(
-        url,
-        client,
-        cookie_source,
-        policy,
-        signal,
-        &VerboseLogger::disabled(),
-    )
-    .await
-}
-
-/// Checks if a URL is accessible by sending a HEAD request
-#[allow(dead_code)]
-async fn is_url_accessible(
-    url: &Url,
-    client: &Client,
-    cookie_source: Option<&CookieSource>,
-    signal: &downloader::ShutdownSignal,
-) -> Result<()> {
-    is_url_accessible_with_policy(
-        url,
-        client,
-        cookie_source,
-        &downloader::RetryPolicy::default(),
-        signal,
-    )
-    .await
 }
 
 /// Fetches and parses XML metadata from an already-resolved XML URL with an explicit retry policy
@@ -143,17 +95,11 @@ async fn fetch_xml_metadata_from_url_with_logger(
         signal,
         logger,
         |target_url| {
-            let mut request = client.get(target_url.clone());
-            if let Some(cookie_header) = cookie_source
-                .map(|source| source.header_value_for_url(target_url))
-                .transpose()?
-                .flatten()
-            {
-                let mut headers = HeaderMap::new();
-                headers.insert(COOKIE, cookie_header);
-                request = request.headers(headers);
-            }
-            Ok(request)
+            downloader::attach_cookie_header(
+                client.get(target_url.clone()),
+                cookie_source,
+                target_url,
+            )
         },
         |event| {
             spinner.set_message(format!(
@@ -182,28 +128,6 @@ async fn fetch_xml_metadata_from_url_with_logger(
     Ok((files, base_url))
 }
 
-/// Fetches and parses XML metadata from an already-resolved XML URL with an explicit retry policy.
-#[allow(dead_code)]
-async fn fetch_xml_metadata_from_url(
-    base_url: reqwest::Url,
-    client: &Client,
-    spinner: &indicatif::ProgressBar,
-    cookie_source: Option<&CookieSource>,
-    policy: &downloader::RetryPolicy,
-    signal: &downloader::ShutdownSignal,
-) -> Result<(XmlFiles, reqwest::Url)> {
-    fetch_xml_metadata_from_url_with_logger(
-        base_url,
-        client,
-        spinner,
-        cookie_source,
-        policy,
-        signal,
-        &VerboseLogger::disabled(),
-    )
-    .await
-}
-
 /// Fetches and parses XML metadata from archive.org with diagnostic logging.
 async fn fetch_xml_metadata_with_logger(
     target: &ArchiveUrl,
@@ -224,39 +148,6 @@ async fn fetch_xml_metadata_with_logger(
         &downloader::RetryPolicy::default(),
         signal,
         logger,
-    )
-    .await
-}
-
-/// Fetches and parses XML metadata from archive.org
-///
-/// Combines XML URL generation, accessibility check, download, and parsing
-/// into a single operation with integrated error handling.
-///
-/// # Arguments
-/// * `target` - The parsed archive.org URL
-/// * `client` - HTTP client for requests
-/// * `spinner` - Progress spinner to update during processing
-/// * `cookie_source` - Optional parsed cookie source evaluated per request URL
-/// * `signal` - Shared shutdown signal for immediate Ctrl+C cancellation
-///
-/// # Returns
-/// Tuple of (XmlFiles, base_url) for download processing
-#[allow(dead_code)]
-async fn fetch_xml_metadata(
-    target: &ArchiveUrl,
-    client: &Client,
-    spinner: &indicatif::ProgressBar,
-    cookie_source: Option<&CookieSource>,
-    signal: &downloader::ShutdownSignal,
-) -> Result<(XmlFiles, reqwest::Url)> {
-    fetch_xml_metadata_with_logger(
-        target,
-        client,
-        spinner,
-        cookie_source,
-        signal,
-        &VerboseLogger::disabled(),
     )
     .await
 }
@@ -381,49 +272,65 @@ fn list_summary(files: &XmlFiles) -> String {
     }
 }
 
-/// Lists parsed filenames from XML metadata when --list/-l is used
-fn list_files(files: &XmlFiles, spinner: &indicatif::ProgressBar) {
+fn finish_spinner_ok(spinner: &indicatif::ProgressBar, message: impl std::fmt::Display) {
     spinner.set_style(
         ProgressStyle::default_spinner()
-            .template(&format!(
-                "{} Archive has {}",
-                "✔".green().bold(),
-                list_summary(files).bold()
-            ))
+            .template(&format!("{} {message}", "✔".green().bold()))
             .expect("Failed to set completion style"),
     );
     spinner.finish();
+}
+
+fn finish_spinner_on_err<T>(spinner: &indicatif::ProgressBar, result: Result<T>) -> Result<T> {
+    result.inspect_err(|err| {
+        spinner.finish_with_message(format!("{} {err}", "✘".red().bold()));
+    })
+}
+
+/// Lists parsed filenames from XML metadata when --list/-l is used
+fn list_files(files: &XmlFiles, spinner: &indicatif::ProgressBar) {
+    finish_spinner_ok(
+        spinner,
+        format_args!("Archive has {}", list_summary(files).bold()),
+    );
     for row in list_file_rows(files) {
         println!("{row}");
     }
 }
 
-/// Maps a completed batch download summary to the CLI exit result.
-fn batch_exit_result(summary: &downloader::BatchSummary, total_files: usize) -> Result<()> {
-    if summary.interrupted {
+fn run_exit_result(
+    interrupted: bool,
+    failed: usize,
+    total_files: usize,
+    make_failed_error: impl FnOnce(usize, usize) -> IaGetError,
+) -> Result<()> {
+    if interrupted {
         Err(IaGetError::Interrupted)
-    } else if !summary.failed.is_empty() {
-        Err(IaGetError::BatchFailed {
-            failed: summary.failed.len(),
-            total: total_files,
-        })
+    } else if failed > 0 {
+        Err(make_failed_error(failed, total_files))
     } else {
         Ok(())
     }
 }
 
+/// Maps a completed batch download summary to the CLI exit result.
+fn batch_exit_result(summary: &downloader::BatchSummary, total_files: usize) -> Result<()> {
+    run_exit_result(
+        summary.interrupted,
+        summary.failed.len(),
+        total_files,
+        |failed, total| IaGetError::BatchFailed { failed, total },
+    )
+}
+
 /// Maps a completed verification summary to the CLI exit result.
 fn verify_exit_result(summary: &verify::VerificationSummary, total_files: usize) -> Result<()> {
-    if summary.interrupted {
-        Err(IaGetError::Interrupted)
-    } else if !summary.failed.is_empty() {
-        Err(IaGetError::VerificationFailed {
-            failed: summary.failed.len(),
-            total: total_files,
-        })
-    } else {
-        Ok(())
-    }
+    run_exit_result(
+        summary.interrupted,
+        summary.failed.len(),
+        total_files,
+        |failed, total| IaGetError::VerificationFailed { failed, total },
+    )
 }
 
 /// Resolves the output directory path, defaulting to the current working directory.
@@ -567,35 +474,6 @@ where
     .await
 }
 
-/// Runs the pre-download disk-space check and, when it succeeds, downloads all planned files
-/// using explicit [`downloader::DownloadOptions`].
-#[allow(dead_code)]
-async fn run_planned_downloads_with_options<F>(
-    client: &Client,
-    output_dir: &Path,
-    plan: DownloadPlan,
-    cookie_source: Option<&CookieSource>,
-    options: &downloader::DownloadOptions,
-    signal: &downloader::ShutdownSignal,
-    check_space: F,
-) -> Result<downloader::BatchSummary>
-where
-    F: FnOnce(&Path, &[disk_space::PlannedDownload], &downloader::ShutdownSignal) -> Result<()>,
-{
-    let logger = VerboseLogger::from_enabled(options.verbose);
-    run_planned_downloads_with_logger(
-        client,
-        output_dir,
-        plan,
-        cookie_source,
-        options,
-        signal,
-        &logger,
-        check_space,
-    )
-    .await
-}
-
 /// Validates a check directory or prepares the download output directory.
 fn prepare_phase_dir(cli: &Cli, spinner: &indicatif::ProgressBar) -> Result<PathBuf> {
     let target_dir = resolve_output_dir(cli.output_dir.as_deref());
@@ -605,13 +483,7 @@ fn prepare_phase_dir(cli: &Cli, spinner: &indicatif::ProgressBar) -> Result<Path
         downloader::prepare_output_dir(target_dir)
     };
 
-    match dir_result {
-        Ok(canonical_dir) => Ok(canonical_dir),
-        Err(e) => {
-            spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
-            Err(e)
-        }
-    }
+    finish_spinner_on_err(spinner, dir_result)
 }
 
 /// Finalises the metadata phase by listing files, validating a check directory,
@@ -725,13 +597,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let spinner = create_spinner(&format!("Processing archive.org URL: {}", cli.url.bold()));
 
     // Parse and validate URL format
-    let target = match parse_archive_url(&cli.url) {
-        Ok(target) => target,
-        Err(e) => {
-            spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
-            return Err(e.into());
-        }
-    };
+    let target = finish_spinner_on_err(&spinner, parse_archive_url(&cli.url))?;
 
     let details_url = Url::parse(&target.details_url())?;
 
@@ -766,13 +632,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     // Narrow metadata to the requested target and apply any user-supplied glob filters
-    let files = match select_and_filter_files(files, &target, &file_filter) {
-        Ok(files) => files,
-        Err(e) => {
-            spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
-            return Err(e.into());
-        }
-    };
+    let files = finish_spinner_on_err(
+        &spinner,
+        select_and_filter_files(files, &target, &file_filter),
+    )?;
 
     // If requested, list parsed filenames and exit; or validate directory and verify local files
     if cli.list || cli.check {
@@ -786,17 +649,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             "files"
         };
 
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .template(&format!(
-                    "{} {} {} {file_label} against archive.org metadata",
-                    "✔".green().bold(),
-                    "Checking".bold(),
-                    files.files.len().to_string().bold(),
-                ))
-                .expect("Failed to set completion style"),
+        finish_spinner_ok(
+            &spinner,
+            format_args!(
+                "{} {} {file_label} against archive.org metadata",
+                "Checking".bold(),
+                files.files.len().to_string().bold(),
+            ),
         );
-        spinner.finish();
 
         let summary =
             verify::verify_files_with_logger(&output_dir, &files.files, &shutdown, &logger)?;
@@ -807,13 +667,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Build and validate the download plan against each parent directory's filesystem lookup rules
     // before creating missing output directories, checking disk space, or starting transfers.
     let target_dir = resolve_output_dir(cli.output_dir.as_deref());
-    let plan = match plan_downloads_for_dir(files, &base_url, target_dir) {
-        Ok(plan) => plan,
-        Err(e) => {
-            spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
-            return Err(e.into());
-        }
-    };
+    let plan = finish_spinner_on_err(
+        &spinner,
+        plan_downloads_for_dir(files, &base_url, target_dir),
+    )?;
     let output_dir = prepare_phase_dir(&cli, &spinner)?;
     let total_files = plan.items.len();
     let file_label = if total_files == 1 { "file" } else { "files" };
@@ -837,24 +694,21 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 "⚙".blue(),
                 "Checking available disk space...".bold()
             ));
-            if let Err(e) = disk_space::check_disk_space_with_signal(dir, items, signal) {
-                spinner.finish_with_message(format!("{} {}", "✘".red().bold(), e));
-                return Err(e);
-            }
+            finish_spinner_on_err(
+                &spinner,
+                disk_space::check_disk_space_with_signal(dir, items, signal),
+            )?;
 
             // Successfully finished initialization
-            spinner.set_style(
-                ProgressStyle::default_spinner()
-                    .template(&format!(
-                        "{} {} to download {} {file_label} from archive.org {}",
-                        "✔".green().bold(),
-                        "Ready".bold(),
-                        total_files.to_string().bold(),
-                        "★".yellow()
-                    ))
-                    .expect("Failed to set completion style"),
+            finish_spinner_ok(
+                &spinner,
+                format_args!(
+                    "{} to download {} {file_label} from archive.org {}",
+                    "Ready".bold(),
+                    total_files.to_string().bold(),
+                    "★".yellow()
+                ),
             );
-            spinner.finish();
             Ok(())
         },
     )

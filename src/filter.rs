@@ -76,31 +76,22 @@ impl FileFilter {
             }
         }
 
-        let includes = if has_includes {
-            Some(
-                include_builder
+        let build_glob_set =
+            |builder: GlobSetBuilder, has_entries: bool| -> Result<Option<GlobSet>> {
+                if !has_entries {
+                    return Ok(None);
+                }
+                builder
                     .build()
+                    .map(Some)
                     .map_err(|err| IaGetError::InvalidFilter {
                         pattern: raw_patterns.join(", "),
                         reason: err.to_string(),
-                    })?,
-            )
-        } else {
-            None
-        };
+                    })
+            };
 
-        let excludes = if has_excludes {
-            Some(
-                exclude_builder
-                    .build()
-                    .map_err(|err| IaGetError::InvalidFilter {
-                        pattern: raw_patterns.join(", "),
-                        reason: err.to_string(),
-                    })?,
-            )
-        } else {
-            None
-        };
+        let includes = build_glob_set(include_builder, has_includes)?;
+        let excludes = build_glob_set(exclude_builder, has_excludes)?;
 
         Ok(Self {
             patterns: raw_patterns,
