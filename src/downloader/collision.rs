@@ -4,20 +4,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::fs_safety::{configure_no_follow, part_file_path, validate_relative_path};
 use crate::error::IaGetError;
 use crate::Result;
 
-/// Counter for generating unique temporary probe filenames during case-sensitivity detection.
-static CASE_PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 /// Maximum directory entries inspected during read-only case-sensitivity probing.
 const MAX_READ_ONLY_CASE_PROBE_ENTRIES: usize = 32;
-
-/// Maximum attempts to create a unique temporary probe file before falling back.
-const MAX_TEMP_CASE_PROBE_ATTEMPTS: usize = 16;
 
 /// Case-sensitivity rule used when checking planned download paths for collisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,15 +195,6 @@ fn validate_exact_collisions(entries: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-/// Guard that removes a temporary filesystem probe directory and its contents when dropped.
-struct ProbeDirGuard(PathBuf);
-
-impl Drop for ProbeDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 /// Resolved destination root state used for per-parent-directory filesystem lookup checks.
 #[derive(Debug, Clone)]
 struct ProbeRoot {
@@ -314,21 +298,15 @@ fn resolve_contained_child_dir(
 }
 
 /// Creates a private empty temporary probe directory inside `parent` with RAII cleanup.
-fn create_temp_probe_dir(parent: &Path) -> std::io::Result<ProbeDirGuard> {
-    let pid = std::process::id();
-    for _ in 0..MAX_TEMP_CASE_PROBE_ATTEMPTS {
-        let seq = CASE_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let candidate = parent.join(format!(".ia-get-fs-probe-{pid}-{seq}"));
-        match fs::create_dir(&candidate) {
-            Ok(()) => return Ok(ProbeDirGuard(candidate)),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(err),
-        }
+fn create_temp_probe_dir(parent: &Path) -> std::io::Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".ia-get-fs-probe-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
     }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        "exhausted temporary probe directory attempts",
-    ))
+    builder.tempdir_in(parent)
 }
 
 /// Selects indices in `names` that could collide under non-exact filesystem lookup rules.
@@ -435,7 +413,7 @@ fn probe_names_in_dir(
 
     for &idx in candidates {
         let name = &names[idx];
-        let probe_path = temp_dir.0.join(name);
+        let probe_path = temp_dir.path().join(name);
         let mut create_opts = fs::OpenOptions::new();
         create_opts.write(true).create_new(true);
         configure_no_follow(&mut create_opts);
@@ -2112,9 +2090,18 @@ mod tests {
         );
         assert_no_probe_dirs_remaining(sandbox.path());
 
-        // 2. Read-only directory routes mkdir PermissionDenied to DirUnwritable.
+        // 2. Read-only directory routes mkdir PermissionDenied to DirUnwritable, and live probe
+        // directory uses private 0o700 permissions on Unix.
         #[cfg(unix)]
         {
+            use std::os::unix::fs::PermissionsExt;
+
+            let probe = create_temp_probe_dir(sandbox.path()).expect("create probe dir");
+            let mode = fs::metadata(probe.path()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "probe directory must be owner-only (0o700)");
+            drop(probe);
+            assert_no_probe_dirs_remaining(sandbox.path());
+
             let ro_dir = TempTestDir::new("temp-dir-probe-ro");
             let case_names = vec!["Foo.txt".to_string(), "foo.txt".to_string()];
             let outcome = with_readonly_dir(ro_dir.path(), || {

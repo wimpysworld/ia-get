@@ -13,7 +13,8 @@ use tokio::sync::Notify;
 
 use super::redirect::{send_following_redirects, RedirectSendOutcome};
 use crate::constants::{
-    INITIAL_RETRY_DELAY_MS, MAX_REDIRECTS, MAX_RETRIES, MAX_RETRY_AFTER_SECS, MAX_RETRY_DELAY_SECS,
+    INITIAL_RETRY_DELAY_MS, MAX_METADATA_XML_BYTES, MAX_REDIRECTS, MAX_RETRIES,
+    MAX_RETRY_AFTER_SECS, MAX_RETRY_DELAY_SECS,
 };
 use crate::error::IaGetError;
 use crate::utils::{sanitize_url_for_log, VerboseLogger};
@@ -432,14 +433,55 @@ where
     }
 }
 
-/// Fetches a text response body with retries and diagnostic logging on transient transport errors,
-/// retryable HTTP statuses, and transient body read errors, following redirects manually per
-/// attempt and honouring `Retry-After` and `ShutdownSignal`.
-pub async fn fetch_text_with_retry_with_logger<F, H>(
+enum BoundedReadError {
+    Transport(reqwest::Error),
+    Fatal(IaGetError),
+}
+
+async fn read_response_text_bounded(
+    mut response: Response,
+    max_bytes: usize,
+    signal: &ShutdownSignal,
+) -> std::result::Result<String, BoundedReadError> {
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_bytes as u64 {
+            return Err(BoundedReadError::Fatal(IaGetError::Network(format!(
+                "Response body size ({content_length} bytes) exceeds maximum allowed limit of {max_bytes} bytes"
+            ))));
+        }
+    }
+
+    let initial_cap = response
+        .content_length()
+        .map_or(0, |len| (len as usize).min(max_bytes).min(64 * 1024));
+    let mut bytes = Vec::with_capacity(initial_cap);
+
+    while let Some(chunk) = await_interruptible(response.chunk(), signal)
+        .await
+        .map_err(BoundedReadError::Fatal)?
+        .map_err(BoundedReadError::Transport)?
+    {
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(BoundedReadError::Fatal(IaGetError::Network(format!(
+                "Response body exceeded maximum allowed limit of {max_bytes} bytes"
+            ))));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    String::from_utf8(bytes).map_err(|err| {
+        BoundedReadError::Fatal(IaGetError::Network(format!(
+            "Response body is not valid UTF-8: {err}"
+        )))
+    })
+}
+
+async fn fetch_text_with_retry_and_limit<F, H>(
     initial_url: &Url,
     policy: &RetryPolicy,
     signal: &ShutdownSignal,
     logger: &VerboseLogger,
+    max_bytes: usize,
     mut build_request: F,
     mut on_retry: H,
 ) -> Result<String>
@@ -479,9 +521,10 @@ where
                 .await?;
             }
             AttemptOutcome::Ready(response) => {
-                match await_interruptible(response.text(), signal).await? {
+                match read_response_text_bounded(response, max_bytes, signal).await {
                     Ok(text) => return Ok(text),
-                    Err(err) => {
+                    Err(BoundedReadError::Fatal(err)) => return Err(err),
+                    Err(BoundedReadError::Transport(err)) => {
                         let err = err.without_url();
                         if !is_retryable_reqwest_error(&err) || retry_count >= policy.max_retries {
                             if is_retryable_reqwest_error(&err) {
@@ -521,6 +564,35 @@ where
             }
         }
     }
+}
+
+/// Fetches a text response body with retries and diagnostic logging on transient transport errors,
+/// retryable HTTP statuses, and transient body read errors, following redirects manually per
+/// attempt and honouring `Retry-After` and `ShutdownSignal`.
+///
+/// Rejects responses larger than [`MAX_METADATA_XML_BYTES`].
+pub async fn fetch_text_with_retry_with_logger<F, H>(
+    initial_url: &Url,
+    policy: &RetryPolicy,
+    signal: &ShutdownSignal,
+    logger: &VerboseLogger,
+    build_request: F,
+    on_retry: H,
+) -> Result<String>
+where
+    F: FnMut(&Url) -> Result<RequestBuilder>,
+    H: FnMut(&RetryEvent<'_>),
+{
+    fetch_text_with_retry_and_limit(
+        initial_url,
+        policy,
+        signal,
+        logger,
+        MAX_METADATA_XML_BYTES,
+        build_request,
+        on_retry,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1136,5 +1208,82 @@ mod tests {
         assert!(Arc::ptr_eq(first.running_flag(), second.running_flag()));
         assert!(Arc::ptr_eq(second.running_flag(), third.running_flag()));
         assert!(Arc::ptr_eq(&first.notify, &second.notify));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_text_with_retry_enforces_response_size_limit() {
+        let client = http_client_builder().build().unwrap();
+        let policy = fast_retry_policy(2);
+        let signal = ShutdownSignal::new();
+        let logger = VerboseLogger::disabled();
+
+        // 1. Body matching the limit succeeds
+        let exact_body = b"<files/>";
+        let exact_server = MockServer::start(vec![MockResponse::ok(exact_body)]).await;
+        let exact_url = exact_server.parsed_url("/exact.xml");
+        let text = fetch_text_with_retry_and_limit(
+            &exact_url,
+            &policy,
+            &signal,
+            &logger,
+            exact_body.len(),
+            |target_url| Ok(client.get(target_url.clone())),
+            |_| panic!("unexpected retry"),
+        )
+        .await
+        .expect("body within limit should succeed");
+        assert_eq!(text, "<files/>");
+        assert_eq!(exact_server.finish().await.len(), 1);
+
+        // 2. Oversized Content-Length fails immediately without retrying
+        let cl_server = MockServer::start(vec![MockResponse::ok(b"0123456789abcdef")]).await;
+        let cl_url = cl_server.parsed_url("/oversized-cl.xml");
+        let mut cl_retries = 0;
+        let err = fetch_text_with_retry_and_limit(
+            &cl_url,
+            &policy,
+            &signal,
+            &logger,
+            8,
+            |target_url| Ok(client.get(target_url.clone())),
+            |_| cl_retries += 1,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(cl_retries, 0);
+        assert!(matches!(err, IaGetError::Network(_)));
+        assert!(
+            err.to_string().contains("exceeds maximum allowed limit"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(cl_server.finish().await.len(), 1);
+
+        // 3. Oversized streaming body without Content-Length fails immediately without retrying
+        let stream_server = MockServer::start(vec![MockResponse::with_headers(
+            "200 OK",
+            vec![],
+            &[b'x'; 128],
+        )])
+        .await;
+        let stream_url = stream_server.parsed_url("/oversized-stream.xml");
+        let mut stream_retries = 0;
+        let err = fetch_text_with_retry_and_limit(
+            &stream_url,
+            &policy,
+            &signal,
+            &logger,
+            32,
+            |target_url| Ok(client.get(target_url.clone())),
+            |_| stream_retries += 1,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stream_retries, 0);
+        assert!(matches!(err, IaGetError::Network(_)));
+        assert!(
+            err.to_string().contains("exceeded maximum allowed limit"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(stream_server.finish().await.len(), 1);
     }
 }

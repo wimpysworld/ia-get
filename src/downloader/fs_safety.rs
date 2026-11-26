@@ -273,68 +273,12 @@ pub(crate) fn inspect_contained_regular_file(
     }
 }
 
-/// Returns the platform-specific `O_NOFOLLOW` open flag on supported Unix targets.
-#[cfg(unix)]
-const fn unix_open_nofollow_flag() -> Option<i32> {
-    #[cfg(all(
-        target_os = "linux",
-        any(
-            target_arch = "x86_64",
-            target_arch = "x86",
-            target_arch = "riscv64",
-            target_arch = "s390x",
-        )
-    ))]
-    {
-        Some(0o0400000)
-    }
-    #[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
-    {
-        Some(0o0100000)
-    }
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd",
-        target_os = "dragonfly",
-    ))]
-    {
-        Some(0x0100)
-    }
-    #[cfg(not(any(
-        all(
-            target_os = "linux",
-            any(
-                target_arch = "x86_64",
-                target_arch = "x86",
-                target_arch = "riscv64",
-                target_arch = "s390x",
-                target_arch = "aarch64",
-                target_arch = "arm",
-            )
-        ),
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd",
-        target_os = "dragonfly",
-    )))]
-    {
-        None
-    }
-}
-
-/// Applies `O_NOFOLLOW` to `OpenOptions` on supported Unix targets.
+/// Applies `O_NOFOLLOW` to `OpenOptions` on Unix targets.
 pub(super) fn configure_no_follow(options: &mut fs::OpenOptions) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        if let Some(flag) = unix_open_nofollow_flag() {
-            options.custom_flags(flag);
-        }
+        options.custom_flags(libc::O_NOFOLLOW);
     }
     #[cfg(not(unix))]
     {
@@ -808,28 +752,24 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_unix_open_nofollow_flag_rejects_symlink() {
-        use std::os::unix::fs::{symlink, OpenOptionsExt};
-
-        let Some(flag) = unix_open_nofollow_flag() else {
-            return;
-        };
+        use std::os::unix::fs::symlink;
 
         let dir = TempTestDir::new("nofollow-flag");
         let real_file = dir.write("real.bin", b"hello");
         let link_file = dir.join("link.bin");
         symlink(&real_file, &link_file).unwrap();
 
-        let _regular = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(flag)
+        let mut regular_opts = fs::OpenOptions::new();
+        regular_opts.read(true);
+        configure_no_follow(&mut regular_opts);
+        let _regular = regular_opts
             .open(&real_file)
             .expect("O_NOFOLLOW should allow opening regular files");
 
-        let err = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(flag)
-            .open(&link_file)
-            .unwrap_err();
+        let mut link_opts = fs::OpenOptions::new();
+        link_opts.read(true);
+        configure_no_follow(&mut link_opts);
+        let err = link_opts.open(&link_file).unwrap_err();
         assert!(
             err.raw_os_error().is_some(),
             "expected OS error (ELOOP) when opening symlink with O_NOFOLLOW, got {err:?}"

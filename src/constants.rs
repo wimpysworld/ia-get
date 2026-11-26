@@ -3,11 +3,11 @@
 /// User agent string for HTTP requests
 pub const USER_AGENT: &str = "ia-get";
 
-/// Regex pattern for validating archive.org item identifiers
-pub const IDENTIFIER_PATTERN: &str = r"^[a-zA-Z0-9_\-.@]+$";
-
-/// Maximum length for XML content in debug output (characters)
+/// Maximum length for XML content in debug output (bytes, truncated on a UTF-8 char boundary)
 pub const XML_DEBUG_TRUNCATE_LEN: usize = 1000;
+
+/// Maximum response size in bytes accepted when fetching `_files.xml` metadata (64 MiB)
+pub const MAX_METADATA_XML_BYTES: usize = 64 * 1024 * 1024;
 
 /// Maximum number of retry attempts for transient request or download failures
 pub const MAX_RETRIES: u32 = 3;
