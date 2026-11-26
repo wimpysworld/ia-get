@@ -2,7 +2,7 @@
 license: MIT
 
 repository:
-  description: File downloader for archive.org ⬇️
+  description: "Command-line downloader for archive.org: preview, filter, resume, verify, and keep folders. ⬇️"
   homepage: https://ia-get.wimpys.world
   has_wiki: true
   has_discussions: false

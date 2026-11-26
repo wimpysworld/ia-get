@@ -4,7 +4,7 @@
   ia-get
 </h1>
 
-<p align="center"><b>File downloader for archive.org</b></p>
+<p align="center"><b>Command-line downloader for archive.org: preview, filter, resume, verify, and keep folders.</b></p>
 
 <p align="center">Made with 💝 by 🤖</p>
 
