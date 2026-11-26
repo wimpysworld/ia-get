@@ -1,13 +1,11 @@
 //! Utility functions for ia-get.
 
-use crate::constants::IDENTIFIER_PATTERN;
 use crate::{IaGetError, Result};
 use colored::*;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use regex::Regex;
 use std::fmt;
 use std::io::{self, Write};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use url::Url;
 
 /// Spinner tick interval in milliseconds
@@ -17,10 +15,6 @@ const SPINNER_TICK_INTERVAL: u64 = 100;
 const KB: u64 = 1024;
 const MB: u64 = KB * 1024;
 const GB: u64 = MB * 1024;
-
-/// Compiled regex for archive.org item identifier validation (initialized once)
-static IDENTIFIER_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(IDENTIFIER_PATTERN).expect("Invalid identifier regex pattern"));
 
 /// Parsed representation of a supported archive.org URL
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,7 +112,12 @@ pub fn percent_decode_utf8(input: &str) -> Result<String> {
 }
 
 fn is_valid_identifier(identifier: &str) -> bool {
-    identifier != "." && identifier != ".." && IDENTIFIER_REGEX.is_match(identifier)
+    !identifier.is_empty()
+        && identifier != "."
+        && identifier != ".."
+        && identifier
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'@'))
 }
 
 fn has_invalid_path_slashes(path: &str) -> bool {

@@ -4,7 +4,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
 
@@ -15,47 +14,39 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
 
-static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 /// Isolated temporary directory removed automatically on drop.
 pub struct TempTestDir {
-    path: PathBuf,
+    dir: tempfile::TempDir,
 }
 
 impl TempTestDir {
     pub fn new(prefix: &str) -> Self {
-        let id = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("ia-get-test-{prefix}-{}-{id}", std::process::id()));
-        fs::create_dir_all(&path).expect("create temp test dir");
-        Self { path }
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("ia-get-test-{prefix}-"))
+            .tempdir()
+            .expect("create temp test dir");
+        Self { dir }
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
+        self.dir.path()
     }
 
     pub fn join(&self, rel: impl AsRef<Path>) -> PathBuf {
-        self.path.join(rel)
+        self.dir.path().join(rel)
     }
 
     pub fn part_path(&self, name: &str) -> PathBuf {
-        self.path.join(format!("{name}.part"))
+        self.dir.path().join(format!("{name}.part"))
     }
 
     pub fn write(&self, rel: impl AsRef<Path>, data: impl AsRef<[u8]>) -> PathBuf {
-        let full = self.path.join(rel);
+        let full = self.dir.path().join(rel);
         if let Some(parent) = full.parent() {
             fs::create_dir_all(parent).expect("create parent dirs in temp test dir");
         }
         fs::write(&full, data).expect("write test fixture file");
         full
-    }
-}
-
-impl Drop for TempTestDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
     }
 }
 

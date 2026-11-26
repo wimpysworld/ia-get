@@ -1,7 +1,7 @@
 use crate::constants::XML_DEBUG_TRUNCATE_LEN;
 use crate::{IaGetError, Result};
+use quick_xml::de::from_str;
 use serde::Deserialize;
-use serde_xml_rs::from_str;
 
 /// Root structure for parsing the XML files list from archive.org
 /// The actual XML structure has a `files` root element containing multiple `file` elements
@@ -30,6 +30,18 @@ pub struct XmlFile {
     pub md5: Option<String>,
 }
 
+/// Truncates `content` to at most `max_bytes` on a valid UTF-8 character boundary.
+fn truncate_preview(content: &str, max_bytes: usize) -> (&str, bool) {
+    if content.len() <= max_bytes {
+        return (content, false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&content[..end], true)
+}
+
 /// Parses XML content into XmlFiles structure with improved error context
 ///
 /// # Arguments
@@ -40,21 +52,111 @@ pub struct XmlFile {
 /// * `Err(IaGetError)` with context if parsing fails
 pub fn parse_xml_files(xml_content: &str) -> Result<XmlFiles> {
     from_str(xml_content).map_err(|e| {
-        let preview = if xml_content.len() > XML_DEBUG_TRUNCATE_LEN {
-            &xml_content[..XML_DEBUG_TRUNCATE_LEN]
-        } else {
-            xml_content
-        };
+        let (preview, truncated) = truncate_preview(xml_content, XML_DEBUG_TRUNCATE_LEN);
 
         IaGetError::XmlParsing(format!(
             "Failed to parse _files.xml metadata: {}. Content preview: {}{}",
             e,
             preview,
-            if xml_content.len() > XML_DEBUG_TRUNCATE_LEN {
-                "..."
-            } else {
-                ""
-            }
+            if truncated { "..." } else { "" }
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_xml_files_handles_attributes_optional_fields_unknown_tags_and_empty_root() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<files>
+  <file name="dir/book.pdf" source="original" extra="ignored">
+    <mtime>1700000000</mtime>
+    <size>123456</size>
+    <md5>d41d8cd98f00b204e9800998ecf8427e</md5>
+    <sha1>da39a3ee5e6b4b0d3255bfef95601890afd80709</sha1>
+    <format>Text PDF</format>
+  </file>
+  <file name="notes.txt" source="metadata">
+    <crc32>00000000</crc32>
+  </file>
+</files>"#;
+
+        let parsed = parse_xml_files(xml).expect("valid archive.org XML should parse");
+        assert_eq!(parsed.files.len(), 2);
+        assert_eq!(parsed.files[0].name, "dir/book.pdf");
+        assert_eq!(parsed.files[0].size, Some(123_456));
+        assert_eq!(
+            parsed.files[0].md5.as_deref(),
+            Some("d41d8cd98f00b204e9800998ecf8427e")
+        );
+        assert_eq!(parsed.files[1].name, "notes.txt");
+        assert_eq!(parsed.files[1].size, None);
+        assert_eq!(parsed.files[1].md5, None);
+
+        let empty_self_closing = parse_xml_files("<files/>").expect("empty <files/> should parse");
+        assert!(empty_self_closing.files.is_empty());
+
+        let empty_pair =
+            parse_xml_files("<files></files>").expect("empty <files></files> should parse");
+        assert!(empty_pair.files.is_empty());
+    }
+
+    #[test]
+    fn test_parse_xml_files_truncates_multibyte_utf8_preview_without_panicking() {
+        // Place a 4-byte UTF-8 character straddling byte offset XML_DEBUG_TRUNCATE_LEN (1000).
+        let mut malformed = "a".repeat(XML_DEBUG_TRUNCATE_LEN - 1);
+        malformed.push_str("🦀🦀<unclosed");
+        assert!(malformed.len() > XML_DEBUG_TRUNCATE_LEN);
+        assert!(!malformed.is_char_boundary(XML_DEBUG_TRUNCATE_LEN));
+
+        let err = parse_xml_files(&malformed).unwrap_err();
+        assert!(matches!(err, IaGetError::XmlParsing(_)));
+        let msg = err.to_string();
+        let (_, preview) = msg
+            .split_once("Content preview: ")
+            .expect("error message should include Content preview");
+        assert!(
+            preview.ends_with("..."),
+            "expected ellipsis in preview: {preview}"
+        );
+        assert_eq!(preview.len(), XML_DEBUG_TRUNCATE_LEN - 1 + 3);
+        assert!(
+            !preview.contains('🦀'),
+            "character straddling byte limit should not be split or partially included in preview"
+        );
+    }
+
+    #[test]
+    fn test_parse_xml_files_does_not_expand_doctype_entities() {
+        let xxe_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE files [
+  <!ENTITY lol "expanded_secret">
+  <!ENTITY lol2 "&lol;&lol;&lol;&lol;">
+]>
+<files>
+  <file name="&lol2;">
+    <size>1</size>
+  </file>
+</files>"#;
+
+        match parse_xml_files(xxe_xml) {
+            Ok(parsed) => {
+                for file in &parsed.files {
+                    assert!(
+                        !file.name.contains("expanded_secret"),
+                        "custom DOCTYPE entity must never be expanded: {:?}",
+                        file.name
+                    );
+                }
+            }
+            Err(err) => {
+                assert!(
+                    matches!(err, IaGetError::XmlParsing(_)),
+                    "expected XmlParsing rejection for custom entity, got {err:?}"
+                );
+            }
+        }
+    }
 }
