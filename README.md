@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="assets/ia-get.png" width="256" height="256" alt="ia-get">
+  <img src="pages/icon.svg" width="256" height="256" alt="ia-get">
   <br />
   ia-get
 </h1>
