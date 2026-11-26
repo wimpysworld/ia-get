@@ -8,7 +8,7 @@ It downloads full items or single files from Internet Archive metadata, resumes 
 | Page | Covers |
 | --- | --- |
 | [Usage](Usage) | URL formats, CLI options, glob filtering, `--check` verification, bandwidth limits, and verbose logging. |
-| [Authentication and Networking](Authentication-and-Networking) | Cookies, redirect handling, proxy configuration, retries, and `Retry-After` limits. |
+| [Authentication and Networking](Authentication-and-Networking) | Cookies, redirect handling, proxy configuration, retries, `Retry-After` limits, and polite parallel downloads. |
 | [Reliability and Safety](Reliability-and-Safety) | `.part` staging, HTTP range resume, disk-space checks, filename sanitisation, path collision validation, and exit codes. |
 | [Development](Development) | Nix development shell, `just` recipes, repository layout, platform targets, releases, and contributing. |
 

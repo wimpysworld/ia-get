@@ -84,7 +84,7 @@
         <div class="section-heading">
           <p class="eyebrow">Files, without the clicking</p>
           <h2 id="features-title">Download the listed files.</h2>
-          <p>Give ia-get an item <code>/details/</code> URL for the full file set, or a <code>/download/</code> URL for a single file.</p>
+          <p>Give ia-get an item <code>/details/</code> URL for the full file set, or a <code>/download/</code> URL for a single file. ia-get parallelises small transfers automatically and keeps a polite ceiling for archive.org.</p>
         </div>
         <dl class="feature-list">
           <div><dt>Preview and filter</dt><dd>List filenames and sizes with <code>--list</code> before you download. Match or exclude paths with repeatable <code>-f</code> glob patterns.</dd></div>
@@ -115,8 +115,13 @@
             <pre><code>ia-get --cookies cookies.txt https://archive.org/details/&lt;identifier&gt;</code></pre>
             <p>Replace <code>&lt;identifier&gt;</code> with the item's identifier. Keep your cookie file private.</p>
           </details>
+          <details>
+            <summary>How does ia-get handle parallel downloads?</summary>
+            <p>ia-get parallelises downloads automatically with no extra flags. It runs up to 4 small files (under 8 MiB) or 2 medium files (8 MiB to under 64 MiB) at once. Files 64 MiB and larger, or with unknown size, transfer one at a time.</p>
+            <p>On HTTP <code>429</code> or <code>503</code> responses, ia-get honours <code>Retry-After</code> and steps concurrency down until transfers finish cleanly. This ceiling complies with Internet Archive's <a href="https://archive.org/developers/bots.html">automated access guidelines</a>. Read <a href="https://github.com/wimpysworld/ia-get/wiki/Authentication-and-Networking#parallel-downloads">Parallel downloads on the wiki</a> for full details, or use the item's <code>.torrent</code> file for multi-terabyte archives of multi-gigabyte files.</p>
+          </details>
         </div>
-        <p class="workflow-note"><a href="https://github.com/wimpysworld/ia-get/wiki/Usage">Read the usage guide on the wiki</a> for filters, cookies, proxies, and rate limits.</p>
+        <p class="workflow-note"><a href="https://github.com/wimpysworld/ia-get/wiki/Usage">Read the usage guide on the wiki</a> for filters, cookies, proxies, parallel downloads, and rate limits.</p>
       </section>
 
       <section id="install" class="install section-rule" aria-labelledby="install-title">

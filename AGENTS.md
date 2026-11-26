@@ -37,6 +37,7 @@ src/
 ├── lib.rs                   # Library exports
 ├── downloader/
 │   ├── mod.rs               # Core download loop, range resume, rate limiting, batch orchestration
+│   ├── scheduler.rs         # Elastic 4-permit concurrency funnel and reactive backpressure
 │   ├── retry.rs             # Retry policy, backoff, Retry-After parsing, shutdown signal
 │   ├── proxy.rs             # Proxy configuration, validation, and redaction
 │   ├── redirect.rs          # Manual redirect handling and per-hop cookie scoping

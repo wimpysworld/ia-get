@@ -44,17 +44,27 @@ ia-get https://archive.org/details/zzapp_64_issue_001_600dpi
 
 ```text
 src/
-├── main.rs              # CLI entry point (clap), progress output, and orchestration
-├── lib.rs               # Library module exports
-├── downloader.rs        # HTTP downloads, retries, redirects, rate limits, resume, and collision checks
-├── archive_metadata.rs  # XML metadata parsing for archive.org
-├── cookie.rs            # Raw Cookie header and Netscape cookies.txt parsing and scoping
-├── disk_space.rs        # Destination volume free-space estimation and checks
-├── filter.rs            # Glob include and exclude pattern matching
-├── verify.rs            # Read-only --check local directory verification
-├── utils.rs             # URL parsing, filename sanitisation, verbose logger, and formatting helpers
-├── error.rs             # Custom IaGetError types (thiserror)
-└── constants.rs         # Timeouts, retry limits, redirect limits, and URL regex patterns
+├── main.rs                  # CLI entry point (clap), progress output, and orchestration
+├── lib.rs                   # Library module exports
+├── downloader/
+│   ├── mod.rs               # Core download loop, range resume, rate limiting, and batch orchestration
+│   ├── scheduler.rs         # Elastic 4-permit concurrency funnel and reactive backpressure
+│   ├── retry.rs             # Retry policy, backoff, Retry-After parsing, and shutdown signal
+│   ├── proxy.rs             # Proxy configuration, validation, and redaction
+│   ├── redirect.rs          # Manual redirect handling and per-hop cookie scoping
+│   ├── fs_safety.rs         # Path containment, symlink-safe I/O, and atomic .part promotion
+│   └── collision.rs         # Pre-write path collision detection and filesystem probing
+├── archive_metadata.rs      # XML metadata parsing for archive.org
+├── cookie.rs                # Raw Cookie header and Netscape cookies.txt parsing and scoping
+├── disk_space.rs            # Destination volume free-space estimation and checks
+├── filter.rs                # Glob include and exclude pattern matching
+├── verify.rs                # Read-only --check local directory verification
+├── utils.rs                 # URL parsing, filename sanitisation, verbose logger, and formatting helpers
+├── error.rs                 # Custom IaGetError types (thiserror)
+├── constants.rs             # Timeouts, retry limits, and redirect limits
+└── test_support.rs          # Shared unit test helpers and mock HTTP servers
+tests/
+└── cli_smoke.rs             # CLI integration smoke tests
 pages/                   # Static project website (ia-get.wimpys.world)
 wiki/                    # Source Markdown files synced to the GitHub Wiki
 nix/                     # Nix package definition and development shell modules

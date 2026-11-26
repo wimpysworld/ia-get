@@ -5,23 +5,29 @@ mod fs_safety;
 mod proxy;
 mod redirect;
 mod retry;
+mod scheduler;
 
 use std::io::{BufReader, Read, Write};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use colored::*;
+use indicatif::{MultiProgress, ProgressBar};
 use reqwest::header::HeaderValue;
 use reqwest::{Client, StatusCode, Url};
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::task::JoinSet;
 
 use crate::constants::MAX_REDIRECTS;
 use crate::cookie::CookieSource;
+use crate::disk_space::PlannedDownload;
 use crate::error::IaGetError;
 use crate::utils::{
-    create_progress_bar, format_duration, format_size, format_transfer_rate, print_run_summary,
-    sanitize_url_for_log, VerboseLogger,
+    create_attached_progress_bar, create_progress_bar, format_duration, format_size,
+    format_transfer_rate, print_run_summary, progress_draw_target, sanitize_url_for_log,
+    VerboseLogger,
 };
 use crate::Result;
 
@@ -38,6 +44,11 @@ pub use retry::{
     is_retryable_reqwest_error, is_retryable_status, parse_retry_after,
     send_with_retry_with_logger, sleep_interruptible, RetryEvent, RetryPolicy, ShutdownSignal,
 };
+pub use scheduler::{
+    base_permit_cost, download_sort_key, sort_planned_downloads, ElasticScheduler, SchedulerPermit,
+    BACKPRESSURE_RECOVERY_SUCCESSES, MAX_CONCURRENT_PERMITS, MEDIUM_FILE_MAX_BYTES,
+    SMALL_FILE_MAX_BYTES,
+};
 
 use fs_safety::{
     ensure_parent_directories, existing_part_size,
@@ -47,7 +58,8 @@ use fs_safety::{
 use proxy::redact_proxy_value;
 use redirect::{send_following_redirects, RedirectSendOutcome};
 use retry::{
-    await_interruptible, compute_retry_delay_with_source, interrupted_error, parse_ascii_u64,
+    await_interruptible, compute_retry_delay_with_source, interrupted_error, is_throttle_status,
+    parse_ascii_u64,
 };
 
 /// Buffer size for file operations (8KB)
@@ -65,6 +77,59 @@ const RATE_LIMIT_STALL_RESET_WINDOW: Duration = Duration::from_millis(100);
 pub struct DownloadOptions {
     pub retry_policy: RetryPolicy,
     pub limit_rate: Option<u64>,
+}
+
+/// A single file scheduled for download within a batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadItem {
+    /// Absolute download URL for the file.
+    pub url: String,
+    /// Sanitised relative destination path inside the output directory.
+    pub file_path: String,
+    /// Optional expected MD5 digest from archive metadata.
+    pub expected_md5: Option<String>,
+    /// Optional expected file size in bytes from archive metadata.
+    pub expected_size: Option<u64>,
+}
+
+impl From<PlannedDownload> for DownloadItem {
+    fn from(item: PlannedDownload) -> Self {
+        Self {
+            url: item.url,
+            file_path: item.file_path,
+            expected_md5: item.expected_md5,
+            expected_size: item.expected_size,
+        }
+    }
+}
+
+impl From<(String, String, Option<String>)> for DownloadItem {
+    fn from((url, file_path, expected_md5): (String, String, Option<String>)) -> Self {
+        Self {
+            url,
+            file_path,
+            expected_md5,
+            expected_size: None,
+        }
+    }
+}
+
+impl From<(String, String, Option<String>, Option<u64>)> for DownloadItem {
+    fn from(
+        (url, file_path, expected_md5, expected_size): (
+            String,
+            String,
+            Option<String>,
+            Option<u64>,
+        ),
+    ) -> Self {
+        Self {
+            url,
+            file_path,
+            expected_md5,
+            expected_size,
+        }
+    }
 }
 
 /// Parses a bandwidth limit string into bytes per second.
@@ -201,9 +266,50 @@ impl RateLimiter {
     pub async fn throttle(&mut self, chunk_bytes: u64, signal: &ShutdownSignal) -> Result<()> {
         let delay = self.delay_for_chunk(chunk_bytes, Instant::now());
         if delay > Duration::ZERO {
-            sleep_interruptible(delay, signal).await?;
+            signal.sleep_or_shutdown(delay).await?;
         }
         Ok(())
+    }
+}
+
+/// Paces `chunk_bytes` against a shared batch [`RateLimiter`] without holding the mutex across sleep.
+async fn throttle_shared_rate_limiter(
+    limiter: &AsyncMutex<RateLimiter>,
+    chunk_bytes: u64,
+    signal: &ShutdownSignal,
+) -> Result<()> {
+    let delay = {
+        let mut guard = limiter.lock().await;
+        guard.delay_for_chunk(chunk_bytes, Instant::now())
+    };
+    if delay > Duration::ZERO {
+        signal.sleep_or_shutdown(delay).await?;
+    }
+    Ok(())
+}
+
+/// RAII guard that finishes, clears, and detaches a progress bar on every exit path.
+struct ProgressBarGuard {
+    pb: ProgressBar,
+    multi: Option<MultiProgress>,
+}
+
+impl ProgressBarGuard {
+    fn new(pb: ProgressBar, multi: Option<MultiProgress>) -> Self {
+        Self { pb, multi }
+    }
+
+    fn set_position(&self, pos: u64) {
+        self.pb.set_position(pos);
+    }
+}
+
+impl Drop for ProgressBarGuard {
+    fn drop(&mut self) {
+        self.pb.finish_and_clear();
+        if let Some(ref multi) = self.multi {
+            multi.remove(&self.pb);
+        }
     }
 }
 
@@ -348,6 +454,8 @@ fn calculate_md5_in_canonical_root_typed(
     rel_path: &Path,
     running: &Arc<AtomicBool>,
     show_progress: bool,
+    multi_progress: Option<&MultiProgress>,
+    progress_label: Option<&str>,
 ) -> std::result::Result<String, ContainedFileError> {
     let file = open_regular_file_for_read_in_canonical_root_typed(canonical_root, rel_path)?;
     let file_size = file
@@ -361,12 +469,24 @@ fn calculate_md5_in_canonical_root_typed(
     let mut buffer = [0; BUFFER_SIZE];
 
     let pb = if is_large_file {
-        Some(create_progress_bar(
-            file_size,
-            &format!("{} {}    ", "╰╼".cyan().dimmed(), "Verifying".white()),
-            Some("blue/blue"),
-            false,
-        ))
+        let action = format!("{} {}    ", "╰╼".cyan().dimmed(), "Verifying".white());
+        let bar = match multi_progress {
+            Some(multi) => {
+                let label = progress_label
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| rel_path.display().to_string());
+                create_attached_progress_bar(
+                    multi,
+                    file_size,
+                    &action,
+                    &label,
+                    Some("blue/blue"),
+                    false,
+                )
+            }
+            None => create_progress_bar(file_size, &action, Some("blue/blue"), false),
+        };
+        Some(ProgressBarGuard::new(bar, multi_progress.cloned()))
     } else {
         None
     };
@@ -382,9 +502,6 @@ fn calculate_md5_in_canonical_root_typed(
         }
 
         if !running.load(Ordering::SeqCst) {
-            if let Some(ref progress_bar) = pb {
-                progress_bar.finish_and_clear();
-            }
             return Err(ContainedFileError::Interrupted(
                 std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
@@ -402,12 +519,38 @@ fn calculate_md5_in_canonical_root_typed(
         }
     }
 
-    if let Some(progress_bar) = pb.as_ref() {
-        progress_bar.finish_and_clear();
-    }
+    drop(pb);
 
     let hash = context.finalize();
     Ok(format!("{:x}", hash))
+}
+
+/// Offloads blocking MD5 computation onto Tokio's blocking pool so concurrent async downloads
+/// are never stalled while hashing large files.
+async fn calculate_md5_in_canonical_root_async(
+    canonical_root: PathBuf,
+    rel_path: PathBuf,
+    running: Arc<AtomicBool>,
+    show_progress: bool,
+    multi_progress: Option<MultiProgress>,
+    progress_label: Option<String>,
+) -> std::result::Result<String, ContainedFileError> {
+    tokio::task::spawn_blocking(move || {
+        calculate_md5_in_canonical_root_typed(
+            &canonical_root,
+            &rel_path,
+            &running,
+            show_progress,
+            multi_progress.as_ref(),
+            progress_label.as_deref(),
+        )
+    })
+    .await
+    .map_err(|err| {
+        ContainedFileError::Io(IaGetError::FileSystem(format!(
+            "MD5 hashing task failed: {err}"
+        )))
+    })?
 }
 
 /// Calculates the MD5 hash of a verified regular file inside `root`,
@@ -419,8 +562,15 @@ pub(crate) fn calculate_md5_with_progress(
     show_progress: bool,
 ) -> Result<String> {
     let canonical_root = resolve_destination_root(root)?;
-    calculate_md5_in_canonical_root_typed(&canonical_root, rel_path, running, show_progress)
-        .map_err(ContainedFileError::into_ia_get_error)
+    calculate_md5_in_canonical_root_typed(
+        &canonical_root,
+        rel_path,
+        running,
+        show_progress,
+        None,
+        None,
+    )
+    .map_err(ContainedFileError::into_ia_get_error)
 }
 
 /// Calculates the MD5 hash of a verified regular file inside `root`.
@@ -441,17 +591,20 @@ enum ExistingFileStatus {
     NeedsRedownload,
 }
 
-/// Check if an existing file inside `root` has the correct hash.
-fn check_existing_file(
+/// Check if an existing file inside `root` has the correct hash, offloading MD5 I/O to a
+/// blocking worker thread.
+async fn check_existing_file(
     root: &Path,
     file_path: &str,
     expected_md5: Option<&str>,
     running: &Arc<AtomicBool>,
+    multi_progress: Option<&MultiProgress>,
+    detail_lines: &mut Vec<String>,
 ) -> Result<ExistingFileStatus> {
     let canonical_root = resolve_destination_root(root)?;
-    let rel_path = Path::new(file_path);
+    let rel_path = PathBuf::from(file_path);
 
-    if inspect_contained_regular_file(&canonical_root, rel_path)?.is_none() {
+    if inspect_contained_regular_file(&canonical_root, &rel_path)?.is_none() {
         return Ok(ExistingFileStatus::Missing);
     }
 
@@ -459,19 +612,28 @@ fn check_existing_file(
         return Ok(ExistingFileStatus::CompleteNoMd5);
     };
 
-    match calculate_md5_in_canonical_root_typed(&canonical_root, rel_path, running, true) {
+    match calculate_md5_in_canonical_root_async(
+        canonical_root,
+        rel_path,
+        Arc::clone(running),
+        true,
+        multi_progress.cloned(),
+        Some(file_path.to_string()),
+    )
+    .await
+    {
         Ok(local_md5) if local_md5 == expected => Ok(ExistingFileStatus::CompleteMd5Verified),
         Ok(_) => Ok(ExistingFileStatus::NeedsRedownload),
         Err(ContainedFileError::Containment(err) | ContainedFileError::Interrupted(err)) => {
             Err(err)
         }
         Err(ContainedFileError::Io(err)) => {
-            println!(
+            detail_lines.push(format!(
                 "{} {} to calculate MD5 hash: {}",
-                "╰╼".cyan().dimmed(),
+                "├╼".cyan().dimmed(),
                 "Failed".red().bold(),
                 err
-            );
+            ));
             Ok(ExistingFileStatus::NeedsRedownload)
         }
     }
@@ -487,17 +649,46 @@ enum DownloadRetryKind<'a> {
     MidStream(&'a IaGetError),
 }
 
-/// Logs, prints, and waits for a retryable download failure, returning `Ok(false)` when retries
-/// are exhausted or `Ok(true)` once ready for the next attempt.
+/// Logs, buffers tree status lines, notifies shared backpressure on 429/503, and waits for a
+/// retryable download failure, returning `Ok(false)` when retries are exhausted or `Ok(true)`
+/// once ready for the next attempt.
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_download_retry(
     retry_count: &mut u32,
     policy: &RetryPolicy,
     safe_initial_url: &str,
     kind: DownloadRetryKind<'_>,
     signal: &ShutdownSignal,
+    scheduler: Option<&ElasticScheduler>,
     logger: &VerboseLogger,
+    detail_lines: &mut Vec<String>,
 ) -> Result<bool> {
     if *retry_count >= policy.max_retries {
+        if let DownloadRetryKind::HttpStatus {
+            status,
+            retry_after,
+        } = kind
+        {
+            if is_throttle_status(status) {
+                if let Some(scheduler) = scheduler {
+                    let (delay, delay_source) = compute_retry_delay_with_source(
+                        *retry_count + 1,
+                        retry_after,
+                        SystemTime::now(),
+                        policy,
+                    );
+                    let (prev_ceiling, new_ceiling) = scheduler.record_throttle(delay);
+                    logger.log(
+                        "scheduler",
+                        format_args!(
+                            "backpressure after HTTP {status} (retries exhausted): ceiling {prev_ceiling}->{new_ceiling}, cooldown {:.2}s ({delay_source})",
+                            delay.as_secs_f64()
+                        ),
+                    );
+                }
+            }
+        }
+
         let exhausted_detail = match kind {
             DownloadRetryKind::Transport(err) => format!(": {err}"),
             DownloadRetryKind::HttpStatus { status, .. } => format!(" after HTTP {status}"),
@@ -510,13 +701,13 @@ async fn wait_for_download_retry(
                 *retry_count, policy.max_retries, safe_initial_url, exhausted_detail
             ),
         );
-        println!(
+        detail_lines.push(format!(
             "{} {}      {} Maximum retries ({}) exceeded",
             "├╼".cyan().dimmed(),
             "Failed".red().bold(),
             "✘".red().bold(),
             policy.max_retries
-        );
+        ));
         return Ok(false);
     }
 
@@ -528,6 +719,21 @@ async fn wait_for_download_retry(
     let (delay, delay_source) =
         compute_retry_delay_with_source(*retry_count, retry_after, SystemTime::now(), policy);
     let wait_secs = delay.as_secs_f64();
+
+    if let DownloadRetryKind::HttpStatus { status, .. } = kind {
+        if is_throttle_status(status) {
+            if let Some(scheduler) = scheduler {
+                let (prev_ceiling, new_ceiling) = scheduler.record_throttle(delay);
+                logger.log(
+                    "scheduler",
+                    format_args!(
+                        "backpressure after HTTP {status}: ceiling {prev_ceiling}->{new_ceiling}, cooldown {wait_secs:.2}s ({delay_source})"
+                    ),
+                );
+            }
+        }
+    }
+
     let (log_reason, status_line) = match kind {
         DownloadRetryKind::Transport(err) => (
             err.to_string(),
@@ -558,19 +764,19 @@ async fn wait_for_download_retry(
             *retry_count, policy.max_retries, safe_initial_url
         ),
     );
-    println!(
+    detail_lines.push(format!(
         "{} {}      {} {status_line}",
         "├╼".cyan().dimmed(),
         "Retry".yellow().bold(),
         "⟳".yellow().bold()
-    );
-    println!(
+    ));
+    detail_lines.push(format!(
         "{} {}      Waiting {wait_secs:.1}s before retry...",
         "├╼".cyan().dimmed(),
         "Wait".white()
-    );
+    ));
 
-    sleep_interruptible(delay, signal).await?;
+    signal.sleep_or_shutdown(delay).await?;
     Ok(true)
 }
 
@@ -594,18 +800,29 @@ fn reset_partial_for_unranged_refetch(
     remove_part_file_safely(root, part_path)
 }
 
+/// Shared batch runtime collaborators passed into per-file transfers.
+#[derive(Clone, Default)]
+struct BatchTransferContext {
+    rate_limiter: Option<Arc<AsyncMutex<RateLimiter>>>,
+    scheduler: Option<ElasticScheduler>,
+    multi_progress: Option<MultiProgress>,
+}
+
 /// Download file content into a `.part` file with progress reporting and automatic retry on failure
 #[allow(clippy::too_many_arguments)]
 async fn download_file_content(
     client: &Client,
     root: &Path,
     url: &str,
+    file_path: &str,
     part_path: &Path,
     signal: &ShutdownSignal,
     cookie_source: Option<&CookieSource>,
     expected_md5: Option<&str>,
     options: &DownloadOptions,
+    context: &BatchTransferContext,
     logger: &VerboseLogger,
+    detail_lines: &mut Vec<String>,
 ) -> Result<(u64, bool)> {
     let policy = &options.retry_policy;
     let initial_url = Url::parse(url).map_err(|e| {
@@ -622,6 +839,10 @@ async fn download_file_content(
     loop {
         if !signal.is_running() {
             return Err(interrupted_error());
+        }
+
+        if let Some(ref scheduler) = context.scheduler {
+            scheduler.wait_for_cooldown(signal).await?;
         }
 
         // Re-check `.part` file size at start of each attempt (in case of retry)
@@ -663,7 +884,9 @@ async fn download_file_content(
                     &safe_initial_url,
                     DownloadRetryKind::Transport(&safe_err),
                     signal,
+                    context.scheduler.as_ref(),
                     logger,
+                    detail_lines,
                 )
                 .await?
                 {
@@ -691,7 +914,9 @@ async fn download_file_content(
                     retry_after: retry_after.as_deref(),
                 },
                 signal,
+                context.scheduler.as_ref(),
                 logger,
+                detail_lines,
             )
             .await?
             {
@@ -746,7 +971,11 @@ async fn download_file_content(
                         part_path,
                         expected_md5,
                         signal.running_flag(),
-                    )?;
+                        context.multi_progress.as_ref(),
+                        Some(file_path),
+                        detail_lines,
+                    )
+                    .await?;
                     if !signal.is_running() {
                         return Err(interrupted_error());
                     }
@@ -820,18 +1049,33 @@ async fn download_file_content(
             format!("{} {}  ", "╰╼".cyan().dimmed(), "Downloading".white())
         };
 
-        let pb = create_progress_bar(
-            total_expected_size,
-            &download_action,
-            Some("green/green"),
-            true,
-        );
+        let pb_bar = match context.multi_progress.as_ref() {
+            Some(multi) => create_attached_progress_bar(
+                multi,
+                total_expected_size,
+                &download_action,
+                file_path,
+                Some("green/green"),
+                true,
+            ),
+            None => create_progress_bar(
+                total_expected_size,
+                &download_action,
+                Some("green/green"),
+                true,
+            ),
+        };
+        let pb = ProgressBarGuard::new(pb_bar, context.multi_progress.clone());
 
         // Set initial progress to starting offset for resumed downloads
         pb.set_position(start_offset);
 
         let start_time = Instant::now();
-        let mut rate_limiter = options.limit_rate.map(RateLimiter::new);
+        let mut local_rate_limiter = if context.rate_limiter.is_none() {
+            options.limit_rate.map(RateLimiter::new)
+        } else {
+            None
+        };
         let mut total_bytes: u64 = start_offset;
         let mut downloaded_bytes: u64 = 0;
 
@@ -842,7 +1086,6 @@ async fn download_file_content(
                 .transpose()
             {
                 if !signal.is_running() {
-                    pb.finish_and_clear();
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "Download interrupted during file transfer",
@@ -857,13 +1100,17 @@ async fn download_file_content(
                 total_bytes = total_bytes.saturating_add(chunk_len);
                 pb.set_position(total_bytes);
 
-                if let Some(limiter) = rate_limiter.as_mut() {
+                if let Some(ref shared_limiter) = context.rate_limiter {
+                    throttle_shared_rate_limiter(shared_limiter, chunk_len, signal).await?;
+                } else if let Some(limiter) = local_rate_limiter.as_mut() {
                     limiter.throttle(chunk_len, signal).await?;
                 }
             }
             Ok(())
         }
         .await;
+
+        drop(pb);
 
         match download_result {
             Ok(_) => {
@@ -881,8 +1128,7 @@ async fn download_file_content(
 
                 let (rate, unit) = format_transfer_rate(transfer_rate_val);
 
-                pb.finish_and_clear();
-                println!(
+                detail_lines.push(format!(
                     "{} {}   {} {} in {} ({:.2} {}/s)",
                     "├╼".cyan().dimmed(),
                     "Downloaded".white(),
@@ -891,13 +1137,11 @@ async fn download_file_content(
                     format_duration(elapsed).bold(),
                     rate,
                     unit
-                );
+                ));
 
                 return Ok((total_bytes, false));
             }
             Err(e) => {
-                pb.finish_and_clear();
-
                 // Fail immediately on user interruption or local filesystem errors
                 if !signal.is_running() || !matches!(e, IaGetError::Network(_)) {
                     let _ = file.flush();
@@ -920,7 +1164,9 @@ async fn download_file_content(
                     &safe_initial_url,
                     DownloadRetryKind::MidStream(&e),
                     signal,
+                    context.scheduler.as_ref(),
                     logger,
+                    detail_lines,
                 )
                 .await?
                 {
@@ -931,40 +1177,55 @@ async fn download_file_content(
     }
 }
 
-/// Verify a downloaded file's hash against an expected value inside `root`.
-fn verify_downloaded_file(
+/// Verify a downloaded file's hash against an expected value inside `root`,
+/// offloading blocking MD5 computation onto Tokio's blocking pool.
+async fn verify_downloaded_file(
     root: &Path,
     rel_path: &Path,
     expected_md5: Option<&str>,
     running: &Arc<AtomicBool>,
+    multi_progress: Option<&MultiProgress>,
+    progress_label: Option<&str>,
+    detail_lines: &mut Vec<String>,
 ) -> Result<bool> {
     let Some(expected_md5_str) = expected_md5 else {
-        println!(
+        detail_lines.push(format!(
             "{} {}",
             "-".dimmed(),
             "No MD5 hash provided for verification.".dimmed()
-        );
+        ));
         return Ok(true); // No hash to check against, consider it verified
     };
-    let local_md5 = calculate_md5(root, rel_path, running)?;
+    let canonical_root = resolve_destination_root(root)?;
+    let local_md5 = calculate_md5_in_canonical_root_async(
+        canonical_root,
+        rel_path.to_path_buf(),
+        Arc::clone(running),
+        true,
+        multi_progress.cloned(),
+        progress_label.map(str::to_owned),
+    )
+    .await
+    .map_err(ContainedFileError::into_ia_get_error)?;
+
     if local_md5 == expected_md5_str {
-        println!(
+        detail_lines.push(format!(
             "{} {}         {} {}",
             "╰╼".cyan().dimmed(),
             "Hash".white(),
             "✔".green().bold(),
             format!("({})", local_md5).dimmed()
-        );
+        ));
         Ok(true)
     } else {
-        println!(
+        detail_lines.push(format!(
             "{} {}         {} ({}) Expected ({})",
             "╰╼".cyan().dimmed(),
             "Hash".white(),
             "✘".red().bold(),
             local_md5.red(),
             expected_md5_str.dimmed()
-        );
+        ));
         Ok(false)
     }
 }
@@ -1012,8 +1273,195 @@ fn print_batch_summary(summary: &BatchSummary) {
     );
 }
 
+/// Formats a complete per-file tree block (`▣` / `├╼` / `╰╼`) for atomic printing.
+fn format_file_completion_block(
+    file_path: &str,
+    completed_index: usize,
+    total_files: usize,
+    detail_lines: &[String],
+) -> String {
+    let mut block = String::new();
+    block.push_str(" \n");
+    block.push_str(&format!(
+        "{}  {}     {}\n",
+        "▣".bright_cyan().bold(),
+        "Filename".white(),
+        file_path.bold()
+    ));
+    block.push_str(&format!(
+        "{} {}        {} {} of {}",
+        "├╼".cyan().dimmed(),
+        "Count".white(),
+        "#".blue().bold(),
+        completed_index.to_string().bold(),
+        total_files.to_string().bold()
+    ));
+    for line in detail_lines {
+        block.push('\n');
+        block.push_str(line);
+    }
+    block
+}
+
+/// Prints a multi-line completion block atomically on both TTY and non-TTY stdout.
+fn emit_multi_progress_block(multi: &MultiProgress, block: &str) {
+    if multi.is_hidden() {
+        multi.suspend(|| {
+            println!("{block}");
+        });
+    } else {
+        let _ = multi.println(block);
+    }
+}
+
+/// Download a single file inside `root` via `.part` staging, MD5 verification, and atomic promotion
+/// with shared batch context, returning collected tree lines on both success and failure.
+#[allow(clippy::too_many_arguments)]
+async fn download_single_file_with_context(
+    client: &Client,
+    root: &Path,
+    url: &str,
+    file_path: &str,
+    expected_md5: Option<&str>,
+    signal: &ShutdownSignal,
+    cookie_source: Option<&CookieSource>,
+    options: &DownloadOptions,
+    context: &BatchTransferContext,
+    batch_logger: &VerboseLogger,
+    transfer_logger: &VerboseLogger,
+) -> std::result::Result<(FileOutcome, Vec<String>), (IaGetError, Vec<String>)> {
+    let mut detail_lines = Vec::new();
+    if !signal.is_running() {
+        return Err((interrupted_error(), detail_lines));
+    }
+
+    let existing_status = match check_existing_file(
+        root,
+        file_path,
+        expected_md5,
+        signal.running_flag(),
+        context.multi_progress.as_ref(),
+        &mut detail_lines,
+    )
+    .await
+    {
+        Ok(status) => status,
+        Err(err) => return Err((err, detail_lines)),
+    };
+
+    match existing_status {
+        ExistingFileStatus::Missing => {}
+        ExistingFileStatus::CompleteMd5Verified => {
+            batch_logger.log(
+                "download",
+                format_args!("skipped '{file_path}': already exists; MD5 verified"),
+            );
+            detail_lines.push(format!(
+                "{} {}   {}",
+                "╰╼".cyan().dimmed(),
+                "Downloaded".white(),
+                "✔".green().bold()
+            ));
+            return Ok((FileOutcome::Skipped, detail_lines));
+        }
+        ExistingFileStatus::CompleteNoMd5 => {
+            batch_logger.log(
+                "download",
+                format_args!("skipped '{file_path}': already exists; no MD5 in metadata"),
+            );
+            detail_lines.push(format!(
+                "{} {}   {}",
+                "╰╼".cyan().dimmed(),
+                "Downloaded".white(),
+                "✔".green().bold()
+            ));
+            return Ok((FileOutcome::Skipped, detail_lines));
+        }
+        ExistingFileStatus::NeedsRedownload => {
+            batch_logger.log(
+                "download",
+                format_args!("redownloading '{file_path}': existing file hash mismatch"),
+            );
+            detail_lines.push(format!(
+                "{} {}      {}",
+                "├╼".cyan().dimmed(),
+                "Partial".white(),
+                "▲".yellow().bold()
+            ));
+        }
+    }
+
+    if !signal.is_running() {
+        return Err((interrupted_error(), detail_lines));
+    }
+
+    if let Err(err) = ensure_parent_directories(root, Path::new(file_path)) {
+        return Err((err, detail_lines));
+    }
+
+    let part_path = part_file_path(file_path);
+    let (_, already_verified) = match download_file_content(
+        client,
+        root,
+        url,
+        file_path,
+        &part_path,
+        signal,
+        cookie_source,
+        expected_md5,
+        options,
+        context,
+        transfer_logger,
+        &mut detail_lines,
+    )
+    .await
+    {
+        Ok(res) => res,
+        Err(err) => return Err((err, detail_lines)),
+    };
+
+    if !signal.is_running() {
+        return Err((interrupted_error(), detail_lines));
+    }
+
+    let verified = if already_verified {
+        true
+    } else {
+        match verify_downloaded_file(
+            root,
+            &part_path,
+            expected_md5,
+            signal.running_flag(),
+            context.multi_progress.as_ref(),
+            Some(file_path),
+            &mut detail_lines,
+        )
+        .await
+        {
+            Ok(valid) => valid,
+            Err(err) => return Err((err, detail_lines)),
+        }
+    };
+
+    if verified {
+        if !signal.is_running() {
+            return Err((interrupted_error(), detail_lines));
+        }
+        if let Err(err) = promote_part_file(root, &part_path, Path::new(file_path)) {
+            return Err((err, detail_lines));
+        }
+        Ok((FileOutcome::Downloaded, detail_lines))
+    } else {
+        Err((
+            IaGetError::Integrity(format!("MD5 mismatch for {}", file_path)),
+            detail_lines,
+        ))
+    }
+}
+
 /// Download a single file inside `root` via `.part` staging, MD5 verification, and atomic promotion
 /// using explicit `DownloadOptions`.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn download_single_file_with_options(
     client: &Client,
@@ -1026,90 +1474,23 @@ async fn download_single_file_with_options(
     options: &DownloadOptions,
     logger: &VerboseLogger,
 ) -> Result<FileOutcome> {
-    if !signal.is_running() {
-        return Err(interrupted_error());
-    }
-
-    match check_existing_file(root, file_path, expected_md5, signal.running_flag())? {
-        ExistingFileStatus::Missing => {}
-        ExistingFileStatus::CompleteMd5Verified => {
-            logger.log(
-                "download",
-                format_args!("skipped '{file_path}': already exists; MD5 verified"),
-            );
-            println!(
-                "{} {}   {}",
-                "╰╼".cyan().dimmed(),
-                "Downloaded".white(),
-                "✔".green().bold()
-            );
-            return Ok(FileOutcome::Skipped);
-        }
-        ExistingFileStatus::CompleteNoMd5 => {
-            logger.log(
-                "download",
-                format_args!("skipped '{file_path}': already exists; no MD5 in metadata"),
-            );
-            println!(
-                "{} {}   {}",
-                "╰╼".cyan().dimmed(),
-                "Downloaded".white(),
-                "✔".green().bold()
-            );
-            return Ok(FileOutcome::Skipped);
-        }
-        ExistingFileStatus::NeedsRedownload => {
-            logger.log(
-                "download",
-                format_args!("redownloading '{file_path}': existing file hash mismatch"),
-            );
-            println!(
-                "{} {}      {}",
-                "├╼".cyan().dimmed(),
-                "Partial".white(),
-                "▲".yellow().bold()
-            );
-        }
-    }
-
-    if !signal.is_running() {
-        return Err(interrupted_error());
-    }
-
-    ensure_parent_directories(root, Path::new(file_path))?;
-
-    let part_path = part_file_path(file_path);
-    let (_, already_verified) = download_file_content(
+    let context = BatchTransferContext::default();
+    download_single_file_with_context(
         client,
         root,
         url,
-        &part_path,
+        file_path,
+        expected_md5,
         signal,
         cookie_source,
-        expected_md5,
         options,
+        &context,
+        logger,
         logger,
     )
-    .await?;
-
-    if !signal.is_running() {
-        return Err(interrupted_error());
-    }
-
-    if already_verified
-        || verify_downloaded_file(root, &part_path, expected_md5, signal.running_flag())?
-    {
-        if !signal.is_running() {
-            return Err(interrupted_error());
-        }
-        promote_part_file(root, &part_path, Path::new(file_path))?;
-        Ok(FileOutcome::Downloaded)
-    } else {
-        Err(IaGetError::Integrity(format!(
-            "MD5 mismatch for {}",
-            file_path
-        )))
-    }
+    .await
+    .map(|(outcome, _)| outcome)
+    .map_err(|(err, _)| err)
 }
 
 fn record_batch_interrupted(
@@ -1125,12 +1506,86 @@ fn record_batch_interrupted(
     );
 }
 
+enum TaskOutcome {
+    Downloaded,
+    Skipped,
+    Failed { error: String },
+    Interrupted,
+}
+
+struct TaskCompletion {
+    original_index: usize,
+    file_path: String,
+    outcome: TaskOutcome,
+}
+
+fn apply_task_completion(
+    completion: TaskCompletion,
+    summary: &mut BatchSummary,
+    failed_with_index: &mut Vec<(usize, FailedFile)>,
+    interrupted: &mut bool,
+    interrupt_reason: &mut Option<String>,
+) {
+    match completion.outcome {
+        TaskOutcome::Downloaded => summary.ok += 1,
+        TaskOutcome::Skipped => summary.skipped += 1,
+        TaskOutcome::Failed { error } => {
+            failed_with_index.push((
+                completion.original_index,
+                FailedFile {
+                    file_path: completion.file_path,
+                    error,
+                },
+            ));
+        }
+        TaskOutcome::Interrupted => {
+            *interrupted = true;
+            if interrupt_reason.is_none() {
+                *interrupt_reason = Some(format!(
+                    "interrupted while downloading '{}'",
+                    completion.file_path
+                ));
+            }
+        }
+    }
+}
+
+/// Downloads multiple files into destination `root` with default disabled verbose logging.
+#[allow(clippy::too_many_arguments)]
+pub async fn download_files_in_dir<I>(
+    client: &Client,
+    root: &Path,
+    files: I,
+    total_files: usize,
+    cookie_source: Option<&CookieSource>,
+    options: &DownloadOptions,
+    signal: &ShutdownSignal,
+) -> Result<BatchSummary>
+where
+    I: IntoIterator,
+    I::Item: Into<DownloadItem>,
+{
+    download_files_in_dir_with_logger(
+        client,
+        root,
+        files,
+        total_files,
+        cookie_source,
+        options,
+        signal,
+        &VerboseLogger::disabled(),
+    )
+    .await
+}
+
 /// Downloads multiple files into destination `root` with explicit [`DownloadOptions`],
 /// shutdown signal, and [`VerboseLogger`].
 ///
-/// Validates and prepares `root` before downloading, continues past per-file failures
-/// after printing a warning, stops promptly on shutdown signal interruption, prints an
-/// end-of-batch summary, and returns the collected [`BatchSummary`].
+/// Validates and prepares `root` before downloading, schedules transfers through the
+/// 4-permit [`ElasticScheduler`] sorted by ascending `expected_size` (`None` last),
+/// continues past per-file failures after printing an atomic tree block, preserves
+/// original metadata order in [`BatchSummary::failed`], stops promptly on shutdown
+/// signal interruption, prints an end-of-batch summary, and returns [`BatchSummary`].
 #[allow(clippy::too_many_arguments)]
 pub async fn download_files_in_dir_with_logger<I>(
     client: &Client,
@@ -1143,98 +1598,243 @@ pub async fn download_files_in_dir_with_logger<I>(
     logger: &VerboseLogger,
 ) -> Result<BatchSummary>
 where
-    I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
+    I: IntoIterator,
+    I::Item: Into<DownloadItem>,
 {
-    let files: Vec<(String, String, Option<String>)> = files.into_iter().collect();
+    let items: Vec<DownloadItem> = files.into_iter().map(Into::into).collect();
     validate_download_paths_for_dir(
         root,
-        files
+        items
             .iter()
-            .map(|(_, file_path, _)| (file_path.as_str(), file_path.as_str())),
+            .map(|item| (item.file_path.as_str(), item.file_path.as_str())),
     )?;
 
     let canonical_root = prepare_output_dir(root)?;
-    let mut summary = BatchSummary::default();
+    let files_count = items.len();
+    let mut indexed_items: Vec<(usize, DownloadItem)> = items.into_iter().enumerate().collect();
+    sort_planned_downloads(&mut indexed_items, |item| item.expected_size);
 
-    for (index, (url, file_path, expected_md5)) in files.into_iter().enumerate() {
-        if !signal.is_running() {
-            record_batch_interrupted(
-                &mut summary,
-                logger,
-                format_args!(
-                    "interrupted before file {}/{total_files} ('{file_path}')",
-                    index + 1
+    let multi_progress = MultiProgress::with_draw_target(progress_draw_target());
+    let multi_guard = signal.enter_multi_progress();
+    let scheduler = ElasticScheduler::new();
+    let shared_rate_limiter = options
+        .limit_rate
+        .map(|bytes_per_sec| Arc::new(AsyncMutex::new(RateLimiter::new(bytes_per_sec))));
+    let shared_cookies = cookie_source.cloned().map(Arc::new);
+    let completed_count = Arc::new(AtomicUsize::new(0));
+    let prefix_concurrent_logs = files_count > 1;
+
+    let mut summary = BatchSummary::default();
+    let mut failed_with_index: Vec<(usize, FailedFile)> = Vec::new();
+    let mut interrupted = false;
+    let mut interrupt_reason: Option<String> = None;
+    let mut join_set: JoinSet<TaskCompletion> = JoinSet::new();
+
+    for (dispatch_idx, (original_index, item)) in indexed_items.into_iter().enumerate() {
+        while let Some(join_result) = join_set.try_join_next() {
+            match join_result {
+                Ok(completion) => apply_task_completion(
+                    completion,
+                    &mut summary,
+                    &mut failed_with_index,
+                    &mut interrupted,
+                    &mut interrupt_reason,
                 ),
-            );
+                Err(_) if !signal.is_running() => {
+                    interrupted = true;
+                }
+                Err(join_err) => {
+                    join_set.abort_all();
+                    let _ = multi_progress.clear();
+                    drop(multi_guard);
+                    return Err(IaGetError::Network(format!(
+                        "Download worker task failed: {join_err}"
+                    )));
+                }
+            }
+        }
+
+        if !signal.is_running() {
+            interrupted = true;
+            if interrupt_reason.is_none() {
+                interrupt_reason = Some(format!(
+                    "interrupted before file {}/{total_files} ('{}')",
+                    dispatch_idx + 1,
+                    item.file_path
+                ));
+            }
             break;
         }
 
-        println!(" ");
-        println!(
-            "{}  {}     {}",
-            "▣".bright_cyan().bold(),
-            "Filename".white(),
-            file_path.bold()
-        );
-        println!(
-            "{} {}        {} {} of {}",
-            "├╼".cyan().dimmed(),
-            "Count".white(),
-            "#".blue().bold(),
-            (index + 1).to_string().bold(),
-            total_files.to_string().bold()
-        );
-
-        match download_single_file_with_options(
-            client,
-            &canonical_root,
-            &url,
-            &file_path,
-            expected_md5.as_deref(),
-            signal,
-            cookie_source,
-            options,
-            logger,
-        )
-        .await
-        {
-            Ok(FileOutcome::Downloaded) => {
-                summary.ok += 1;
-                logger.log(
-                    "download",
-                    format_args!("completed '{file_path}' ({}/{total_files})", index + 1),
-                );
-            }
-            Ok(FileOutcome::Skipped) => summary.skipped += 1,
-            Err(err) => {
-                if !signal.is_running() {
-                    record_batch_interrupted(
-                        &mut summary,
-                        logger,
-                        format_args!(
-                            "interrupted while downloading '{file_path}' ({}/{total_files})",
-                            index + 1
-                        ),
-                    );
-                    break;
+        let permit = match scheduler.acquire(item.expected_size, signal).await {
+            Ok(permit) => permit,
+            Err(_) if !signal.is_running() => {
+                interrupted = true;
+                if interrupt_reason.is_none() {
+                    interrupt_reason = Some(format!(
+                        "interrupted before file {}/{total_files} ('{}')",
+                        dispatch_idx + 1,
+                        item.file_path
+                    ));
                 }
+                break;
+            }
+            Err(err) => {
+                join_set.abort_all();
+                let _ = multi_progress.clear();
+                drop(multi_guard);
+                return Err(err);
+            }
+        };
 
-                logger.log("download", format_args!("failed '{file_path}': {err}"));
-                println!(
-                    "{} {}      {} {}: {}",
-                    "╰╼".cyan().dimmed(),
-                    "Warning".yellow().bold(),
-                    "⚠".yellow().bold(),
-                    file_path.bold(),
-                    err
-                );
-                summary.failed.push(FailedFile {
-                    file_path,
-                    error: err.to_string(),
-                });
+        let task_client = client.clone();
+        let task_root = canonical_root.clone();
+        let task_signal = signal.clone();
+        let task_cookies = shared_cookies.clone();
+        let task_options = *options;
+        let task_batch_logger = logger.clone();
+        let task_transfer_logger = if prefix_concurrent_logs {
+            logger.with_prefix(&item.file_path)
+        } else {
+            logger.clone()
+        };
+        let task_completed_count = Arc::clone(&completed_count);
+        let task_scheduler = scheduler.clone();
+        let task_multi = multi_progress.clone();
+        let task_context = BatchTransferContext {
+            rate_limiter: shared_rate_limiter.clone(),
+            scheduler: Some(scheduler.clone()),
+            multi_progress: Some(multi_progress.clone()),
+        };
+
+        join_set.spawn(async move {
+            let _permit = permit;
+            let file_path = item.file_path;
+
+            let outcome = match download_single_file_with_context(
+                &task_client,
+                &task_root,
+                &item.url,
+                &file_path,
+                item.expected_md5.as_deref(),
+                &task_signal,
+                task_cookies.as_deref(),
+                &task_options,
+                &task_context,
+                &task_batch_logger,
+                &task_transfer_logger,
+            )
+            .await
+            {
+                Ok((FileOutcome::Downloaded, detail_lines)) => {
+                    let (prev_ceiling, new_ceiling) = task_scheduler.record_network_success();
+                    if new_ceiling > prev_ceiling {
+                        task_transfer_logger.log(
+                            "scheduler",
+                            format_args!(
+                                "recovered concurrency ceiling {prev_ceiling}->{new_ceiling}"
+                            ),
+                        );
+                    }
+                    let finished_index = task_completed_count.fetch_add(1, Ordering::SeqCst) + 1;
+                    let block = format_file_completion_block(
+                        &file_path,
+                        finished_index,
+                        total_files,
+                        &detail_lines,
+                    );
+                    emit_multi_progress_block(&task_multi, &block);
+                    task_batch_logger.log(
+                        "download",
+                        format_args!("completed '{file_path}' ({finished_index}/{total_files})"),
+                    );
+                    TaskOutcome::Downloaded
+                }
+                Ok((FileOutcome::Skipped, detail_lines)) => {
+                    let finished_index = task_completed_count.fetch_add(1, Ordering::SeqCst) + 1;
+                    let block = format_file_completion_block(
+                        &file_path,
+                        finished_index,
+                        total_files,
+                        &detail_lines,
+                    );
+                    emit_multi_progress_block(&task_multi, &block);
+                    TaskOutcome::Skipped
+                }
+                Err((err, mut detail_lines)) => {
+                    if !task_signal.is_running() {
+                        TaskOutcome::Interrupted
+                    } else {
+                        let finished_index =
+                            task_completed_count.fetch_add(1, Ordering::SeqCst) + 1;
+                        task_batch_logger
+                            .log("download", format_args!("failed '{file_path}': {err}"));
+                        detail_lines.push(format!(
+                            "{} {}      {} {}: {}",
+                            "╰╼".cyan().dimmed(),
+                            "Warning".yellow().bold(),
+                            "⚠".yellow().bold(),
+                            file_path.bold(),
+                            err
+                        ));
+                        let block = format_file_completion_block(
+                            &file_path,
+                            finished_index,
+                            total_files,
+                            &detail_lines,
+                        );
+                        emit_multi_progress_block(&task_multi, &block);
+                        TaskOutcome::Failed {
+                            error: err.to_string(),
+                        }
+                    }
+                }
+            };
+
+            TaskCompletion {
+                original_index,
+                file_path,
+                outcome,
+            }
+        });
+    }
+
+    while let Some(join_result) = join_set.join_next().await {
+        match join_result {
+            Ok(completion) => apply_task_completion(
+                completion,
+                &mut summary,
+                &mut failed_with_index,
+                &mut interrupted,
+                &mut interrupt_reason,
+            ),
+            Err(_) if !signal.is_running() => {
+                interrupted = true;
+            }
+            Err(join_err) => {
+                join_set.abort_all();
+                let _ = multi_progress.clear();
+                drop(multi_guard);
+                return Err(IaGetError::Network(format!(
+                    "Download worker task failed: {join_err}"
+                )));
             }
         }
     }
+
+    let _ = multi_progress.clear();
+    drop(multi_guard);
+
+    if interrupted {
+        let reason = interrupt_reason.unwrap_or_else(|| "interrupted by user signal".to_string());
+        record_batch_interrupted(&mut summary, logger, format_args!("{reason}"));
+    }
+
+    failed_with_index.sort_by_key(|(original_index, _)| *original_index);
+    summary.failed = failed_with_index
+        .into_iter()
+        .map(|(_, failed)| failed)
+        .collect();
 
     logger.log(
         "summary",
@@ -1257,7 +1857,8 @@ pub(super) mod tests {
 
     use super::*;
     use crate::test_support::{
-        fast_retry_policy, md5_hex, CapturedLogs, MockResponse, MockServer, TempTestDir,
+        fast_retry_policy, md5_hex, CapturedLogs, ConcurrentMockServer, MockResponse, MockServer,
+        TempTestDir,
     };
 
     #[allow(clippy::too_many_arguments)]
@@ -1298,7 +1899,8 @@ pub(super) mod tests {
         signal: &ShutdownSignal,
     ) -> Result<BatchSummary>
     where
-        I: IntoIterator<Item = (String, String, Option<String>)>,
+        I: IntoIterator,
+        I::Item: Into<DownloadItem>,
     {
         let options = DownloadOptions {
             retry_policy: *policy,
@@ -3090,5 +3692,735 @@ pub(super) mod tests {
             }),
             "missing failure reason for missing.bin:\n{logs}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_elastic_parallel_four_small_files_overlap_and_cap_at_four() {
+        let payloads: Vec<(String, Vec<u8>)> = (0..6)
+            .map(|idx| {
+                (
+                    format!("small_{idx}.bin"),
+                    format!("payload-for-small-file-{idx}").into_bytes(),
+                )
+            })
+            .collect();
+        let payload_map: Arc<std::collections::HashMap<String, Vec<u8>>> = Arc::new(
+            payloads
+                .iter()
+                .map(|(name, bytes)| (format!("/{name}"), bytes.clone()))
+                .collect(),
+        );
+        let first_wave_barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let first_wave_count = Arc::new(AtomicUsize::new(0));
+
+        let server = ConcurrentMockServer::start(move |req| {
+            let map = Arc::clone(&payload_map);
+            let barrier = Arc::clone(&first_wave_barrier);
+            let counter = Arc::clone(&first_wave_count);
+            async move {
+                let path = req
+                    .request_line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("/")
+                    .to_string();
+                if counter.fetch_add(1, Ordering::SeqCst) < 4 {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), barrier.wait()).await;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                match map.get(&path) {
+                    Some(bytes) => MockResponse::ok(bytes),
+                    None => MockResponse::status("404 Not Found", b""),
+                }
+            }
+        })
+        .await;
+
+        let fx = DownloadFixture::new("elastic-4-small");
+        let items: Vec<DownloadItem> = payloads
+            .iter()
+            .map(|(name, bytes)| DownloadItem {
+                url: server.url(&format!("/{name}")),
+                file_path: name.clone(),
+                expected_md5: Some(md5_hex(bytes)),
+                expected_size: Some(bytes.len() as u64),
+            })
+            .collect();
+
+        let summary = run_batch_in_dir(
+            &fx.client,
+            fx.path(),
+            items,
+            payloads.len(),
+            &fast_retry_policy(0),
+            &fx.signal,
+        )
+        .await
+        .expect("6 small parallel downloads should succeed");
+
+        let peak = server.max_concurrent();
+        let requests = server.stop().await;
+        assert_eq!(requests.len(), 6);
+        assert_eq!(
+            peak, MAX_CONCURRENT_PERMITS,
+            "6 small files should overlap at exactly 4 concurrent requests"
+        );
+        assert_eq!(summary.ok, 6);
+        assert_eq!(summary.skipped, 0);
+        assert!(summary.failed.is_empty());
+        assert!(!summary.interrupted);
+        for (name, bytes) in &payloads {
+            fx.assert_downloaded(name, bytes);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_elastic_funnel_drains_small_and_runs_large_sequentially() {
+        let small_barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let active_total = Arc::new(AtomicUsize::new(0));
+        let small_peak = Arc::new(AtomicUsize::new(0));
+        let large_overlaps = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+        let started_paths = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        let entries: Vec<(&str, u64, Vec<u8>)> = vec![
+            ("large_1.bin", MEDIUM_FILE_MAX_BYTES, b"large-one".to_vec()),
+            ("small_1.bin", 100, b"small-one".to_vec()),
+            (
+                "large_2.bin",
+                MEDIUM_FILE_MAX_BYTES + 16 * 1024 * 1024,
+                b"large-two".to_vec(),
+            ),
+            ("small_2.bin", 200, b"small-two".to_vec()),
+            ("small_3.bin", 300, b"small-three".to_vec()),
+            ("small_4.bin", 400, b"small-four".to_vec()),
+        ];
+        let body_map: Arc<std::collections::HashMap<String, Vec<u8>>> = Arc::new(
+            entries
+                .iter()
+                .map(|(name, _, bytes)| (format!("/{name}"), bytes.clone()))
+                .collect(),
+        );
+
+        let server = ConcurrentMockServer::start({
+            let body_map = Arc::clone(&body_map);
+            let small_barrier = Arc::clone(&small_barrier);
+            let active_total = Arc::clone(&active_total);
+            let small_peak = Arc::clone(&small_peak);
+            let large_overlaps = Arc::clone(&large_overlaps);
+            let started_paths = Arc::clone(&started_paths);
+            move |req| {
+                let body_map = Arc::clone(&body_map);
+                let small_barrier = Arc::clone(&small_barrier);
+                let active_total = Arc::clone(&active_total);
+                let small_peak = Arc::clone(&small_peak);
+                let large_overlaps = Arc::clone(&large_overlaps);
+                let started_paths = Arc::clone(&started_paths);
+                async move {
+                    let path = req
+                        .request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_string();
+                    started_paths.lock().unwrap().push(path.clone());
+                    let cur = active_total.fetch_add(1, Ordering::SeqCst) + 1;
+
+                    if path.starts_with("/small_") {
+                        small_peak.fetch_max(cur, Ordering::SeqCst);
+                        let _ = tokio::time::timeout(Duration::from_secs(2), small_barrier.wait())
+                            .await;
+                        small_peak.fetch_max(active_total.load(Ordering::SeqCst), Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    } else {
+                        let at_start = active_total.load(Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        let after_hold = active_total.load(Ordering::SeqCst);
+                        large_overlaps
+                            .lock()
+                            .unwrap()
+                            .push(at_start.max(after_hold));
+                    }
+
+                    active_total.fetch_sub(1, Ordering::SeqCst);
+                    MockResponse::ok(body_map.get(&path).expect("known path"))
+                }
+            }
+        })
+        .await;
+
+        let fx = DownloadFixture::new("elastic-funnel-drain");
+        let items: Vec<DownloadItem> = entries
+            .iter()
+            .map(|(name, declared_size, bytes)| DownloadItem {
+                url: server.url(&format!("/{name}")),
+                file_path: (*name).to_string(),
+                expected_md5: Some(md5_hex(bytes)),
+                expected_size: Some(*declared_size),
+            })
+            .collect();
+
+        let summary = run_batch_in_dir(
+            &fx.client,
+            fx.path(),
+            items,
+            entries.len(),
+            &fast_retry_policy(0),
+            &fx.signal,
+        )
+        .await
+        .expect("mixed small+large funnel batch should succeed");
+
+        let _ = server.stop().await;
+        assert_eq!(summary.ok, 6);
+        assert!(summary.failed.is_empty());
+        assert_eq!(
+            small_peak.load(Ordering::SeqCst),
+            4,
+            "all 4 small files should run concurrently"
+        );
+        assert_eq!(
+            *large_overlaps.lock().unwrap(),
+            vec![1, 1],
+            "large files must run strictly sequentially with zero overlap"
+        );
+
+        let order = started_paths.lock().unwrap().clone();
+        assert_eq!(order.len(), 6);
+        assert!(
+            order[..4].iter().all(|p| p.starts_with("/small_")),
+            "all small files must start before large files: {order:?}"
+        );
+        assert_eq!(
+            &order[4..],
+            &["/large_1.bin", "/large_2.bin"],
+            "large files must follow in ascending size order: {order:?}"
+        );
+
+        for (name, _, bytes) in &entries {
+            fx.assert_downloaded(name, bytes);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_elastic_shared_rate_limiter_caps_aggregate_bandwidth() {
+        let chunk_size = 10 * 1024usize;
+        let payloads: Vec<(String, Vec<u8>)> = (0..4)
+            .map(|idx| {
+                let bytes: Vec<u8> = (0..chunk_size)
+                    .map(|i| ((i + idx * 17) % 251) as u8)
+                    .collect();
+                (format!("paced_{idx}.bin"), bytes)
+            })
+            .collect();
+        let body_map: Arc<std::collections::HashMap<String, Vec<u8>>> = Arc::new(
+            payloads
+                .iter()
+                .map(|(name, bytes)| (format!("/{name}"), bytes.clone()))
+                .collect(),
+        );
+
+        let server = ConcurrentMockServer::start(move |req| {
+            let body_map = Arc::clone(&body_map);
+            async move {
+                let path = req
+                    .request_line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("/")
+                    .to_string();
+                MockResponse::ok(body_map.get(&path).expect("known path"))
+            }
+        })
+        .await;
+
+        let fx = DownloadFixture::new("elastic-shared-rate-limit");
+        let options = DownloadOptions {
+            retry_policy: fast_retry_policy(0),
+            limit_rate: Some(parse_rate_limit("100K").unwrap()),
+        };
+        let items: Vec<DownloadItem> = payloads
+            .iter()
+            .map(|(name, bytes)| DownloadItem {
+                url: server.url(&format!("/{name}")),
+                file_path: name.clone(),
+                expected_md5: Some(md5_hex(bytes)),
+                expected_size: Some(bytes.len() as u64),
+            })
+            .collect();
+
+        let started = Instant::now();
+        let summary = download_files_in_dir(
+            &fx.client,
+            fx.path(),
+            items,
+            payloads.len(),
+            None,
+            &options,
+            &fx.signal,
+        )
+        .await
+        .expect("rate-limited concurrent batch should succeed");
+        let elapsed = started.elapsed();
+
+        assert_eq!(server.stop().await.len(), 4);
+        assert_eq!(summary.ok, 4);
+        assert!(summary.failed.is_empty());
+        assert!(
+            elapsed >= Duration::from_millis(320),
+            "4x10 KiB concurrent batch at 100 KiB/s aggregate (~400ms expected) finished too fast: {elapsed:?}"
+        );
+        for (name, bytes) in &payloads {
+            fx.assert_downloaded(name, bytes);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_elastic_http_429_retry_after_shared_backpressure_and_prefixed_logs() {
+        let throttle_sent_at = Arc::new(std::sync::Mutex::new(None::<Instant>));
+        let late_arrivals = Arc::new(std::sync::Mutex::new(Vec::<(String, Instant)>::new()));
+        let f1_attempts = Arc::new(AtomicUsize::new(0));
+
+        let payloads: Vec<(String, Vec<u8>)> = (1..=6)
+            .map(|i| {
+                (
+                    format!("f{i}.bin"),
+                    format!("body-for-file-{i}").into_bytes(),
+                )
+            })
+            .collect();
+        let body_map: Arc<std::collections::HashMap<String, Vec<u8>>> = Arc::new(
+            payloads
+                .iter()
+                .map(|(name, bytes)| (format!("/{name}"), bytes.clone()))
+                .collect(),
+        );
+
+        let server = ConcurrentMockServer::start({
+            let body_map = Arc::clone(&body_map);
+            let throttle_sent_at = Arc::clone(&throttle_sent_at);
+            let late_arrivals = Arc::clone(&late_arrivals);
+            let f1_attempts = Arc::clone(&f1_attempts);
+            move |req| {
+                let body_map = Arc::clone(&body_map);
+                let throttle_sent_at = Arc::clone(&throttle_sent_at);
+                let late_arrivals = Arc::clone(&late_arrivals);
+                let f1_attempts = Arc::clone(&f1_attempts);
+                async move {
+                    let path = req
+                        .request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_string();
+                    if path == "/f1.bin" && f1_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        *throttle_sent_at.lock().unwrap() = Some(Instant::now());
+                        return MockResponse::retry_after(
+                            "429 Too Many Requests",
+                            "1",
+                            b"slow down",
+                        );
+                    }
+                    if path == "/f5.bin" || path == "/f6.bin" {
+                        late_arrivals
+                            .lock()
+                            .unwrap()
+                            .push((path.clone(), Instant::now()));
+                    } else if path != "/f1.bin" {
+                        // Hold initial peers slightly so f1's 429 lands before f5/f6 dispatch.
+                        tokio::time::sleep(Duration::from_millis(40)).await;
+                    }
+                    MockResponse::ok(body_map.get(&path).expect("known path"))
+                }
+            }
+        })
+        .await;
+
+        let fx = DownloadFixture::new("elastic-429-backpressure");
+        let options = DownloadOptions {
+            retry_policy: RetryPolicy {
+                max_retries: 2,
+                initial_delay: Duration::from_millis(20),
+                max_delay: Duration::from_millis(40),
+                max_retry_after: Duration::from_millis(180),
+            },
+            limit_rate: None,
+        };
+        let captured = CapturedLogs::new();
+        let logger = VerboseLogger::with_writer(captured.clone_writer());
+
+        let items: Vec<DownloadItem> = payloads
+            .iter()
+            .enumerate()
+            .map(|(idx, (name, bytes))| DownloadItem {
+                url: server.url(&format!("/{name}")),
+                file_path: name.clone(),
+                expected_md5: Some(md5_hex(bytes)),
+                // Increasing small sizes ensure f1..f4 dispatch first and f5..f6 follow.
+                expected_size: Some(64 + idx as u64),
+            })
+            .collect();
+
+        let summary = download_files_in_dir_with_logger(
+            &fx.client,
+            fx.path(),
+            items,
+            payloads.len(),
+            None,
+            &options,
+            &fx.signal,
+            &logger,
+        )
+        .await
+        .expect("batch should recover from 429 backpressure");
+
+        let _ = server.stop().await;
+        assert_eq!(summary.ok, 6);
+        assert!(summary.failed.is_empty());
+        for (name, bytes) in &payloads {
+            fx.assert_downloaded(name, bytes);
+        }
+
+        let throttled_at = throttle_sent_at
+            .lock()
+            .unwrap()
+            .expect("429 should have been sent");
+        let arrivals = late_arrivals.lock().unwrap().clone();
+        assert_eq!(arrivals.len(), 2);
+        for (path, arrived_at) in arrivals {
+            let delta = arrived_at.saturating_duration_since(throttled_at);
+            assert!(
+                delta >= Duration::from_millis(140),
+                "later file {path} should wait for shared 180ms cooldown after 429, delta={delta:?}"
+            );
+        }
+
+        assert!(
+            !captured.as_bytes().contains(&0x1b),
+            "verbose logs must remain plain text"
+        );
+        let logs = captured.text();
+        assert!(
+            logs.contains("[verbose] http: [f1.bin] -> GET "),
+            "concurrent HTTP logs should be prefixed with file path:\n{logs}"
+        );
+        assert!(
+            logs.contains("[verbose] retry: [f1.bin] attempt 1/2"),
+            "concurrent retry logs should be prefixed with file path:\n{logs}"
+        );
+        assert!(
+            logs.contains("[verbose] scheduler: [f1.bin] backpressure after HTTP 429"),
+            "scheduler backpressure logs should be prefixed with file path:\n{logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_elastic_local_skips_do_not_recover_throttled_ceiling() {
+        let s0_attempts = Arc::new(AtomicUsize::new(0));
+        let s1_attempts = Arc::new(AtomicUsize::new(0));
+        let throttle_barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let after_active = Arc::new(AtomicUsize::new(0));
+        let after_peak = Arc::new(AtomicUsize::new(0));
+
+        let server = ConcurrentMockServer::start({
+            let s0_attempts = Arc::clone(&s0_attempts);
+            let s1_attempts = Arc::clone(&s1_attempts);
+            let throttle_barrier = Arc::clone(&throttle_barrier);
+            let after_active = Arc::clone(&after_active);
+            let after_peak = Arc::clone(&after_peak);
+            move |req| {
+                let s0_attempts = Arc::clone(&s0_attempts);
+                let s1_attempts = Arc::clone(&s1_attempts);
+                let throttle_barrier = Arc::clone(&throttle_barrier);
+                let after_active = Arc::clone(&after_active);
+                let after_peak = Arc::clone(&after_peak);
+                async move {
+                    let path = req
+                        .request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_string();
+                    if path == "/s0.bin" {
+                        if s0_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(2),
+                                throttle_barrier.wait(),
+                            )
+                            .await;
+                            return MockResponse::retry_after("429 Too Many Requests", "0", b"");
+                        }
+                        return MockResponse::ok(b"s0-ok");
+                    }
+                    if path == "/s1.bin" {
+                        if s1_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(2),
+                                throttle_barrier.wait(),
+                            )
+                            .await;
+                            return MockResponse::retry_after("429 Too Many Requests", "0", b"");
+                        }
+                        return MockResponse::ok(b"s1-ok");
+                    }
+                    if path.starts_with("/after_") {
+                        let cur = after_active.fetch_add(1, Ordering::SeqCst) + 1;
+                        after_peak.fetch_max(cur, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(35)).await;
+                        after_active.fetch_sub(1, Ordering::SeqCst);
+                        return MockResponse::ok(b"after-ok");
+                    }
+                    MockResponse::status("404 Not Found", b"")
+                }
+            }
+        })
+        .await;
+
+        let fx = DownloadFixture::new("elastic-skips-no-recovery");
+        for idx in 1..=4 {
+            fx.write(format!("skip_{idx}.bin"), b"already-complete");
+        }
+
+        // s0 and s1 (8 MiB, cost 2 each) fill all 4 permits and both hit 429 -> ceiling 4 -> 2 -> 1.
+        // Once they succeed (clean_successes = 2), skip_1..skip_4 (16 MiB) run as local skips.
+        // Finally after_1 and after_2 (24 MiB, base cost 2) run: they overlap only if skips wrongly
+        // recovered ceiling to 2, and stay sequential (peak == 1) when ceiling stays 1.
+        let mut items = vec![
+            DownloadItem {
+                url: server.url("/s0.bin"),
+                file_path: "s0.bin".to_string(),
+                expected_md5: Some(md5_hex(b"s0-ok")),
+                expected_size: Some(SMALL_FILE_MAX_BYTES),
+            },
+            DownloadItem {
+                url: server.url("/s1.bin"),
+                file_path: "s1.bin".to_string(),
+                expected_md5: Some(md5_hex(b"s1-ok")),
+                expected_size: Some(SMALL_FILE_MAX_BYTES),
+            },
+        ];
+        for idx in 1..=4 {
+            items.push(DownloadItem {
+                url: server.url(&format!("/skip_{idx}.bin")),
+                file_path: format!("skip_{idx}.bin"),
+                expected_md5: Some(md5_hex(b"already-complete")),
+                expected_size: Some(2 * SMALL_FILE_MAX_BYTES + idx as u64),
+            });
+        }
+        for idx in 1..=2 {
+            items.push(DownloadItem {
+                url: server.url(&format!("/after_{idx}.bin")),
+                file_path: format!("after_{idx}.bin"),
+                expected_md5: Some(md5_hex(b"after-ok")),
+                expected_size: Some(3 * SMALL_FILE_MAX_BYTES + idx as u64),
+            });
+        }
+
+        let summary = run_batch_in_dir(
+            &fx.client,
+            fx.path(),
+            items,
+            8,
+            &fast_retry_policy(3),
+            &fx.signal,
+        )
+        .await
+        .expect("batch should complete");
+
+        let _ = server.stop().await;
+        assert_eq!(summary.ok, 4);
+        assert_eq!(summary.skipped, 4);
+        assert!(summary.failed.is_empty());
+        assert_eq!(
+            after_peak.load(Ordering::SeqCst),
+            1,
+            "local skips must not recover effective_ceiling from 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_elastic_batch_summary_failed_preserves_original_metadata_order() {
+        let server = ConcurrentMockServer::from_routes(vec![
+            (
+                "/z_large_fail.bin",
+                vec![MockResponse::status("404 Not Found", b"")],
+            ),
+            ("/m_medium_ok.bin", vec![MockResponse::ok(b"medium-ok")]),
+            (
+                "/a_small_fail.bin",
+                vec![MockResponse::status("404 Not Found", b"")],
+            ),
+            ("/b_small_ok.bin", vec![MockResponse::ok(b"small-ok")]),
+            (
+                "/u_unknown_fail.bin",
+                vec![MockResponse::status("404 Not Found", b"")],
+            ),
+        ])
+        .await;
+
+        let fx = DownloadFixture::new("elastic-failed-order");
+        let items = vec![
+            DownloadItem {
+                url: server.url("/z_large_fail.bin"),
+                file_path: "z_large_fail.bin".to_string(),
+                expected_md5: None,
+                expected_size: Some(20 * 1024 * 1024),
+            },
+            DownloadItem {
+                url: server.url("/m_medium_ok.bin"),
+                file_path: "m_medium_ok.bin".to_string(),
+                expected_md5: Some(md5_hex(b"medium-ok")),
+                expected_size: Some(2 * 1024 * 1024),
+            },
+            DownloadItem {
+                url: server.url("/a_small_fail.bin"),
+                file_path: "a_small_fail.bin".to_string(),
+                expected_md5: None,
+                expected_size: Some(64),
+            },
+            DownloadItem {
+                url: server.url("/b_small_ok.bin"),
+                file_path: "b_small_ok.bin".to_string(),
+                expected_md5: Some(md5_hex(b"small-ok")),
+                expected_size: Some(128),
+            },
+            DownloadItem {
+                url: server.url("/u_unknown_fail.bin"),
+                file_path: "u_unknown_fail.bin".to_string(),
+                expected_md5: None,
+                expected_size: None,
+            },
+        ];
+
+        let summary = run_batch_in_dir(
+            &fx.client,
+            fx.path(),
+            items,
+            5,
+            &fast_retry_policy(0),
+            &fx.signal,
+        )
+        .await
+        .expect("batch should complete and report failures");
+
+        assert_eq!(server.stop().await.len(), 5);
+        assert_eq!(summary.ok, 2);
+        assert_eq!(summary.skipped, 0);
+        assert!(!summary.interrupted);
+        let failed_paths: Vec<&str> = summary
+            .failed
+            .iter()
+            .map(|failed| failed.file_path.as_str())
+            .collect();
+        assert_eq!(
+            failed_paths,
+            vec!["z_large_fail.bin", "a_small_fail.bin", "u_unknown_fail.bin"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_elastic_concurrent_shutdown_signal_cancels_cleanly_without_dispatching_remaining()
+    {
+        let first_chunk = b"partial-concurrent-bytes";
+        let second_chunk = b"-never-finished";
+        let total_len = first_chunk.len() + second_chunk.len();
+
+        let fx = DownloadFixture::new("elastic-concurrent-ctrl-c");
+        let part_paths: Vec<PathBuf> = (0..4)
+            .map(|idx| fx.part_path(&format!("file_{idx}.bin")))
+            .collect();
+        let all_parts = Arc::new(part_paths.clone());
+        let signal_for_trigger = fx.signal.clone();
+
+        // Wait until all 4 concurrent transfers have written their partial chunks, then trigger Ctrl+C.
+        let trigger_task = tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            while tokio::time::Instant::now() < deadline {
+                if all_parts.iter().all(|path| {
+                    fs::metadata(path)
+                        .map(|m| m.len() >= first_chunk.len() as u64)
+                        .unwrap_or(false)
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            signal_for_trigger.trigger();
+        });
+
+        let server = ConcurrentMockServer::start({
+            let root = fx.path().to_path_buf();
+            let signal = fx.signal.clone();
+            move |req| {
+                let root = root.clone();
+                let signal = signal.clone();
+                async move {
+                    let path = req
+                        .request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .trim_start_matches('/')
+                        .to_string();
+                    MockResponse::MidStreamInterrupt {
+                        status_line: "200 OK",
+                        headers: vec![("Content-Length".to_string(), total_len.to_string())],
+                        first_chunk: first_chunk.to_vec(),
+                        second_chunk: Some(second_chunk.to_vec()),
+                        watch_path: root.join(format!("{path}.part")),
+                        expected_part_len: u64::MAX, // Wait until external trigger_task fires shutdown
+                        signal,
+                    }
+                }
+            }
+        })
+        .await;
+
+        let items: Vec<DownloadItem> = (0..6)
+            .map(|idx| DownloadItem {
+                url: server.url(&format!("/file_{idx}.bin")),
+                file_path: format!("file_{idx}.bin"),
+                expected_md5: None,
+                expected_size: Some(total_len as u64 + idx as u64),
+            })
+            .collect();
+
+        let started = Instant::now();
+        let summary = run_batch_in_dir(
+            &fx.client,
+            fx.path(),
+            items,
+            6,
+            &fast_retry_policy(0),
+            &fx.signal,
+        )
+        .await
+        .expect("interrupted concurrent batch should return summary");
+        let elapsed = started.elapsed();
+
+        trigger_task.await.unwrap();
+        let requests = server.stop().await;
+
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "concurrent shutdown should finish promptly, took {elapsed:?}"
+        );
+        assert_eq!(
+            requests.len(),
+            4,
+            "remaining 2 queued files must not be dispatched after shutdown"
+        );
+        assert!(summary.interrupted);
+        assert_eq!(summary.ok, 0);
+        assert!(summary.failed.is_empty());
+        assert!(!fx.signal.has_active_multi_progress());
+
+        for (idx, part_path) in part_paths.iter().enumerate() {
+            assert!(!fx.join(format!("file_{idx}.bin")).exists());
+            assert_eq!(fs::read(part_path).unwrap(), first_chunk);
+        }
+        for idx in 4..6 {
+            assert!(!fx.join(format!("file_{idx}.bin")).exists());
+            assert!(!fx.part_path(&format!("file_{idx}.bin")).exists());
+        }
     }
 }

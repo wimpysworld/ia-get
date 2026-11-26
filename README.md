@@ -33,10 +33,11 @@ bin install github.com/wimpysworld/ia-get
 # Features
 
 - Downloads full items from `/details/<identifier>` URLs or single files from `/download/<identifier>/<path>` URLs, and keeps the original directory structure.
+- Parallelises downloads automatically with zero options, from 4 small files down to 1 large file at a time. Reactive HTTP `429` and `503` backpressure complies with Internet Archive's wishes and [automated access guidelines](https://archive.org/developers/bots.html).
 - Filters downloads, `--list` output, and `--check` runs with repeatable `-f`/`--filter <GLOB>` patterns, including `!` exclusions.
 - Stages downloads in `.part` files, resumes partial transfers with HTTP range validation, verifies MD5 hashes, and renames finished files atomically.
 - Verifies existing local directories in read-only `--check` mode without downloading or modifying files.
-- Retries transient errors with exponential backoff and `Retry-After` handling, and caps bandwidth with `--limit-rate`.
+- Retries transient errors with exponential backoff and `Retry-After` handling, and caps total aggregate bandwidth across active transfers with `--limit-rate`.
 - Saves files into a chosen directory with `-o`/`--output-dir` and checks free disk space on the destination volume before transfers start.
 - Keeps writes inside the destination directory, refuses symlinks and non-regular files, sanitises unsafe Windows filenames, and rejects path collisions before downloading.
 - Supports scoped browser cookies (`-b`/`--cookies`) across redirects and honours standard proxy environment variables automatically.
@@ -57,7 +58,7 @@ ia-get --check -o ./downloads https://archive.org/details/<identifier>
 Read the full guides on the wiki:
 
 - [Usage](https://github.com/wimpysworld/ia-get/wiki/Usage) for all options, glob filtering, bandwidth limits, and verbose logging.
-- [Authentication and Networking](https://github.com/wimpysworld/ia-get/wiki/Authentication-and-Networking) for cookies, redirect handling, proxies, and retries.
+- [Authentication and Networking](https://github.com/wimpysworld/ia-get/wiki/Authentication-and-Networking) for cookies, redirect handling, proxies, retries, and polite parallel downloads.
 - [Reliability and Safety](https://github.com/wimpysworld/ia-get/wiki/Reliability-and-Safety) for `.part` resume staging, disk-space checks, filename sanitisation, and collision validation.
 
 # Demo 🧑‍💻
@@ -76,6 +77,7 @@ So I co-authored `ia-get` to automate the download process.
 
 You can use `ia-get` to download files from archive.org, including all the metadata and the `.torrent` file, if there is one.
 You can then start seeding the torrent using a pristine copy of the archive, and a complete file set.
+For multi-terabyte archives of multi-gigabyte files, use the item's `.torrent` file (BitTorrent with webseeds) instead of overloading archive.org HTTP datanodes.
 
 # A.I. Driven Development 🤖
 

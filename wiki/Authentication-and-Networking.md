@@ -1,6 +1,6 @@
 # Authentication and Networking
 
-This guide covers session cookies, redirect handling, proxy environment variables, and retry behaviour in `ia-get`.
+This guide covers session cookies, redirect handling, proxy environment variables, retries, and polite parallel downloads in `ia-get`.
 
 ## Cookies
 
@@ -56,3 +56,37 @@ For both metadata fetches and file downloads, `ia-get` retries transient transpo
 - When a response includes an RFC 9110 `Retry-After` header (delta-seconds or HTTP-date), `ia-get` honours that delay up to a 60-second cap.
 - Other `4xx` responses fail immediately without retrying.
 - Pressing Ctrl+C interrupts retry waits promptly.
+
+## Parallel downloads
+
+`ia-get` parallelises downloads automatically with no `--jobs` or `-j` flag to configure.
+It uses a 4-permit funnel with weighted first-in, first-out (FIFO) scheduling based on each file's expected size.
+
+| Expected file size | Permits per file | Maximum concurrent downloads |
+| --- | --- | --- |
+| Under 8 MiB | 1 | 4 |
+| 8 MiB to under 64 MiB | 2 | 2 |
+| 64 MiB and larger, or unknown | 4 | 1 (sequential) |
+
+### Queue order and FIFO drain
+
+Before transfers start, `ia-get` sorts the download queue in ascending order of expected file size and places entries with unknown sizes at the tail.
+Small files such as metadata, thumbnails, page scans, and MP3s finish quickly and do not wait behind large transfers.
+Because scheduling is FIFO, active small and medium transfers drain and release their permits before a large file starts.
+A file of 64 MiB or more requires all 4 permits.
+
+Queue sorting applies only to download order.
+`--list`, `--check`, and end-of-run failure summaries preserve the original XML metadata order from archive.org.
+
+### Host backpressure and global rate limiting
+
+When archive.org returns HTTP `429 Too Many Requests` or `503 Service Unavailable`, `ia-get` honours any `Retry-After` header up to the 60-second cap.
+During cooldown, `ia-get` pauses new dispatches across the batch and steps the active permit ceiling down (`4 -> 2 -> 1`).
+The ceiling steps back up gradually only after 4 clean network completions without `429` or `503` responses.
+
+When you pass `--limit-rate`, `ia-get` caps total aggregate bandwidth across all active transfers rather than per file.
+
+### Internet Archive automated access guidelines
+
+The 4-permit ceiling, sequential transfer of large files, and automatic `429` and `503` backoff comply with Internet Archive's wishes and [automated access guidelines](https://archive.org/developers/bots.html).
+For multi-terabyte archives of multi-gigabyte files, use the item's `.torrent` file (BitTorrent with webseeds) instead of overloading archive.org HTTP datanodes.

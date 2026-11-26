@@ -1,9 +1,13 @@
 #![allow(dead_code)]
 
+use std::collections::{HashMap, VecDeque};
 use std::fs;
+use std::future::Future;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
 
@@ -396,6 +400,133 @@ impl Drop for MockServer {
     }
 }
 
+pub type ConcurrentHandler = Arc<
+    dyn Fn(CapturedRequest) -> Pin<Box<dyn Future<Output = MockResponse> + Send>> + Send + Sync,
+>;
+
+/// Mock HTTP server that handles each accepted connection concurrently in its own Tokio task
+/// while recording all requests and peak simultaneous in-flight request count.
+pub struct ConcurrentMockServer {
+    addr: SocketAddr,
+    requests: Arc<AsyncMutex<Vec<CapturedRequest>>>,
+    max_concurrent: Arc<AtomicUsize>,
+    accept_handle: Option<tokio::task::JoinHandle<()>>,
+    connection_handles: Arc<AsyncMutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl ConcurrentMockServer {
+    pub async fn start<F, Fut>(handler: F) -> Self
+    where
+        F: Fn(CapturedRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = MockResponse> + Send + 'static,
+    {
+        let handler: ConcurrentHandler = Arc::new(move |req| Box::pin(handler(req)));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind concurrent mock server");
+        let addr = listener.local_addr().expect("concurrent server local_addr");
+        let requests = Arc::new(AsyncMutex::new(Vec::new()));
+        let requests_clone = Arc::clone(&requests);
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+        let max_clone = Arc::clone(&max_concurrent);
+        let connection_handles = Arc::new(AsyncMutex::new(Vec::new()));
+        let handles_clone = Arc::clone(&connection_handles);
+
+        let accept_handle = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let handler = Arc::clone(&handler);
+                let requests = Arc::clone(&requests_clone);
+                let active = Arc::clone(&active);
+                let max_concurrent = Arc::clone(&max_clone);
+                let conn_handle = tokio::spawn(async move {
+                    let _ = socket.set_nodelay(true);
+                    let Some(req) = read_http_request(&mut socket).await else {
+                        return;
+                    };
+                    let is_head = req.request_line.starts_with("HEAD ");
+                    requests.lock().await.push(req.clone());
+
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_concurrent.fetch_max(current, Ordering::SeqCst);
+
+                    let response = handler(req).await;
+                    write_mock_response(&mut socket, response, is_head).await;
+
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
+                handles_clone.lock().await.push(conn_handle);
+            }
+        });
+
+        Self {
+            addr,
+            requests,
+            max_concurrent,
+            accept_handle: Some(accept_handle),
+            connection_handles,
+        }
+    }
+
+    /// Starts a concurrent mock server serving queued responses keyed by request path.
+    pub async fn from_routes(routes: Vec<(&str, Vec<MockResponse>)>) -> Self {
+        let mut map: HashMap<String, VecDeque<MockResponse>> = HashMap::new();
+        for (path, responses) in routes {
+            map.insert(path.to_string(), VecDeque::from(responses));
+        }
+        let table = Arc::new(StdMutex::new(map));
+        Self::start(move |req| {
+            let table = Arc::clone(&table);
+            async move {
+                let path = req
+                    .request_line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("/")
+                    .to_string();
+                let mut guard = table.lock().unwrap();
+                guard
+                    .get_mut(&path)
+                    .and_then(VecDeque::pop_front)
+                    .unwrap_or_else(|| MockResponse::status("404 Not Found", b"route not found"))
+            }
+        })
+        .await
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("http://127.0.0.1:{}{}", self.addr.port(), path)
+    }
+
+    pub fn parsed_url(&self, path: &str) -> Url {
+        Url::parse(&self.url(path)).expect("valid concurrent mock URL")
+    }
+
+    pub fn max_concurrent(&self) -> usize {
+        self.max_concurrent.load(Ordering::SeqCst)
+    }
+
+    pub async fn stop(mut self) -> Vec<CapturedRequest> {
+        if let Some(handle) = self.accept_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+        let handles: Vec<_> = self.connection_handles.lock().await.drain(..).collect();
+        for handle in handles {
+            let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        }
+        self.requests.lock().await.clone()
+    }
+}
+
+impl Drop for ConcurrentMockServer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.accept_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 async fn read_http_request(socket: &mut TcpStream) -> Option<CapturedRequest> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -479,7 +610,7 @@ async fn write_mock_response(socket: &mut TcpStream, response: MockResponse, is_
             let _ = socket.flush().await;
 
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            while tokio::time::Instant::now() < deadline {
+            while tokio::time::Instant::now() < deadline && signal.is_running() {
                 if fs::metadata(&watch_path)
                     .map(|m| m.len() >= expected_part_len)
                     .unwrap_or(false)

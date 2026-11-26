@@ -3,7 +3,7 @@
 use std::collections::hash_map::RandomState;
 use std::future::Future;
 use std::hash::BuildHasher;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -54,6 +54,18 @@ pub struct RetryEvent<'a> {
 pub struct ShutdownSignal {
     running: Arc<AtomicBool>,
     notify: Arc<Notify>,
+    active_multi_progress: Arc<AtomicUsize>,
+}
+
+/// RAII guard suppressing raw Ctrl+C stdout writes while a `MultiProgress` display is active.
+pub(super) struct ActiveMultiProgressGuard {
+    active_multi_progress: Arc<AtomicUsize>,
+}
+
+impl Drop for ActiveMultiProgressGuard {
+    fn drop(&mut self) {
+        self.active_multi_progress.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl ShutdownSignal {
@@ -62,6 +74,7 @@ impl ShutdownSignal {
         Self {
             running: Arc::new(AtomicBool::new(true)),
             notify: Arc::new(Notify::new()),
+            active_multi_progress: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -76,9 +89,34 @@ impl ShutdownSignal {
         self.notify.notify_waiters();
     }
 
+    /// Marks shutdown as triggered, wakes waiters, and returns `true` on the first trigger.
+    fn trigger_once(&self) -> bool {
+        let was_running = self.running.swap(false, Ordering::SeqCst);
+        self.notify.notify_waiters();
+        was_running
+    }
+
     /// Returns the underlying atomic flag indicating whether work should continue.
     pub fn running_flag(&self) -> &Arc<AtomicBool> {
         &self.running
+    }
+
+    /// Sleeps for `duration`, returning an interrupted error immediately if shutdown triggers.
+    pub async fn sleep_or_shutdown(&self, duration: Duration) -> Result<()> {
+        sleep_interruptible(duration, self).await
+    }
+
+    /// Marks a `MultiProgress` renderer as active so Ctrl+C teardown avoids raw `println!` mid-bar.
+    pub(super) fn enter_multi_progress(&self) -> ActiveMultiProgressGuard {
+        self.active_multi_progress.fetch_add(1, Ordering::SeqCst);
+        ActiveMultiProgressGuard {
+            active_multi_progress: Arc::clone(&self.active_multi_progress),
+        }
+    }
+
+    /// Returns `true` while at least one `MultiProgress` display is actively rendering.
+    pub(super) fn has_active_multi_progress(&self) -> bool {
+        self.active_multi_progress.load(Ordering::SeqCst) > 0
     }
 }
 
@@ -98,11 +136,14 @@ pub fn install_signal_handler() -> ShutdownSignal {
             let handler_signal = signal.clone();
 
             match ctrlc::set_handler(move || {
-                handler_signal.trigger();
-                println!(
-                    "\n{} Received Ctrl+C, finishing current operation...",
-                    "✘".red().bold()
-                );
+                let has_active_multi = handler_signal.has_active_multi_progress();
+                let first_trigger = handler_signal.trigger_once();
+                if first_trigger && !has_active_multi {
+                    println!(
+                        "\n{} Received Ctrl+C, finishing current operation...",
+                        "✘".red().bold()
+                    );
+                }
             }) {
                 Ok(()) | Err(ctrlc::Error::MultipleHandlers) => {}
                 Err(err) => {
@@ -158,6 +199,11 @@ pub fn is_retryable_status(status: StatusCode) -> bool {
     status == StatusCode::REQUEST_TIMEOUT
         || status == StatusCode::TOO_MANY_REQUESTS
         || status.is_server_error()
+}
+
+/// Returns whether an HTTP status code signals host throttling or overload (`429` or `503`).
+pub(crate) fn is_throttle_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::SERVICE_UNAVAILABLE
 }
 
 /// Returns whether a `reqwest` error represents a transient failure worth retrying.

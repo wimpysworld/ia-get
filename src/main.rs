@@ -449,15 +449,11 @@ where
     print_sanitization_warnings(&plan.sanitized);
 
     let total_files = plan.items.len();
-    let download_data = plan
-        .items
-        .into_iter()
-        .map(|item| (item.url, item.file_path, item.expected_md5));
 
     downloader::download_files_in_dir_with_logger(
         client,
         output_dir,
-        download_data,
+        plan.items,
         total_files,
         cookie_source,
         options,
@@ -554,7 +550,7 @@ fn build_http_client(proxy_config: &downloader::ProxyConfig) -> Result<Client> {
         .user_agent(USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(CONNECTION_TIMEOUT_SECS))
         .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .pool_max_idle_per_host(1)
+        .pool_max_idle_per_host(downloader::MAX_CONCURRENT_PERMITS)
         .tcp_keepalive(std::time::Duration::from_secs(60))
         .build()?;
     Ok(client)
@@ -725,7 +721,7 @@ mod tests {
     use super::*;
     use crate::test_support::{
         build_xml_metadata, fast_retry_policy, md5_hex, snapshot_dir, xml_file, CapturedLogs,
-        MockResponse, MockServer, TempTestDir,
+        ConcurrentMockServer, MockResponse, MockServer, TempTestDir,
     };
 
     fn test_client() -> Client {
@@ -1814,11 +1810,19 @@ mod tests {
             ("meta/item.torrent", b"torrent-excluded"),
         ]);
 
-        let server = MockServer::start(vec![
-            MockResponse::ok(b""),
-            MockResponse::ok(xml_body.as_bytes()),
-            MockResponse::ok(cbz_one),
-            MockResponse::ok(cbz_two),
+        let server = ConcurrentMockServer::from_routes(vec![
+            (
+                "/download/item/item_files.xml",
+                vec![MockResponse::ok(b""), MockResponse::ok(xml_body.as_bytes())],
+            ),
+            (
+                "/download/item/comics/issue01.cbz",
+                vec![MockResponse::ok(cbz_one)],
+            ),
+            (
+                "/download/item/comics/sub/issue02.cbz",
+                vec![MockResponse::ok(cbz_two)],
+            ),
         ])
         .await;
 
@@ -1843,7 +1847,17 @@ mod tests {
         let logger = VerboseLogger::disabled();
         let options = fast_options(1, None);
 
-        let (all_files, base_url) = fetch_test_xml(&server, &client, 1, &signal).await;
+        let (all_files, base_url) = fetch_xml_metadata_from_url_with_logger(
+            server.parsed_url("/download/item/item_files.xml"),
+            &client,
+            &spinner,
+            None,
+            &fast_retry_policy(1),
+            &signal,
+            &logger,
+        )
+        .await
+        .unwrap();
         let filtered = select_and_filter_files(all_files, &target, &file_filter).unwrap();
         assert_eq!(filtered.files.len(), 2);
 
@@ -1868,14 +1882,20 @@ mod tests {
         assert!(summary.failed.is_empty());
         assert!(batch_exit_result(&summary, 2).is_ok());
 
-        let requests = server.finish().await;
+        let requests = server.stop().await;
         assert_eq!(requests.len(), 4);
-        assert!(requests[2]
-            .request_line
-            .starts_with("GET /download/item/comics/issue01.cbz "));
-        assert!(requests[3]
-            .request_line
-            .starts_with("GET /download/item/comics/sub/issue02.cbz "));
+        let mut download_lines: Vec<&str> = requests[2..]
+            .iter()
+            .map(|r| r.request_line.as_str())
+            .collect();
+        download_lines.sort();
+        assert_eq!(
+            download_lines,
+            vec![
+                "GET /download/item/comics/issue01.cbz HTTP/1.1",
+                "GET /download/item/comics/sub/issue02.cbz HTTP/1.1",
+            ]
+        );
 
         assert_eq!(
             std::fs::read(output_dir.join("comics/issue01.cbz")).unwrap(),
@@ -2121,14 +2141,30 @@ mod tests {
 
         // Sufficient space proceeds to download and verify all planned files
         let pass_dir = TempTestDir::new("space-gate-pass");
-        let pass_server = MockServer::start(vec![
-            MockResponse::ok(b""),
-            MockResponse::ok(xml_body.as_bytes()),
-            MockResponse::ok(&alpha),
-            MockResponse::ok(&beta),
+        let pass_server = ConcurrentMockServer::from_routes(vec![
+            (
+                "/download/item/item_files.xml",
+                vec![MockResponse::ok(b""), MockResponse::ok(xml_body.as_bytes())],
+            ),
+            ("/download/item/alpha.bin", vec![MockResponse::ok(&alpha)]),
+            (
+                "/download/item/nested/beta%3F.bin",
+                vec![MockResponse::ok(&beta)],
+            ),
         ])
         .await;
-        let (all_files, base_url) = fetch_test_xml(&pass_server, &client, 0, &signal).await;
+        let spinner = indicatif::ProgressBar::hidden();
+        let (all_files, base_url) = fetch_xml_metadata_from_url_with_logger(
+            pass_server.parsed_url("/download/item/item_files.xml"),
+            &client,
+            &spinner,
+            None,
+            &fast_retry_policy(0),
+            &signal,
+            &logger,
+        )
+        .await
+        .unwrap();
         let filtered = select_and_filter_files(all_files, &target, &filter).unwrap();
         let plan = plan_downloads_for_dir(filtered, &base_url, pass_dir.path()).unwrap();
         let summary = run_planned_downloads_with_logger(
@@ -2158,7 +2194,7 @@ mod tests {
             std::fs::read(pass_dir.join("nested/beta_.bin")).unwrap(),
             beta
         );
-        assert_eq!(pass_server.finish().await.len(), 4);
+        assert_eq!(pass_server.stop().await.len(), 4);
     }
 
     #[tokio::test]
