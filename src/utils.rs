@@ -11,7 +11,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use url::Url;
 
 /// Spinner tick interval in milliseconds
-pub const SPINNER_TICK_INTERVAL: u64 = 100;
+const SPINNER_TICK_INTERVAL: u64 = 100;
 
 /// Size constants for formatting
 const KB: u64 = 1024;
@@ -44,14 +44,6 @@ impl ArchiveUrl {
     pub fn identifier(&self) -> &str {
         match self {
             Self::Details { identifier } | Self::Download { identifier, .. } => identifier,
-        }
-    }
-
-    /// Returns the decoded relative file path for download URLs, or `None` for details URLs.
-    pub fn file_path(&self) -> Option<&str> {
-        match self {
-            Self::Details { .. } => None,
-            Self::Download { file_path, .. } => Some(file_path),
         }
     }
 
@@ -207,28 +199,6 @@ pub fn parse_archive_url(url: &str) -> Result<ArchiveUrl> {
     }
 
     Err(invalid())
-}
-
-/// Validates an archive.org details or direct download URL format
-///
-/// # Arguments
-/// * `url` - The URL to validate
-///
-/// # Returns
-/// * `Ok(())` if the URL is valid
-/// * `Err(IaGetError::UrlFormat)` if the URL format is invalid
-///
-/// # Examples
-/// ```
-/// use ia_get::utils::validate_archive_url;
-///
-/// assert!(validate_archive_url("https://archive.org/details/valid-item").is_ok());
-/// assert!(validate_archive_url("https://archive.org/details/valid-item/").is_ok());
-/// assert!(validate_archive_url("https://archive.org/download/valid-item/dir/file.pdf").is_ok());
-/// assert!(validate_archive_url("https://example.com/invalid").is_err());
-/// ```
-pub fn validate_archive_url(url: &str) -> Result<()> {
-    parse_archive_url(url).map(|_| ())
 }
 
 /// Returns the shared draw target used by all `indicatif` progress indicators.
@@ -391,17 +361,10 @@ pub fn create_progress_bar(
         action.to_string()
     };
 
-    let template = if with_eta {
-        format!(
-            "{}{{elapsed_precise}} {{bar:40.{}}} {{bytes}}/{{total_bytes}} (ETA: {{eta}})",
-            styled_action, color_str
-        )
-    } else {
-        format!(
-            "{}{{elapsed_precise}} {{bar:40.{}}} {{bytes}}/{{total_bytes}}",
-            styled_action, color_str
-        )
-    };
+    let eta_suffix = if with_eta { " (ETA: {eta})" } else { "" };
+    let template = format!(
+        "{styled_action}{{elapsed_precise}} {{bar:40.{color_str}}} {{bytes}}/{{total_bytes}}{eta_suffix}"
+    );
 
     pb.set_style(
         ProgressStyle::default_bar()
@@ -453,13 +416,10 @@ pub fn format_duration(duration: std::time::Duration) -> String {
 /// Format a size in bytes to a human-readable string
 pub fn format_size(size: u64) -> String {
     if size < KB {
-        format!("{}B", size)
-    } else if size < MB {
-        format!("{:.2}KB", size as f64 / KB as f64)
-    } else if size < GB {
-        format!("{:.2}MB", size as f64 / MB as f64)
+        format!("{size}B")
     } else {
-        format!("{:.2}GB", size as f64 / GB as f64)
+        let (value, unit) = format_transfer_rate(size as f64);
+        format!("{value:.2}{unit}")
     }
 }
 
@@ -480,8 +440,93 @@ pub fn format_transfer_rate(bytes_per_sec: f64) -> (f64, &'static str) {
     }
 }
 
+/// Formats a plain-text end-of-run summary, including any failed files.
+pub(crate) fn format_run_summary<'a, D>(
+    heading: &str,
+    ok: usize,
+    skipped: Option<usize>,
+    failed: impl IntoIterator<Item = (&'a str, D)>,
+    interrupted: bool,
+) -> String
+where
+    D: fmt::Display,
+{
+    let failed: Vec<(&str, D)> = failed.into_iter().collect();
+    let mut text = match skipped {
+        Some(skipped) => format!(
+            "{heading} {ok} ok, {skipped} skipped, {} failed",
+            failed.len()
+        ),
+        None => format!("{heading} {ok} ok, {} failed", failed.len()),
+    };
+    if interrupted {
+        text.push_str(", interrupted");
+    }
+
+    if !failed.is_empty() {
+        text.push_str("\nFailed files:");
+        for (file_path, detail) in failed {
+            text.push_str(&format!("\n  - {file_path}: {detail}"));
+        }
+    }
+
+    text
+}
+
+/// Prints a coloured end-of-run summary to stdout.
+pub(crate) fn print_run_summary<'a, D>(
+    heading: &str,
+    ok: usize,
+    skipped: Option<usize>,
+    failed: impl IntoIterator<Item = (&'a str, D)>,
+    interrupted: bool,
+) where
+    D: fmt::Display,
+{
+    let failed: Vec<(&str, D)> = failed.into_iter().collect();
+    let status_icon = if interrupted || !failed.is_empty() {
+        "✘".red().bold()
+    } else {
+        "✔".green().bold()
+    };
+
+    let failed_count = if failed.is_empty() {
+        failed.len().to_string().bold()
+    } else {
+        failed.len().to_string().red().bold()
+    };
+
+    let interrupted_suffix = if interrupted {
+        format!(", {}", "interrupted".yellow().bold())
+    } else {
+        String::new()
+    };
+
+    let skipped_segment = match skipped {
+        Some(skipped) => format!(" {} skipped,", skipped.to_string().cyan().bold()),
+        None => String::new(),
+    };
+
+    println!(
+        "\n{} {} {} ok,{} {} failed{}",
+        status_icon,
+        heading.bold(),
+        ok.to_string().green().bold(),
+        skipped_segment,
+        failed_count,
+        interrupted_suffix
+    );
+
+    if !failed.is_empty() {
+        println!("{}", "Failed files:".red().bold());
+        for (file_path, detail) in failed {
+            println!("  {} {}: {}", "✘".red().bold(), file_path.bold(), detail);
+        }
+    }
+}
+
 /// Checks whether a filename stem matches a Windows reserved device name.
-fn is_windows_reserved_name(name: &str) -> bool {
+pub(crate) fn is_windows_reserved_name(name: &str) -> bool {
     const RESERVED_NAMES: &[&str] = &[
         "CON",
         "PRN",
@@ -587,25 +632,13 @@ pub fn sanitize_filename(filename: &str) -> (String, bool) {
 
         let mut sanitized_component = String::with_capacity(component.len());
 
-        // Replace invalid characters
+        // Replace invalid characters: Windows invalid chars, backslash, control chars (0-31), and DEL (127)
         for ch in component.chars() {
             match ch {
-                // Windows invalid characters
-                '<' | '>' | ':' | '"' | '|' | '?' | '*' => {
+                '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\' | '\x00'..='\x1F' | '\x7F' => {
                     sanitized_component.push('_');
                     was_modified = true;
                 }
-                // Backslash (path separator on Windows, invalid in filenames on Unix)
-                '\\' => {
-                    sanitized_component.push('_');
-                    was_modified = true;
-                }
-                // Control characters (0-31) and DEL (127)
-                '\x00'..='\x1F' | '\x7F' => {
-                    sanitized_component.push('_');
-                    was_modified = true;
-                }
-                // Valid character
                 _ => sanitized_component.push(ch),
             }
         }
@@ -660,177 +693,7 @@ pub fn sanitize_filename(filename: &str) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_sanitize_valid_filename() {
-        let (result, modified) = sanitize_filename("normal_file-name.txt");
-        assert_eq!(result, "normal_file-name.txt");
-        assert!(!modified);
-    }
-
-    #[test]
-    fn test_sanitize_valid_filename_with_path() {
-        let (result, modified) = sanitize_filename("folder/subfolder/file.txt");
-        assert_eq!(result, "folder/subfolder/file.txt");
-        assert!(!modified);
-    }
-
-    #[test]
-    fn test_sanitize_invalid_characters() {
-        let (result, modified) = sanitize_filename("file?name:test<>.txt");
-        assert_eq!(result, "file_name_test__.txt");
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_question_mark() {
-        let (result, modified) = sanitize_filename("Episode?.mp4");
-        assert_eq!(result, "Episode_.mp4");
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_with_path() {
-        let (result, modified) = sanitize_filename("Season 1/Episode?.mp4");
-        assert_eq!(result, "Season 1/Episode_.mp4");
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_multiple_invalid_in_path() {
-        let (result, modified) = sanitize_filename("Folder:Name/File*Name?.txt");
-        assert_eq!(result, "Folder_Name/File_Name_.txt");
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_windows_reserved_names() {
-        let (result, modified) = sanitize_filename("CON.txt");
-        assert_eq!(result, "CON_.txt");
-        assert!(modified);
-
-        let (result, modified) = sanitize_filename("con.txt");
-        assert_eq!(result, "con_.txt");
-        assert!(modified);
-
-        let (result, modified) = sanitize_filename("PRN");
-        assert_eq!(result, "PRN_");
-        assert!(modified);
-
-        let (result, modified) = sanitize_filename("aux.log");
-        assert_eq!(result, "aux_.log");
-        assert!(modified);
-
-        let (result, modified) = sanitize_filename("COM1.dat");
-        assert_eq!(result, "COM1_.dat");
-        assert!(modified);
-
-        let (result, modified) = sanitize_filename("LPT9.txt");
-        assert_eq!(result, "LPT9_.txt");
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_reserved_in_path() {
-        let (result, modified) = sanitize_filename("folder/CON.txt");
-        assert_eq!(result, "folder/CON_.txt");
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_control_characters() {
-        let (result, modified) = sanitize_filename("file\x00\x1fname.txt");
-        assert_eq!(result, "file__name.txt");
-        assert!(modified);
-
-        let (result, modified) = sanitize_filename("test\x7Ffile.txt");
-        assert_eq!(result, "test_file.txt");
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_backslash() {
-        let (result, modified) = sanitize_filename("folder\\file.txt");
-        assert_eq!(result, "folder_file.txt");
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_whitespace_edge_cases() {
-        let (result, modified) = sanitize_filename(" leading.txt ");
-        assert_eq!(result, "leading.txt");
-        assert!(modified);
-
-        let (result, modified) = sanitize_filename("folder/ spaces /file.txt");
-        assert_eq!(result, "folder/spaces/file.txt");
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_trailing_dots() {
-        let (result, modified) = sanitize_filename("file...");
-        assert_eq!(result, "file");
-        assert!(modified);
-
-        let (result, modified) = sanitize_filename("folder./file.txt");
-        assert_eq!(result, "folder/file.txt");
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_empty_components() {
-        let (result, modified) = sanitize_filename("folder//file.txt");
-        assert_eq!(result, "folder/file.txt");
-        assert!(modified);
-
-        let (result, modified) = sanitize_filename("/folder/file.txt");
-        assert_eq!(result, "folder/file.txt");
-        assert!(modified);
-
-        let (result, modified) = sanitize_filename("folder/file.txt/");
-        assert_eq!(result, "folder/file.txt");
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_all_invalid() {
-        let (result, modified) = sanitize_filename("???");
-        assert_eq!(result, "___");
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_unicode() {
-        let (result, modified) = sanitize_filename("файл.txt");
-        assert_eq!(result, "файл.txt");
-        assert!(!modified);
-
-        let (result, modified) = sanitize_filename("文件.txt");
-        assert_eq!(result, "文件.txt");
-        assert!(!modified);
-
-        let (result, modified) = sanitize_filename("emoji😀.txt");
-        assert_eq!(result, "emoji😀.txt");
-        assert!(!modified);
-    }
-
-    #[test]
-    fn test_sanitize_mixed_valid_invalid() {
-        let (result, modified) =
-            sanitize_filename("Red vs. Blue - Season 1/Episode 1: Why Are We Here?.mp4");
-        assert_eq!(
-            result,
-            "Red vs. Blue - Season 1/Episode 1_ Why Are We Here_.mp4"
-        );
-        assert!(modified);
-    }
-
-    #[test]
-    fn test_sanitize_preserves_extension() {
-        let (result, modified) = sanitize_filename("file:name.tar.gz");
-        assert_eq!(result, "file_name.tar.gz");
-        assert!(modified);
-    }
+    use crate::test_support::CapturedLogs;
 
     fn assert_only_normal_components(path: &str) {
         let components: Vec<_> = std::path::Path::new(path).components().collect();
@@ -850,8 +713,76 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_windows_reserved_names_extended() {
+    fn test_sanitize_filename_unmodified_inputs() {
         let cases = [
+            "normal_file-name.txt",
+            "folder/subfolder/file.txt",
+            "файл.txt",
+            "文件.txt",
+            "emoji😀.txt",
+            // Non-reserved names with spaces before '.' remain intact
+            "file .txt",
+            // Reserved-name lookalikes remain intact
+            "COM10.txt",
+            "LPT10.txt",
+            "CONSOLE.txt",
+            "CLOCK.txt",
+        ];
+
+        for input in cases {
+            let (result, modified) = sanitize_filename(input);
+            assert_eq!(result, input, "input: {input:?}");
+            assert!(!modified, "expected modified=false for {input:?}");
+            assert_only_normal_components(&result);
+        }
+    }
+
+    #[test]
+    fn test_sanitize_filename_modified_inputs() {
+        let cases = [
+            ("file?name:test<>.txt", "file_name_test__.txt"),
+            ("Season 1/Episode?.mp4", "Season 1/Episode_.mp4"),
+            ("Folder:Name/File*Name?.txt", "Folder_Name/File_Name_.txt"),
+            ("???", "___"),
+            ("file:name.tar.gz", "file_name.tar.gz"),
+            (
+                "Red vs. Blue - Season 1/Episode 1: Why Are We Here?.mp4",
+                "Red vs. Blue - Season 1/Episode 1_ Why Are We Here_.mp4",
+            ),
+            ("file\x00\x1fname.txt", "file__name.txt"),
+            ("test\x7Ffile.txt", "test_file.txt"),
+            ("folder\\file.txt", "folder_file.txt"),
+            (" leading.txt ", "leading.txt"),
+            ("folder/ spaces /file.txt", "folder/spaces/file.txt"),
+            ("file...", "file"),
+            ("folder./file.txt", "folder/file.txt"),
+            ("file . .", "file"),
+            ("folder . /file . .", "folder/file"),
+            ("folder//file.txt", "folder/file.txt"),
+            ("/folder/file.txt", "folder/file.txt"),
+            ("folder/file.txt/", "folder/file.txt"),
+        ];
+
+        for (input, expected) in cases {
+            let (result, modified) = sanitize_filename(input);
+            assert_eq!(result, expected, "input: {input:?}");
+            assert!(modified, "expected modified=true for {input:?}");
+            assert_only_normal_components(&result);
+        }
+    }
+
+    #[test]
+    fn test_sanitize_filename_windows_reserved_and_dot_segments() {
+        let cases = [
+            // Classic Windows device names
+            ("CON.txt", "CON_.txt"),
+            ("con.txt", "con_.txt"),
+            ("PRN", "PRN_"),
+            ("aux.log", "aux_.log"),
+            ("COM1.dat", "COM1_.dat"),
+            ("LPT9.txt", "LPT9_.txt"),
+            ("folder/CON.txt", "folder/CON_.txt"),
+            // Extended Windows device names, trailing spaces/dots, superscripts
             ("CON .txt", "CON_.txt"),
             ("con  .tar.gz", "con_.tar.gz"),
             ("CON. ", "CON_"),
@@ -870,41 +801,7 @@ mod tests {
             ("conout$ .txt", "conout$_.txt"),
             ("CLOCK$", "CLOCK$_"),
             ("clock$.sys", "clock$_.sys"),
-        ];
-
-        for (input, expected) in cases {
-            let (result, modified) = sanitize_filename(input);
-            assert_eq!(result, expected, "input: {:?}", input);
-            assert!(modified, "expected modified=true for {:?}", input);
-            assert_only_normal_components(&result);
-        }
-    }
-
-    #[test]
-    fn test_sanitize_trailing_spaces_and_dots() {
-        let cases = [
-            ("file . .", "file"),
-            ("CON. ", "CON_"),
-            ("folder . /file . .", "folder/file"),
-        ];
-
-        for (input, expected) in cases {
-            let (result, modified) = sanitize_filename(input);
-            assert_eq!(result, expected, "input: {:?}", input);
-            assert!(modified, "expected modified=true for {:?}", input);
-            assert_only_normal_components(&result);
-        }
-
-        // Non-reserved names with spaces before '.' remain intact
-        let (result, modified) = sanitize_filename("file .txt");
-        assert_eq!(result, "file .txt");
-        assert!(!modified);
-        assert_only_normal_components(&result);
-    }
-
-    #[test]
-    fn test_sanitize_dot_segments_and_empty_paths() {
-        let cases = [
+            // Dot segments and empty paths
             (".", "_"),
             ("..", "_"),
             ("../evil.txt", "_/evil.txt"),
@@ -919,20 +816,8 @@ mod tests {
 
         for (input, expected) in cases {
             let (result, modified) = sanitize_filename(input);
-            assert_eq!(result, expected, "input: {:?}", input);
-            assert!(modified, "expected modified=true for {:?}", input);
-            assert_only_normal_components(&result);
-        }
-    }
-
-    #[test]
-    fn test_sanitize_reserved_lookalikes_unmodified() {
-        let cases = ["COM10.txt", "LPT10.txt", "CONSOLE.txt", "CLOCK.txt"];
-
-        for input in cases {
-            let (result, modified) = sanitize_filename(input);
-            assert_eq!(result, input, "input: {:?}", input);
-            assert!(!modified, "expected modified=false for {:?}", input);
+            assert_eq!(result, expected, "input: {input:?}");
+            assert!(modified, "expected modified=true for {input:?}");
             assert_only_normal_components(&result);
         }
     }
@@ -1007,7 +892,6 @@ mod tests {
                 "url: {url:?}"
             );
             assert_eq!(parsed.identifier(), expected_id, "url: {url:?}");
-            assert_eq!(parsed.file_path(), None, "url: {url:?}");
             assert_eq!(
                 parsed.details_url(),
                 format!("https://archive.org/details/{expected_id}"),
@@ -1017,10 +901,6 @@ mod tests {
                 parsed.xml_url(),
                 format!("https://archive.org/download/{expected_id}/{expected_id}_files.xml"),
                 "url: {url:?}"
-            );
-            assert!(
-                validate_archive_url(url).is_ok(),
-                "validate_archive_url should accept {url:?}"
             );
         }
     }
@@ -1087,7 +967,6 @@ mod tests {
                 "url: {url:?}"
             );
             assert_eq!(parsed.identifier(), expected_id, "url: {url:?}");
-            assert_eq!(parsed.file_path(), Some(expected_path), "url: {url:?}");
             assert_eq!(
                 parsed.details_url(),
                 format!("https://archive.org/details/{expected_id}"),
@@ -1097,10 +976,6 @@ mod tests {
                 parsed.xml_url(),
                 format!("https://archive.org/download/{expected_id}/{expected_id}_files.xml"),
                 "url: {url:?}"
-            );
-            assert!(
-                validate_archive_url(url).is_ok(),
-                "validate_archive_url should accept {url:?}"
             );
         }
     }
@@ -1168,41 +1043,6 @@ mod tests {
                 matches!(parse_err, IaGetError::UrlFormat(_)),
                 "expected UrlFormat from parse_archive_url({url:?}), got {parse_err:?}"
             );
-            let validate_err = validate_archive_url(url).unwrap_err();
-            assert!(
-                matches!(validate_err, IaGetError::UrlFormat(_)),
-                "expected UrlFormat from validate_archive_url({url:?}), got {validate_err:?}"
-            );
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct CapturedLogs {
-        bytes: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl CapturedLogs {
-        fn new() -> Self {
-            Self::default()
-        }
-
-        fn as_bytes(&self) -> Vec<u8> {
-            self.bytes.lock().unwrap().clone()
-        }
-
-        fn as_string(&self) -> String {
-            String::from_utf8(self.as_bytes()).expect("verbose logs must be valid UTF-8")
-        }
-    }
-
-    impl Write for CapturedLogs {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.bytes.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
         }
     }
 
@@ -1268,47 +1108,45 @@ mod tests {
 
     #[test]
     fn test_sanitize_url_for_log_redacts_userinfo_and_preserves_plain_urls() {
-        let with_user_pass =
-            Url::parse("https://alice:s3cr3t@archive.org/download/item/file.bin?token=1#top")
-                .unwrap();
-        let sanitized_user_pass = sanitize_url_for_log(&with_user_pass);
-        assert_eq!(
-            sanitized_user_pass,
-            "https://<redacted>@archive.org/download/item/file.bin?token=1#top"
-        );
-        assert!(!sanitized_user_pass.contains("alice"));
-        assert!(!sanitized_user_pass.contains("s3cr3t"));
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "https://alice:s3cr3t@archive.org/download/item/file.bin?token=1#top",
+                "https://<redacted>@archive.org/download/item/file.bin?token=1#top",
+                &["alice", "s3cr3t"],
+            ),
+            (
+                "https://bob@archive.org/details/item",
+                "https://<redacted>@archive.org/details/item",
+                &["bob"],
+            ),
+            (
+                "http://:onlypass@127.0.0.1:8080/protected/file.bin?a=1&b=2",
+                "http://<redacted>@127.0.0.1:8080/protected/file.bin?a=1&b=2",
+                &["onlypass"],
+            ),
+            (
+                "https://archive.org/details/deftributetozzap64",
+                "https://archive.org/details/deftributetozzap64",
+                &[],
+            ),
+            (
+                "http://127.0.0.1:9000/download/item/my%20file.pdf?download=1&foo=bar#frag",
+                "http://127.0.0.1:9000/download/item/my%20file.pdf?download=1&foo=bar#frag",
+                &[],
+            ),
+        ];
 
-        let with_user_only = Url::parse("https://bob@archive.org/details/item").unwrap();
-        let sanitized_user_only = sanitize_url_for_log(&with_user_only);
-        assert_eq!(
-            sanitized_user_only,
-            "https://<redacted>@archive.org/details/item"
-        );
-        assert!(!sanitized_user_only.contains("bob"));
-
-        let with_pass_only =
-            Url::parse("http://:onlypass@127.0.0.1:8080/protected/file.bin?a=1&b=2").unwrap();
-        let sanitized_pass_only = sanitize_url_for_log(&with_pass_only);
-        assert_eq!(
-            sanitized_pass_only,
-            "http://<redacted>@127.0.0.1:8080/protected/file.bin?a=1&b=2"
-        );
-        assert!(!sanitized_pass_only.contains("onlypass"));
-
-        let plain_https = Url::parse("https://archive.org/details/deftributetozzap64").unwrap();
-        assert_eq!(
-            sanitize_url_for_log(&plain_https),
-            "https://archive.org/details/deftributetozzap64"
-        );
-
-        let plain_with_port_path_query =
-            Url::parse("http://127.0.0.1:9000/download/item/my%20file.pdf?download=1&foo=bar#frag")
-                .unwrap();
-        assert_eq!(
-            sanitize_url_for_log(&plain_with_port_path_query),
-            "http://127.0.0.1:9000/download/item/my%20file.pdf?download=1&foo=bar#frag"
-        );
+        for (raw, expected, forbidden) in cases {
+            let parsed = Url::parse(raw).unwrap();
+            let sanitized = sanitize_url_for_log(&parsed);
+            assert_eq!(sanitized, *expected, "raw: {raw}");
+            for token in *forbidden {
+                assert!(
+                    !sanitized.contains(token),
+                    "forbidden token leaked in sanitized URL"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1343,10 +1181,8 @@ mod tests {
             "verbose logger must not emit ANSI escape bytes: {raw_bytes:?}"
         );
 
-        let output = captured.as_string();
-        let lines: Vec<&str> = output.lines().collect();
         assert_eq!(
-            lines,
+            captured.lines(),
             vec![
                 "[verbose] http: -> GET https://archive.org/details/item (cookies=no)",
                 "[verbose] download: line1 line2  line3 line4",

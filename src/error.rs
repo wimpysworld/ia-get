@@ -153,9 +153,3 @@ impl From<url::ParseError> for IaGetError {
         IaGetError::UrlFormat(err.to_string())
     }
 }
-
-impl From<serde_xml_rs::Error> for IaGetError {
-    fn from(err: serde_xml_rs::Error) -> Self {
-        IaGetError::XmlParsing(err.to_string())
-    }
-}

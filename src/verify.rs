@@ -1,7 +1,6 @@
 //! Strictly read-only local file verification against archive.org `_files.xml` metadata.
 
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use colored::*;
@@ -89,48 +88,7 @@ pub struct VerificationSummary {
 /// Validates that `path` is an existing, accessible directory without creating or modifying it,
 /// returning its canonical path.
 pub fn validate_check_dir(path: &Path) -> Result<PathBuf> {
-    if path.as_os_str().is_empty() {
-        return Err(IaGetError::FileSystem(
-            "Check directory path must not be empty".to_string(),
-        ));
-    }
-
-    match fs::metadata(path) {
-        Ok(meta) if meta.is_dir() => {
-            let canonical = downloader::resolve_destination_root(path)?;
-            // Confirm search access into the directory itself without modifying anything.
-            fs::metadata(canonical.join(".")).map_err(|err| {
-                IaGetError::FileSystem(format!(
-                    "Failed to access check directory '{}': {}",
-                    path.display(),
-                    err
-                ))
-            })?;
-            Ok(canonical)
-        }
-        Ok(_) => Err(IaGetError::FileSystem(format!(
-            "Check path '{}' exists and is not a directory",
-            path.display()
-        ))),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            if fs::symlink_metadata(path).is_ok() {
-                return Err(IaGetError::FileSystem(format!(
-                    "Check path '{}' is a broken symlink",
-                    path.display()
-                )));
-            }
-
-            Err(IaGetError::FileSystem(format!(
-                "Check directory '{}' does not exist",
-                path.display()
-            )))
-        }
-        Err(err) => Err(IaGetError::FileSystem(format!(
-            "Failed to access check directory '{}': {}",
-            path.display(),
-            err
-        ))),
-    }
+    downloader::validate_or_prepare_dir(path, "Check", "check", false)
 }
 
 fn error_reason(err: IaGetError) -> String {
@@ -154,85 +112,42 @@ fn format_issues(issues: &[VerificationIssue]) -> String {
         .join("; ")
 }
 
-fn print_interrupted_notice() {
+fn record_verify_interrupted(
+    summary: &mut VerificationSummary,
+    logger: &VerboseLogger,
+    reason: fmt::Arguments<'_>,
+) {
+    summary.interrupted = true;
+    logger.log("verify", reason);
     println!("\n{} Verification interrupted by user.", "✘".red().bold());
 }
 
 /// Formats a plain-text summary of a verification run, including any failed files.
 pub fn format_verification_summary(summary: &VerificationSummary) -> String {
-    let mut text = format!(
-        "Verification summary: {} ok, {} failed",
+    utils::format_run_summary(
+        "Verification summary:",
         summary.ok,
-        summary.failed.len()
-    );
-    if summary.interrupted {
-        text.push_str(", interrupted");
-    }
-
-    if !summary.failed.is_empty() {
-        text.push_str("\nFailed files:");
-        for failed in &summary.failed {
-            text.push_str(&format!(
-                "\n  - {}: {}",
-                failed.file_path,
-                format_issues(&failed.issues)
-            ));
-        }
-    }
-
-    text
+        None,
+        summary
+            .failed
+            .iter()
+            .map(|failed| (failed.file_path.as_str(), format_issues(&failed.issues))),
+        summary.interrupted,
+    )
 }
 
 /// Prints a coloured end-of-verification summary to stdout.
 fn print_verification_summary(summary: &VerificationSummary) {
-    let status_icon = if summary.interrupted || !summary.failed.is_empty() {
-        "✘".red().bold()
-    } else {
-        "✔".green().bold()
-    };
-
-    let failed_count = if summary.failed.is_empty() {
-        summary.failed.len().to_string().bold()
-    } else {
-        summary.failed.len().to_string().red().bold()
-    };
-
-    let interrupted_suffix = if summary.interrupted {
-        format!(", {}", "interrupted".yellow().bold())
-    } else {
-        String::new()
-    };
-
-    println!(
-        "\n{} {} {} ok, {} failed{}",
-        status_icon,
-        "Verification summary:".bold(),
-        summary.ok.to_string().green().bold(),
-        failed_count,
-        interrupted_suffix
+    utils::print_run_summary(
+        "Verification summary:",
+        summary.ok,
+        None,
+        summary
+            .failed
+            .iter()
+            .map(|failed| (failed.file_path.as_str(), format_issues(&failed.issues))),
+        summary.interrupted,
     );
-
-    if !summary.failed.is_empty() {
-        println!("{}", "Failed files:".red().bold());
-        for failed in &summary.failed {
-            println!(
-                "  {} {}: {}",
-                "✘".red().bold(),
-                failed.file_path.bold(),
-                format_issues(&failed.issues)
-            );
-        }
-    }
-}
-
-/// Verifies local files inside `root` against `files` without creating, modifying, or deleting
-/// any files or directories.
-pub fn verify_files(
-    root: &Path,
-    files: &[XmlFile],
-    signal: &ShutdownSignal,
-) -> Result<VerificationSummary> {
-    verify_files_with_logger(root, files, signal, &VerboseLogger::disabled())
 }
 
 /// Verifies local files inside `root` against `files` without creating, modifying, or deleting
@@ -248,9 +163,7 @@ pub fn verify_files_with_logger(
 
     for file in files {
         if !signal.is_running() {
-            summary.interrupted = true;
-            logger.log("verify", "interrupted by user");
-            print_interrupted_notice();
+            record_verify_interrupted(&mut summary, logger, format_args!("interrupted by user"));
             break;
         }
 
@@ -259,46 +172,14 @@ pub fn verify_files_with_logger(
 
         // Check for leftover `.part` file regardless of whether the final file exists.
         let part_rel = downloader::part_file_path(&sanitized_name);
-        match downloader::validate_contained_path(&canonical_root, &part_rel, true) {
-            Ok(part_full) => match fs::symlink_metadata(&part_full) {
-                Ok(meta) => {
-                    if meta.file_type().is_symlink() {
-                        push_unique_issue(
-                            &mut issues,
-                            VerificationIssue::UnreadableTarget {
-                                reason: format!(
-                                    "Refusing symlinked partial file '{}'",
-                                    part_full.display()
-                                ),
-                            },
-                        );
-                    } else if !meta.file_type().is_file() {
-                        push_unique_issue(
-                            &mut issues,
-                            VerificationIssue::UnreadableTarget {
-                                reason: format!(
-                                    "Refusing non-regular partial file '{}'",
-                                    part_full.display()
-                                ),
-                            },
-                        );
-                    } else {
-                        issues.push(VerificationIssue::LeftoverPart {
-                            part_path: part_rel.to_string_lossy().into_owned(),
-                            size: meta.len(),
-                        });
-                    }
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    push_unique_issue(
-                        &mut issues,
-                        VerificationIssue::UnreadableTarget {
-                            reason: err.to_string(),
-                        },
-                    );
-                }
-            },
+        match downloader::inspect_contained_regular_file(&canonical_root, &part_rel) {
+            Ok(Some((_, meta))) => {
+                issues.push(VerificationIssue::LeftoverPart {
+                    part_path: part_rel.to_string_lossy().into_owned(),
+                    size: meta.len(),
+                });
+            }
+            Ok(None) => {}
             Err(err) => {
                 push_unique_issue(
                     &mut issues,
@@ -311,136 +192,96 @@ pub fn verify_files_with_logger(
 
         // Check final target file presence, safety, readability, byte length, and MD5 digest.
         let rel_path = Path::new(&sanitized_name);
-        match downloader::validate_contained_path(&canonical_root, rel_path, true) {
-            Ok(target_full) => match fs::symlink_metadata(&target_full) {
-                Ok(meta) => {
-                    if meta.file_type().is_symlink() {
-                        push_unique_issue(
-                            &mut issues,
-                            VerificationIssue::UnreadableTarget {
-                                reason: format!(
-                                    "Refusing symlink target '{}'",
-                                    target_full.display()
-                                ),
-                            },
-                        );
-                    } else if !meta.file_type().is_file() {
-                        push_unique_issue(
-                            &mut issues,
-                            VerificationIssue::UnreadableTarget {
-                                reason: format!(
-                                    "Refusing non-regular file target '{}'",
-                                    target_full.display()
-                                ),
-                            },
-                        );
-                    } else {
-                        match downloader::open_regular_file_for_read(&canonical_root, rel_path) {
-                            Ok(opened) => match opened.metadata() {
-                                Ok(opened_meta) => {
-                                    let actual_size = opened_meta.len();
-                                    drop(opened);
+        match downloader::inspect_contained_regular_file(&canonical_root, rel_path) {
+            Ok(Some(_)) => {
+                match downloader::open_regular_file_for_read(&canonical_root, rel_path) {
+                    Ok(opened) => match opened.metadata() {
+                        Ok(opened_meta) => {
+                            let actual_size = opened_meta.len();
+                            drop(opened);
 
-                                    let size_mismatch = match file.size {
-                                        Some(expected) if actual_size != expected => {
-                                            issues.push(VerificationIssue::SizeMismatch {
-                                                expected,
-                                                actual: actual_size,
-                                            });
-                                            true
+                            let size_mismatch = match file.size {
+                                Some(expected) if actual_size != expected => {
+                                    issues.push(VerificationIssue::SizeMismatch {
+                                        expected,
+                                        actual: actual_size,
+                                    });
+                                    true
+                                }
+                                _ => false,
+                            };
+
+                            if !size_mismatch {
+                                if let Some(expected_md5) = file.md5.as_deref() {
+                                    if !signal.is_running() {
+                                        record_verify_interrupted(
+                                            &mut summary,
+                                            logger,
+                                            format_args!(
+                                                "interrupted while verifying '{sanitized_name}'"
+                                            ),
+                                        );
+                                        break;
+                                    }
+                                    match downloader::calculate_md5(
+                                        &canonical_root,
+                                        rel_path,
+                                        signal.running_flag(),
+                                    ) {
+                                        Ok(actual_md5) => {
+                                            if !actual_md5.eq_ignore_ascii_case(expected_md5) {
+                                                issues.push(VerificationIssue::Md5Mismatch {
+                                                    expected: expected_md5.to_string(),
+                                                    actual: actual_md5,
+                                                });
+                                            }
                                         }
-                                        _ => false,
-                                    };
-
-                                    if !size_mismatch {
-                                        if let Some(expected_md5) = file.md5.as_deref() {
-                                            if !signal.is_running() {
-                                                summary.interrupted = true;
-                                                logger.log(
-                                                    "verify",
+                                        Err(err) => {
+                                            if !signal.is_running()
+                                                || err.to_string().contains("interrupted by signal")
+                                            {
+                                                record_verify_interrupted(
+                                                    &mut summary,
+                                                    logger,
                                                     format_args!(
-                                                        "interrupted while verifying '{sanitized_name}'"
-                                                    ),
+                                                    "interrupted while verifying '{sanitized_name}'"
+                                                ),
                                                 );
-                                                print_interrupted_notice();
                                                 break;
                                             }
-                                            match downloader::calculate_md5(
-                                                &canonical_root,
-                                                rel_path,
-                                                signal.running_flag(),
-                                            ) {
-                                                Ok(actual_md5) => {
-                                                    if !actual_md5
-                                                        .eq_ignore_ascii_case(expected_md5)
-                                                    {
-                                                        issues.push(
-                                                            VerificationIssue::Md5Mismatch {
-                                                                expected: expected_md5.to_string(),
-                                                                actual: actual_md5,
-                                                            },
-                                                        );
-                                                    }
-                                                }
-                                                Err(err) => {
-                                                    if !signal.is_running()
-                                                        || err
-                                                            .to_string()
-                                                            .contains("interrupted by signal")
-                                                    {
-                                                        summary.interrupted = true;
-                                                        logger.log(
-                                                            "verify",
-                                                            format_args!(
-                                                                "interrupted while verifying '{sanitized_name}'"
-                                                            ),
-                                                        );
-                                                        print_interrupted_notice();
-                                                        break;
-                                                    }
-                                                    push_unique_issue(
-                                                        &mut issues,
-                                                        VerificationIssue::UnreadableTarget {
-                                                            reason: error_reason(err),
-                                                        },
-                                                    );
-                                                }
-                                            }
+                                            push_unique_issue(
+                                                &mut issues,
+                                                VerificationIssue::UnreadableTarget {
+                                                    reason: error_reason(err),
+                                                },
+                                            );
                                         }
                                     }
                                 }
-                                Err(err) => {
-                                    push_unique_issue(
-                                        &mut issues,
-                                        VerificationIssue::UnreadableTarget {
-                                            reason: err.to_string(),
-                                        },
-                                    );
-                                }
-                            },
-                            Err(err) => {
-                                push_unique_issue(
-                                    &mut issues,
-                                    VerificationIssue::UnreadableTarget {
-                                        reason: error_reason(err),
-                                    },
-                                );
                             }
                         }
+                        Err(err) => {
+                            push_unique_issue(
+                                &mut issues,
+                                VerificationIssue::UnreadableTarget {
+                                    reason: err.to_string(),
+                                },
+                            );
+                        }
+                    },
+                    Err(err) => {
+                        push_unique_issue(
+                            &mut issues,
+                            VerificationIssue::UnreadableTarget {
+                                reason: error_reason(err),
+                            },
+                        );
                     }
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    issues.push(VerificationIssue::Missing);
-                }
-                Err(err) => {
-                    push_unique_issue(
-                        &mut issues,
-                        VerificationIssue::UnreadableTarget {
-                            reason: err.to_string(),
-                        },
-                    );
-                }
-            },
+            }
+            Ok(None) => {
+                issues.push(VerificationIssue::Missing);
+            }
             Err(err) => {
                 push_unique_issue(
                     &mut issues,
@@ -488,83 +329,40 @@ pub fn verify_files_with_logger(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempTestDir(PathBuf);
-
-    impl TempTestDir {
-        fn new(label: &str) -> Self {
-            let unique = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "ia-get-verify-{label}-{}-{nanos}-{unique}",
-                std::process::id()
-            ));
-            fs::create_dir_all(&path).expect("create temp test dir");
-            Self(path)
-        }
-
-        fn join(&self, rel: &str) -> PathBuf {
-            self.0.join(rel)
-        }
-    }
-
-    impl Drop for TempTestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn xml_file(name: &str, size: Option<u64>, md5: Option<&str>) -> XmlFile {
-        XmlFile {
-            name: name.to_string(),
-            source: "original".to_string(),
-            mtime: None,
-            size,
-            format: None,
-            rotation: None,
-            md5: md5.map(str::to_string),
-            crc32: None,
-            sha1: None,
-            btih: None,
-            summation: None,
-            original: None,
-        }
-    }
+    use crate::test_support::{md5_hex, snapshot_dir, xml_file, CapturedLogs, TempTestDir};
 
     #[test]
-    fn validate_check_dir_rejects_empty_missing_and_non_dir_without_creating() {
-        let sandbox = TempTestDir::new("validate");
-
-        assert!(matches!(
-            validate_check_dir(Path::new("")),
-            Err(IaGetError::FileSystem(_))
-        ));
+    fn validate_check_dir_and_verify_files_reject_invalid_dirs_without_creating() {
+        let sandbox = TempTestDir::new("verify-validate");
+        let files = vec![xml_file("a.bin", Some(1), None)];
+        let signal = ShutdownSignal::new();
 
         let missing = sandbox.join("does-not-exist/nested");
-        assert!(matches!(
-            validate_check_dir(&missing),
-            Err(IaGetError::FileSystem(_))
-        ));
+        let file_path = sandbox.write("regular.txt", b"hello");
+
+        for invalid in [Path::new(""), missing.as_path(), file_path.as_path()] {
+            assert!(
+                matches!(validate_check_dir(invalid), Err(IaGetError::FileSystem(_))),
+                "validate_check_dir must reject {invalid:?}"
+            );
+            assert!(
+                matches!(
+                    verify_files_with_logger(invalid, &files, &signal, &VerboseLogger::disabled()),
+                    Err(IaGetError::FileSystem(_))
+                ),
+                "verify_files_with_logger must reject {invalid:?}"
+            );
+        }
+
         assert!(!missing.exists());
         assert!(!sandbox.join("does-not-exist").exists());
+        assert_eq!(fs::read(&file_path).unwrap(), b"hello");
 
-        let file_path = sandbox.join("regular.txt");
-        fs::write(&file_path, b"hello").unwrap();
-        assert!(matches!(
-            validate_check_dir(&file_path),
-            Err(IaGetError::FileSystem(_))
-        ));
-
-        let canonical = validate_check_dir(&sandbox.0).unwrap();
-        assert_eq!(canonical, fs::canonicalize(&sandbox.0).unwrap());
+        let canonical = validate_check_dir(sandbox.path()).unwrap();
+        assert_eq!(canonical, fs::canonicalize(sandbox.path()).unwrap());
     }
 
     #[cfg(unix)]
@@ -572,7 +370,7 @@ mod tests {
     fn validate_check_dir_rejects_broken_symlink() {
         use std::os::unix::fs::symlink;
 
-        let sandbox = TempTestDir::new("broken-symlink");
+        let sandbox = TempTestDir::new("verify-broken-symlink");
         let missing_target = sandbox.join("missing-target");
         let broken = sandbox.join("broken-link");
         symlink(&missing_target, &broken).unwrap();
@@ -584,257 +382,45 @@ mod tests {
     }
 
     #[test]
-    fn verify_files_passes_valid_files_including_uppercase_md5_and_optional_fields() {
-        let sandbox = TempTestDir::new("valid-files");
-        let payload = b"hello archive verification";
-        let digest_upper = format!("{:X}", md5::compute(payload));
-
-        fs::create_dir_all(sandbox.join("sub")).unwrap();
-        fs::write(sandbox.join("sub/good.bin"), payload).unwrap();
-        fs::write(sandbox.join("no-meta.txt"), b"anything").unwrap();
-
-        let files = vec![
-            xml_file(
-                "sub/good.bin",
-                Some(payload.len() as u64),
-                Some(&digest_upper),
-            ),
-            xml_file("no-meta.txt", None, None),
-        ];
-
-        let signal = ShutdownSignal::new();
-        let summary = verify_files(&sandbox.0, &files, &signal).unwrap();
-        assert_eq!(summary.ok, 2);
-        assert!(summary.failed.is_empty());
-        assert!(!summary.interrupted);
-        assert_eq!(
-            format_verification_summary(&summary),
-            "Verification summary: 2 ok, 0 failed"
-        );
-    }
-
-    #[test]
-    fn verify_files_detects_missing_leftover_part_size_mismatch_and_md5_mismatch() {
-        let sandbox = TempTestDir::new("issues");
-
-        let ok_bytes = b"exact-bytes";
-        let ok_md5 = format!("{:x}", md5::compute(ok_bytes));
-        fs::write(sandbox.join("with_part.bin"), ok_bytes).unwrap();
-        fs::write(sandbox.join("with_part.bin.part"), b"partial").unwrap();
-
-        fs::write(sandbox.join("wrong_size.bin"), b"short").unwrap();
-
-        let bad_bytes = b"wrong-hash!";
-        fs::write(sandbox.join("wrong_md5.bin"), bad_bytes).unwrap();
-
-        let files = vec![
-            xml_file(
-                "missing.bin",
-                Some(10),
-                Some("00000000000000000000000000000000"),
-            ),
-            xml_file("with_part.bin", Some(ok_bytes.len() as u64), Some(&ok_md5)),
-            xml_file(
-                "wrong_size.bin",
-                Some(100),
-                Some("11111111111111111111111111111111"),
-            ),
-            xml_file(
-                "wrong_md5.bin",
-                Some(bad_bytes.len() as u64),
-                Some("22222222222222222222222222222222"),
-            ),
-        ];
-
-        let signal = ShutdownSignal::new();
-        let summary = verify_files(&sandbox.0, &files, &signal).unwrap();
-        assert_eq!(summary.ok, 0);
-        assert!(!summary.interrupted);
-        assert_eq!(summary.failed.len(), 4);
-
-        assert_eq!(summary.failed[0].file_path, "missing.bin");
-        assert_eq!(summary.failed[0].issues, vec![VerificationIssue::Missing]);
-
-        assert_eq!(summary.failed[1].file_path, "with_part.bin");
-        assert_eq!(
-            summary.failed[1].issues,
-            vec![VerificationIssue::LeftoverPart {
-                part_path: "with_part.bin.part".to_string(),
-                size: 7,
-            }]
-        );
-
-        assert_eq!(summary.failed[2].file_path, "wrong_size.bin");
-        assert_eq!(
-            summary.failed[2].issues,
-            vec![VerificationIssue::SizeMismatch {
-                expected: 100,
-                actual: 5,
-            }]
-        );
-
-        assert_eq!(summary.failed[3].file_path, "wrong_md5.bin");
-        assert_eq!(
-            summary.failed[3].issues,
-            vec![VerificationIssue::Md5Mismatch {
-                expected: "22222222222222222222222222222222".to_string(),
-                actual: format!("{:x}", md5::compute(bad_bytes)),
-            }]
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn verify_files_deduplicates_parent_symlink_error_and_stops_on_interrupt() {
-        use std::os::unix::fs::symlink;
-
-        let sandbox = TempTestDir::new("symlink-parent");
-        let outside = TempTestDir::new("outside");
-        fs::write(outside.join("secret.bin"), b"secret").unwrap();
-        symlink(&outside.0, sandbox.join("linked")).unwrap();
-
-        let files = vec![xml_file("linked/secret.bin", Some(6), None)];
-        let signal = ShutdownSignal::new();
-        let summary = verify_files(&sandbox.0, &files, &signal).unwrap();
-        assert_eq!(summary.ok, 0);
-        assert_eq!(summary.failed.len(), 1);
-        assert_eq!(
-            summary.failed[0].issues.len(),
-            1,
-            "identical parent symlink error from .part and final check must be deduplicated"
-        );
-        assert!(matches!(
-            summary.failed[0].issues[0],
-            VerificationIssue::UnreadableTarget { .. }
-        ));
-
-        let stopped = ShutdownSignal::new();
-        stopped.trigger();
-        let interrupted = verify_files(&sandbox.0, &files, &stopped).unwrap();
-        assert!(interrupted.interrupted);
-        assert_eq!(interrupted.ok, 0);
-        assert!(interrupted.failed.is_empty());
-        assert!(format_verification_summary(&interrupted).contains("interrupted"));
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    struct DirEntrySnapshot {
-        rel_path: PathBuf,
-        is_dir: bool,
-        is_symlink: bool,
-        contents: Option<Vec<u8>>,
-        modified: Option<SystemTime>,
-    }
-
-    fn snapshot_dir(root: &Path) -> (Option<SystemTime>, Vec<DirEntrySnapshot>) {
-        fn walk(base: &Path, current: &Path, out: &mut Vec<DirEntrySnapshot>) {
-            let mut entries: Vec<_> = fs::read_dir(current)
-                .expect("read dir for snapshot")
-                .map(|entry| entry.expect("dir entry").path())
-                .collect();
-            entries.sort();
-
-            for path in entries {
-                let meta = fs::symlink_metadata(&path).expect("symlink_metadata for snapshot");
-                let rel_path = path.strip_prefix(base).unwrap().to_path_buf();
-                let is_dir = meta.file_type().is_dir();
-                let is_symlink = meta.file_type().is_symlink();
-                let contents = if meta.file_type().is_file() {
-                    Some(fs::read(&path).expect("read file for snapshot"))
-                } else {
-                    None
-                };
-                let modified = meta.modified().ok();
-                out.push(DirEntrySnapshot {
-                    rel_path,
-                    is_dir,
-                    is_symlink,
-                    contents,
-                    modified,
-                });
-                if is_dir && !is_symlink {
-                    walk(base, &path, out);
-                }
-            }
-        }
-
-        let root_mtime = fs::symlink_metadata(root)
-            .expect("root metadata for snapshot")
-            .modified()
-            .ok();
-        let mut out = Vec::new();
-        walk(root, root, &mut out);
-        (root_mtime, out)
-    }
-
-    #[test]
-    fn verify_files_rejects_empty_missing_and_regular_file_targets_without_creating() {
-        let sandbox = TempTestDir::new("verify-dir-guards");
-        let files = vec![xml_file("a.bin", Some(1), None)];
-        let signal = ShutdownSignal::new();
-
-        assert!(matches!(
-            verify_files(Path::new(""), &files, &signal),
-            Err(IaGetError::FileSystem(_))
-        ));
-
-        let missing = sandbox.join("absent/deep/dir");
-        assert!(matches!(
-            verify_files(&missing, &files, &signal),
-            Err(IaGetError::FileSystem(_))
-        ));
-        assert!(!missing.exists());
-        assert!(!sandbox.join("absent").exists());
-
-        let file_path = sandbox.join("not-a-dir.txt");
-        fs::write(&file_path, b"content").unwrap();
-        assert!(matches!(
-            verify_files(&file_path, &files, &signal),
-            Err(IaGetError::FileSystem(_))
-        ));
-        assert_eq!(fs::read(&file_path).unwrap(), b"content");
-    }
-
-    #[test]
-    fn verify_files_clean_pass_top_level_nested_zero_byte_sanitized_and_read_only() {
-        let sandbox = TempTestDir::new("clean-pass-full");
+    fn verify_files_clean_pass_variants_and_read_only() {
+        let sandbox = TempTestDir::new("verify-clean-pass");
 
         let top_bytes = b"top-level payload";
-        let top_md5 = format!("{:x}", md5::compute(top_bytes));
-        fs::write(sandbox.join("readme.txt"), top_bytes).unwrap();
+        let top_md5 = md5_hex(top_bytes);
+        sandbox.write("readme.txt", top_bytes);
 
-        let nested_bytes = b"nested directory payload";
-        let nested_md5 = format!("{:x}", md5::compute(nested_bytes));
-        fs::create_dir_all(sandbox.join("docs/sub")).unwrap();
-        fs::write(sandbox.join("docs/sub/manual.pdf"), nested_bytes).unwrap();
+        let nested_bytes = b"hello archive verification";
+        let nested_md5_upper = format!("{:X}", md5::compute(nested_bytes));
+        sandbox.write("docs/sub/manual.pdf", nested_bytes);
 
-        let empty_bytes: &[u8] = b"";
-        let empty_md5 = format!("{:x}", md5::compute(empty_bytes));
+        let empty_md5 = md5_hex(b"");
         assert_eq!(empty_md5, "d41d8cd98f00b204e9800998ecf8427e");
-        fs::write(sandbox.join("empty.dat"), empty_bytes).unwrap();
+        sandbox.write("empty.dat", b"");
 
         let size_only_bytes = b"only size checked";
-        fs::write(sandbox.join("size_only.bin"), size_only_bytes).unwrap();
+        sandbox.write("size_only.bin", size_only_bytes);
 
         let md5_only_bytes = b"only md5 checked";
-        let md5_only_digest = format!("{:x}", md5::compute(md5_only_bytes));
-        fs::write(sandbox.join("md5_only.bin"), md5_only_bytes).unwrap();
+        let md5_only_digest = md5_hex(md5_only_bytes);
+        sandbox.write("md5_only.bin", md5_only_bytes);
+
+        sandbox.write("no-meta.txt", b"anything");
 
         let sanitized_bytes = b"episode video bytes";
-        let sanitized_md5 = format!("{:x}", md5::compute(sanitized_bytes));
-        fs::create_dir_all(sandbox.join("Season 1")).unwrap();
-        fs::write(sandbox.join("Season 1/Episode_.mp4"), sanitized_bytes).unwrap();
+        let sanitized_md5 = md5_hex(sanitized_bytes);
+        sandbox.write("Season 1/Episode_.mp4", sanitized_bytes);
 
         let files = vec![
             xml_file("readme.txt", Some(top_bytes.len() as u64), Some(&top_md5)),
             xml_file(
                 "docs/sub/manual.pdf",
                 Some(nested_bytes.len() as u64),
-                Some(&nested_md5),
+                Some(&nested_md5_upper),
             ),
             xml_file("empty.dat", Some(0), Some(&empty_md5)),
             xml_file("size_only.bin", Some(size_only_bytes.len() as u64), None),
             xml_file("md5_only.bin", None, Some(&md5_only_digest)),
+            xml_file("no-meta.txt", None, None),
             xml_file(
                 "Season 1/Episode?.mp4",
                 Some(sanitized_bytes.len() as u64),
@@ -842,47 +428,71 @@ mod tests {
             ),
         ];
 
-        let before = snapshot_dir(&sandbox.0);
+        let before = snapshot_dir(sandbox.path());
         let signal = ShutdownSignal::new();
-        let summary = verify_files(&sandbox.0, &files, &signal).unwrap();
-        let after = snapshot_dir(&sandbox.0);
+        let summary =
+            verify_files_with_logger(sandbox.path(), &files, &signal, &VerboseLogger::disabled())
+                .unwrap();
+        let after = snapshot_dir(sandbox.path());
 
-        assert_eq!(summary.ok, 6);
+        assert_eq!(summary.ok, 7);
         assert!(summary.failed.is_empty());
         assert!(!summary.interrupted);
+        assert_eq!(
+            format_verification_summary(&summary),
+            "Verification summary: 7 ok, 0 failed"
+        );
         assert_eq!(before, after, "verify_files must be strictly read-only");
     }
 
     #[test]
-    fn verify_files_reports_nested_missing_oversized_md5_without_size_orphan_part_and_dir_targets()
-    {
-        let sandbox = TempTestDir::new("failure-modes");
+    fn verify_files_failure_matrix_is_read_only() {
+        let sandbox = TempTestDir::new("verify-failures");
 
-        // Oversized file: expected 4 bytes, actual 12 bytes (MD5 check should be skipped).
-        fs::write(sandbox.join("oversized.bin"), b"123456789012").unwrap();
+        let ok_bytes = b"exact-bytes";
+        let ok_md5 = md5_hex(ok_bytes);
+        sandbox.write("with_part.bin", ok_bytes);
+        sandbox.write("with_part.bin.part", b"partial");
 
-        // Corrupt file with `size: None` and expected MD5.
+        sandbox.write("wrong_size.bin", b"short");
+        sandbox.write("oversized.bin", b"123456789012");
+
+        let bad_bytes = b"wrong-hash!";
+        sandbox.write("wrong_md5.bin", bad_bytes);
+
         let corrupt_bytes = b"corrupt-payload";
-        fs::write(sandbox.join("md5_only_bad.bin"), corrupt_bytes).unwrap();
+        sandbox.write("md5_only_bad.bin", corrupt_bytes);
 
-        // Leftover `.part` file alone without its final target file.
-        fs::write(sandbox.join("orphan.bin.part"), b"123456789").unwrap();
-
-        // Directory placed at expected file path.
+        sandbox.write("orphan.bin.part", b"123456789");
         fs::create_dir_all(sandbox.join("dir_as_file.bin")).unwrap();
 
-        // Directory placed at expected `.part` path alongside a valid final file.
         let valid_bytes = b"valid";
-        let valid_md5 = format!("{:x}", md5::compute(valid_bytes));
-        fs::write(sandbox.join("dir_part.bin"), valid_bytes).unwrap();
+        let valid_md5 = md5_hex(valid_bytes);
+        sandbox.write("dir_part.bin", valid_bytes);
         fs::create_dir_all(sandbox.join("dir_part.bin.part")).unwrap();
 
         let files = vec![
+            xml_file(
+                "missing.bin",
+                Some(10),
+                Some("00000000000000000000000000000000"),
+            ),
             xml_file("absent_dir/sub/missing.bin", Some(16), None),
+            xml_file("with_part.bin", Some(ok_bytes.len() as u64), Some(&ok_md5)),
+            xml_file(
+                "wrong_size.bin",
+                Some(100),
+                Some("11111111111111111111111111111111"),
+            ),
             xml_file(
                 "oversized.bin",
                 Some(4),
                 Some("00000000000000000000000000000000"),
+            ),
+            xml_file(
+                "wrong_md5.bin",
+                Some(bad_bytes.len() as u64),
+                Some("22222222222222222222222222222222"),
             ),
             xml_file(
                 "md5_only_bad.bin",
@@ -898,14 +508,16 @@ mod tests {
             ),
         ];
 
-        let before = snapshot_dir(&sandbox.0);
+        let before = snapshot_dir(sandbox.path());
         let signal = ShutdownSignal::new();
-        let summary = verify_files(&sandbox.0, &files, &signal).unwrap();
-        let after = snapshot_dir(&sandbox.0);
+        let summary =
+            verify_files_with_logger(sandbox.path(), &files, &signal, &VerboseLogger::disabled())
+                .unwrap();
+        let after = snapshot_dir(sandbox.path());
 
         assert_eq!(summary.ok, 0);
         assert!(!summary.interrupted);
-        assert_eq!(summary.failed.len(), 6);
+        assert_eq!(summary.failed.len(), 10);
         assert!(
             !sandbox.join("absent_dir").exists(),
             "missing nested subdirectory must not be created"
@@ -915,89 +527,107 @@ mod tests {
             "verify_files must leave directory completely untouched on failures"
         );
 
-        assert_eq!(summary.failed[0].file_path, "absent_dir/sub/missing.bin");
-        assert_eq!(summary.failed[0].issues, vec![VerificationIssue::Missing]);
+        let expected_exact: [(&str, Vec<VerificationIssue>); 8] = [
+            ("missing.bin", vec![VerificationIssue::Missing]),
+            (
+                "absent_dir/sub/missing.bin",
+                vec![VerificationIssue::Missing],
+            ),
+            (
+                "with_part.bin",
+                vec![VerificationIssue::LeftoverPart {
+                    part_path: "with_part.bin.part".to_string(),
+                    size: 7,
+                }],
+            ),
+            (
+                "wrong_size.bin",
+                vec![VerificationIssue::SizeMismatch {
+                    expected: 100,
+                    actual: 5,
+                }],
+            ),
+            (
+                "oversized.bin",
+                vec![VerificationIssue::SizeMismatch {
+                    expected: 4,
+                    actual: 12,
+                }],
+            ),
+            (
+                "wrong_md5.bin",
+                vec![VerificationIssue::Md5Mismatch {
+                    expected: "22222222222222222222222222222222".to_string(),
+                    actual: md5_hex(bad_bytes),
+                }],
+            ),
+            (
+                "md5_only_bad.bin",
+                vec![VerificationIssue::Md5Mismatch {
+                    expected: "ffffffffffffffffffffffffffffffff".to_string(),
+                    actual: md5_hex(corrupt_bytes),
+                }],
+            ),
+            (
+                "orphan.bin",
+                vec![
+                    VerificationIssue::LeftoverPart {
+                        part_path: "orphan.bin.part".to_string(),
+                        size: 9,
+                    },
+                    VerificationIssue::Missing,
+                ],
+            ),
+        ];
+        for (idx, (path, issues)) in expected_exact.iter().enumerate() {
+            assert_eq!(summary.failed[idx].file_path, *path);
+            assert_eq!(summary.failed[idx].issues, *issues, "case {path}");
+        }
 
-        assert_eq!(summary.failed[1].file_path, "oversized.bin");
-        assert_eq!(
-            summary.failed[1].issues,
-            vec![VerificationIssue::SizeMismatch {
-                expected: 4,
-                actual: 12,
-            }]
-        );
-
-        assert_eq!(summary.failed[2].file_path, "md5_only_bad.bin");
-        assert_eq!(
-            summary.failed[2].issues,
-            vec![VerificationIssue::Md5Mismatch {
-                expected: "ffffffffffffffffffffffffffffffff".to_string(),
-                actual: format!("{:x}", md5::compute(corrupt_bytes)),
-            }]
-        );
-
-        assert_eq!(summary.failed[3].file_path, "orphan.bin");
-        assert_eq!(
-            summary.failed[3].issues,
-            vec![
-                VerificationIssue::LeftoverPart {
-                    part_path: "orphan.bin.part".to_string(),
-                    size: 9,
-                },
-                VerificationIssue::Missing,
-            ]
-        );
-
-        assert_eq!(summary.failed[4].file_path, "dir_as_file.bin");
-        assert_eq!(summary.failed[4].issues.len(), 1);
+        assert_eq!(summary.failed[8].file_path, "dir_as_file.bin");
         assert!(matches!(
-            &summary.failed[4].issues[0],
-            VerificationIssue::UnreadableTarget { reason }
+            &summary.failed[8].issues[..],
+            [VerificationIssue::UnreadableTarget { reason }]
                 if reason.contains("non-regular file target")
         ));
 
-        assert_eq!(summary.failed[5].file_path, "dir_part.bin");
-        assert_eq!(summary.failed[5].issues.len(), 1);
+        assert_eq!(summary.failed[9].file_path, "dir_part.bin");
         assert!(matches!(
-            &summary.failed[5].issues[0],
-            VerificationIssue::UnreadableTarget { reason }
+            &summary.failed[9].issues[..],
+            [VerificationIssue::UnreadableTarget { reason }]
                 if reason.contains("non-regular") && reason.contains("dir_part.bin.part")
         ));
     }
 
     #[cfg(unix)]
     #[test]
-    fn verify_files_rejects_live_and_dangling_symlinks_for_targets_and_part_files() {
+    fn verify_files_rejects_symlinks_for_targets_parts_and_parents() {
         use std::os::unix::fs::symlink;
 
-        let sandbox = TempTestDir::new("symlink-targets");
-        let outside = TempTestDir::new("symlink-outside");
+        let sandbox = TempTestDir::new("verify-symlinks");
+        let outside = TempTestDir::new("verify-outside");
 
         let payload = b"outside-data";
-        let payload_md5 = format!("{:x}", md5::compute(payload));
-        let outside_file = outside.join("victim.bin");
-        fs::write(&outside_file, payload).unwrap();
+        let payload_md5 = md5_hex(payload);
+        let outside_file = outside.write("victim.bin", payload);
+        outside.write("secret.bin", b"secret");
 
-        // Live symlink at expected file path.
         symlink(&outside_file, sandbox.join("live_target.bin")).unwrap();
-
-        // Dangling symlink at expected file path.
         symlink(
             outside.join("does-not-exist.bin"),
             sandbox.join("dangling_target.bin"),
         )
         .unwrap();
 
-        // Live symlinked `.part` alongside a valid final file.
-        fs::write(sandbox.join("part_live.bin"), payload).unwrap();
+        sandbox.write("part_live.bin", payload);
         symlink(&outside_file, sandbox.join("part_live.bin.part")).unwrap();
-
-        // Dangling symlinked `.part` without a final file.
         symlink(
             outside.join("missing-part.bin"),
             sandbox.join("part_dangling.bin.part"),
         )
         .unwrap();
+
+        symlink(outside.path(), sandbox.join("linked")).unwrap();
 
         let files = vec![
             xml_file(
@@ -1012,37 +642,45 @@ mod tests {
                 Some(&payload_md5),
             ),
             xml_file("part_dangling.bin", Some(12), None),
+            xml_file("linked/secret.bin", Some(6), None),
         ];
 
-        let before = snapshot_dir(&sandbox.0);
+        let before = snapshot_dir(sandbox.path());
         let signal = ShutdownSignal::new();
-        let summary = verify_files(&sandbox.0, &files, &signal).unwrap();
-        let after = snapshot_dir(&sandbox.0);
+        let summary =
+            verify_files_with_logger(sandbox.path(), &files, &signal, &VerboseLogger::disabled())
+                .unwrap();
+        let after = snapshot_dir(sandbox.path());
 
         assert_eq!(summary.ok, 0);
-        assert_eq!(summary.failed.len(), 4);
+        assert_eq!(summary.failed.len(), 5);
         assert_eq!(before, after);
 
-        assert_eq!(summary.failed[0].file_path, "live_target.bin");
-        assert!(matches!(
-            &summary.failed[0].issues[..],
-            [VerificationIssue::UnreadableTarget { reason }]
-                if reason.contains("symlink target")
-        ));
-
-        assert_eq!(summary.failed[1].file_path, "dangling_target.bin");
-        assert!(matches!(
-            &summary.failed[1].issues[..],
-            [VerificationIssue::UnreadableTarget { reason }]
-                if reason.contains("symlink target")
-        ));
-
-        assert_eq!(summary.failed[2].file_path, "part_live.bin");
-        assert!(matches!(
-            &summary.failed[2].issues[..],
-            [VerificationIssue::UnreadableTarget { reason }]
-                if reason.contains("symlink") && reason.contains("part_live.bin.part")
-        ));
+        let single_unreadable: [(usize, &str, &[&str]); 4] = [
+            (0, "live_target.bin", &["symlink target"]),
+            (1, "dangling_target.bin", &["symlink target"]),
+            (2, "part_live.bin", &["symlink", "part_live.bin.part"]),
+            (4, "linked/secret.bin", &[]),
+        ];
+        for (idx, path, expected_needles) in single_unreadable {
+            assert_eq!(summary.failed[idx].file_path, path);
+            assert_eq!(
+                summary.failed[idx].issues.len(),
+                1,
+                "expected single deduplicated issue for {path}"
+            );
+            match &summary.failed[idx].issues[0] {
+                VerificationIssue::UnreadableTarget { reason } => {
+                    for needle in expected_needles {
+                        assert!(
+                            reason.contains(needle),
+                            "{path}: expected {needle:?} in {reason:?}"
+                        );
+                    }
+                }
+                other => panic!("{path}: expected UnreadableTarget, got {other:?}"),
+            }
+        }
 
         assert_eq!(summary.failed[3].file_path, "part_dangling.bin");
         assert_eq!(summary.failed[3].issues.len(), 2);
@@ -1070,9 +708,8 @@ mod tests {
             }
         }
 
-        let sandbox = TempTestDir::new("unreadable-file");
-        let file_path = sandbox.join("secret.bin");
-        fs::write(&file_path, b"cannot read this").unwrap();
+        let sandbox = TempTestDir::new("verify-unreadable");
+        let file_path = sandbox.write("secret.bin", b"cannot read this");
 
         // Guard drops before `sandbox`, guaranteeing permissions are restored prior to cleanup.
         let restore_guard = RestoreModeGuard {
@@ -1090,7 +727,9 @@ mod tests {
 
         let files = vec![xml_file("secret.bin", Some(16), None)];
         let signal = ShutdownSignal::new();
-        let summary = verify_files(&sandbox.0, &files, &signal).unwrap();
+        let summary =
+            verify_files_with_logger(sandbox.path(), &files, &signal, &VerboseLogger::disabled())
+                .unwrap();
 
         drop(restore_guard);
 
@@ -1098,16 +737,15 @@ mod tests {
         assert!(!summary.interrupted);
         assert_eq!(summary.failed.len(), 1);
         assert_eq!(summary.failed[0].file_path, "secret.bin");
-        assert_eq!(summary.failed[0].issues.len(), 1);
         assert!(matches!(
-            &summary.failed[0].issues[0],
-            VerificationIssue::UnreadableTarget { .. }
+            &summary.failed[0].issues[..],
+            [VerificationIssue::UnreadableTarget { .. }]
         ));
     }
 
     #[test]
     fn verify_files_stops_early_when_shutdown_signal_is_pre_triggered() {
-        let sandbox = TempTestDir::new("interrupt");
+        let sandbox = TempTestDir::new("verify-interrupt");
         let files = vec![
             xml_file("missing1.bin", Some(10), None),
             xml_file("missing2.bin", Some(20), None),
@@ -1116,10 +754,13 @@ mod tests {
         let signal = ShutdownSignal::new();
         signal.trigger();
 
-        let summary = verify_files(&sandbox.0, &files, &signal).unwrap();
+        let summary =
+            verify_files_with_logger(sandbox.path(), &files, &signal, &VerboseLogger::disabled())
+                .unwrap();
         assert!(summary.interrupted);
         assert_eq!(summary.ok, 0);
         assert!(summary.failed.is_empty());
+        assert!(format_verification_summary(&summary).contains("interrupted"));
     }
 
     #[test]
@@ -1206,46 +847,16 @@ mod tests {
         );
     }
 
-    #[derive(Clone, Default)]
-    struct CapturedLogs {
-        bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-    }
-
-    impl CapturedLogs {
-        fn new() -> Self {
-            Self::default()
-        }
-
-        fn as_bytes(&self) -> Vec<u8> {
-            self.bytes.lock().unwrap().clone()
-        }
-
-        fn as_string(&self) -> String {
-            String::from_utf8(self.as_bytes()).expect("verbose logs must be valid UTF-8")
-        }
-    }
-
-    impl std::io::Write for CapturedLogs {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.bytes.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn verify_files_with_logger_emits_plain_diagnostics_and_stays_silent_when_disabled() {
         let sandbox = TempTestDir::new("verify-verbose");
 
         let good_payload = b"verified archive content";
-        let good_md5 = format!("{:x}", md5::compute(good_payload));
-        fs::write(sandbox.join("good.bin"), good_payload).unwrap();
+        let good_md5 = md5_hex(good_payload);
+        sandbox.write("good.bin", good_payload);
 
         let corrupt_payload = b"corrupted content";
-        fs::write(sandbox.join("corrupt.bin"), corrupt_payload).unwrap();
+        sandbox.write("corrupt.bin", corrupt_payload);
 
         let files = vec![
             xml_file("good.bin", Some(good_payload.len() as u64), Some(&good_md5)),
@@ -1260,19 +871,18 @@ mod tests {
         let captured = CapturedLogs::new();
         let logger = VerboseLogger::with_writer(captured.clone());
 
-        let summary = verify_files_with_logger(&sandbox.0, &files, &signal, &logger).unwrap();
+        let summary = verify_files_with_logger(sandbox.path(), &files, &signal, &logger).unwrap();
         assert_eq!(summary.ok, 1);
         assert_eq!(summary.failed.len(), 1);
         assert_eq!(summary.failed[0].file_path, "corrupt.bin");
         assert!(!summary.interrupted);
 
-        let raw_bytes = captured.as_bytes();
         assert!(
-            !raw_bytes.contains(&0x1b),
+            !captured.as_bytes().contains(&0x1b),
             "verification verbose logs must contain zero ANSI escape bytes"
         );
 
-        let logs = captured.as_string();
+        let logs = captured.text();
         assert!(
             logs.contains("[verbose] verify: ok 'good.bin'"),
             "missing ok log line:\n{logs}"
@@ -1289,7 +899,7 @@ mod tests {
         let disabled = VerboseLogger::disabled();
         assert!(!disabled.is_enabled());
         let silent_summary =
-            verify_files_with_logger(&sandbox.0, &files, &signal, &disabled).unwrap();
+            verify_files_with_logger(sandbox.path(), &files, &signal, &disabled).unwrap();
         assert_eq!(silent_summary, summary);
     }
 }

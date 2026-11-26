@@ -15,6 +15,11 @@ pub mod filter;
 pub mod utils;
 pub mod verify;
 
+#[cfg(test)]
+extern crate self as ia_get;
+#[cfg(test)]
+pub(crate) mod test_support;
+
 // Re-export common types for convenience
 pub use cookie::CookieSource;
 pub use error::{IaGetError, Result};
