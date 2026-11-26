@@ -5,8 +5,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
-    <meta name="theme-color" content="#F7F5EF" media="(prefers-color-scheme: light)">
-    <meta name="theme-color" content="#191B1A" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#F8F4EC" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#1A1410" media="(prefers-color-scheme: dark)">
     <meta name="description" content="Download an Internet Archive item from one URL. Preview files, preserve folders and resume interrupted transfers with ia-get for Linux, macOS and Windows.">
     <title>ia-get · Internet Archive downloads from one URL</title>
     <link rel="canonical" href="https://ia-get.wimpys.world/">
@@ -73,11 +73,10 @@
         </div>
         <figure class="terminal">
           <figcaption><span class="terminal-dots" aria-hidden="true"><i></i><i></i><i></i></span> From the Archive to your directory</figcaption>
-          <pre><code><span class="terminal-comment"># Preview the files</span>
-ia-get <span class="terminal-command">--list</span> https://archive.org/details/deftributetozzap64
-
-<span class="terminal-comment"># Download the item</span>
-ia-get https://archive.org/details/deftributetozzap64</code></pre>
+          <picture>
+            <source srcset="demo-still.png" media="(prefers-reduced-motion: reduce)">
+            <img class="terminal-demo" src="demo.webp" alt="Terminal demo showing ia-get listing archive files, downloading filtered DjVu files into a folder, and verifying them with --check" width="872" height="512" decoding="async" fetchpriority="high">
+          </picture>
         </figure>
       </section>
 
@@ -85,12 +84,13 @@ ia-get https://archive.org/details/deftributetozzap64</code></pre>
         <div>
           <p class="eyebrow">Files, without the clicking</p>
           <h2 id="features-title">Download the listed files.</h2>
-          <p>Magazine scans, recordings and more. Give ia-get an Internet Archive item details URL to download its listed files.</p>
+          <p>Give ia-get an item <code>/details/</code> URL for the full file set, or a <code>/download/</code> URL for a single file.</p>
         </div>
         <dl class="feature-list">
-          <div><dt>Preview before downloading</dt><dd>List filenames and reported sizes with <code>--list</code>, without downloading the files.</dd></div>
-          <div><dt>Keep the folders</dt><dd>Preserve the item's directory structure, including metadata files and torrents when listed.</dd></div>
-          <div><dt>Continue an interrupted download</dt><dd>Run the same command again to resume partial transfers. ia-get checks MD5 hashes when the metadata supplies them.</dd></div>
+          <div><dt>Preview and filter</dt><dd>List filenames and sizes with <code>--list</code> before you download. Match or exclude paths with repeatable <code>-f</code> glob patterns.</dd></div>
+          <div><dt>Keep the folders</dt><dd>Save files into a chosen directory with <code>-o</code> and preserve the archive's folder structure, metadata, and torrents.</dd></div>
+          <div><dt>Resume and verify transfers</dt><dd>Stage downloads in <code>.part</code> files to resume interrupted transfers. ia-get checks MD5 hashes before it renames each finished file.</dd></div>
+          <div><dt>Check local copies</dt><dd>Verify an existing directory against archive metadata in read-only <code>--check</code> mode. Nothing downloads or changes on disk.</dd></div>
         </dl>
       </section>
 
@@ -98,13 +98,15 @@ ia-get https://archive.org/details/deftributetozzap64</code></pre>
         <div class="section-heading">
           <p class="eyebrow">Usage</p>
           <h2 id="usage-title">Choose an item. Preview. Download.</h2>
-          <p>Start in a dedicated directory. ia-get saves files in the current directory.</p>
+          <p>Save files in the current directory, or pick a target folder with <code>-o</code>.</p>
         </div>
         <div class="usage-example">
           <h3>Preview the file list</h3>
           <pre><code>ia-get --list https://archive.org/details/deftributetozzap64</code></pre>
-          <h3>Download the listed files</h3>
-          <pre><code>ia-get https://archive.org/details/deftributetozzap64</code></pre>
+          <h3>Download matching files into a folder</h3>
+          <pre><code>ia-get -o ./zzap64 -f '*djvu.*' https://archive.org/details/deftributetozzap64</code></pre>
+          <h3>Verify local files</h3>
+          <pre><code>ia-get --check -o ./zzap64 -f '*djvu.*' https://archive.org/details/deftributetozzap64</code></pre>
         </div>
         <div class="accordion">
           <details>
@@ -114,7 +116,7 @@ ia-get https://archive.org/details/deftributetozzap64</code></pre>
             <p>Replace <code>&lt;identifier&gt;</code> with the item's identifier. Keep your cookie file private.</p>
           </details>
         </div>
-        <p class="workflow-note"><a href="https://github.com/wimpysworld/ia-get#usage-">Read the usage guide</a> for cookie formats and file-list details.</p>
+        <p class="workflow-note"><a href="https://github.com/wimpysworld/ia-get/wiki/Usage">Read the usage guide on the wiki</a> for filters, cookies, proxies, and rate limits.</p>
       </section>
 
       <section id="install" class="install section-rule" aria-labelledby="install-title">

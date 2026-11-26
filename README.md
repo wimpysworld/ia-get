@@ -5,10 +5,6 @@
 </h1>
 
 <p align="center"><b>File downloader for archive.org</b></p>
-<p align="center"><a href="https://ia-get.wimpys.world">Project website</a> | <a href="https://github.com/wimpysworld/ia-get/wiki">Documentation</a></p>
-<p align="center">
-<img alt="GitHub all releases" src="https://img.shields.io/github/downloads/wimpysworld/ia-get/total?logo=github&label=Downloads">
-</p>
 
 <p align="center">Made with 💝 by 🤖</p>
 
@@ -66,7 +62,7 @@ Read the full guides on the wiki:
 
 # Demo 🧑‍💻
 
-<div align="center"><img alt="ia-get demo" src="assets/ia-get.gif" width="1024" /></div>
+<div align="center"><img alt="ia-get demo" src="pages/demo.webp" width="872" height="512" /></div>
 
 # Why? 🤔💭
 
@@ -91,7 +87,7 @@ When I started this project, I had no experience 👶 with [Rust](https://www.ru
 I discussed that process, its successes, and drawbacks. In a future episode, we will discuss the latest version of the project.
 
 <div align="center">
-  <a href="https://linuxmatters.sh" target="_blank"><img src="https://raw.githubusercontent.com/wimpysworld/nix-config/main/.github/screenshots/linuxmatters.png" alt="Linux Matters Podcast"/></a>
+  <a href="https://linuxmatters.sh" target="_blank"><img src="https://raw.githubusercontent.com/wimpysworld/nix-config/main/assets/linuxmatters.png" alt="Linux Matters Podcast"/></a>
   <br />
   <em>Linux Matters Podcast</em>
 </div>

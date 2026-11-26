@@ -5,7 +5,7 @@
   const root = document.documentElement;
   const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
   const themeColours = document.querySelectorAll('meta[name="theme-color"]');
-  const backgrounds = { light: "#F7F5EF", dark: "#191B1A" };
+  const backgrounds = { light: "#F8F4EC", dark: "#1A1410" };
   let preference = "system";
 
   try {

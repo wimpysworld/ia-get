@@ -11,7 +11,7 @@ The flake development shell provides:
 - Rust toolchain (`rustc`, `cargo`, `rustfmt`, `clippy`, `rust-analyzer`)
 - `just`, `actionlint`, `cargo-audit`, `cargo-edit`, `cargo-watch`
 - `cargo-zigbuild`, `goreleaser`, `zig`, `gh`
-- `tailor` (on platforms with a Tailor package) and `miniserve`
+- `tailor` (on platforms with a Tailor package), `miniserve`, `ntrecord`, and `ffmpeg-headless`
 
 Plain `cargo` commands also work outside Nix if you have a local Rust toolchain installed.
 
@@ -27,6 +27,7 @@ Plain `cargo` commands also work outside Nix if you have a local Rust toolchain 
 | `just release-build` | Builds the stripped, size-optimised LTO binary with `cargo build --release`. |
 | `just run -- <args>` | Runs `ia-get` via `cargo run` with the given CLI arguments. |
 | `just pages` | Serves `pages/` locally with `miniserve` at `http://127.0.0.1:18473`. |
+| `just record` | Builds the release binary and records `pages/demo.webp` and `pages/demo-still.png` from `ia-get.tape` with `ntrecord` and `ffmpeg`. |
 | `just update` | Updates flake inputs (`nix flake update`) and Cargo dependencies (`cargo update`). |
 | `nix build` | Builds the Nix package from `nix/package.nix` to verify Nix packaging. |
 

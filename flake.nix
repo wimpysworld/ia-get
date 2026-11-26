@@ -43,6 +43,7 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
+          ntrecord = import ./nix/ntrecord.nix { inherit pkgs; };
           # Keep the development shell available when Tailor has no package for this system.
           tailorPkgs = tailor.packages.${system} or { };
         in
@@ -56,9 +57,11 @@
                 cargo-edit
                 cargo-watch
                 cargo-zigbuild
+                ffmpeg-headless
                 gh
                 goreleaser
                 just
+                ntrecord
                 rust-analyzer
                 zig
               ]

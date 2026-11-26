@@ -845,74 +845,74 @@ a.install-tile:is(:hover, :focus-visible) > .arrow-up-right {
   }
 }
 
-/* ia-get: paper, charcoal and teal. Keep repository tile brand colours. */
+/* ia-get: warm parchment, espresso, bronze and gold. Keep repository tile brand colours. */
 /* Match µCSS mode specificity so system mode receives the same palette. */
 :root:not([data-theme="dark"]), :root[data-theme="light"] {
   color-scheme: light;
-  --mu-background-color: #F7F5EF;
-  --mu-color: #232725;
-  --mu-muted-color: #595F5B;
-  --mu-muted-border-color: #D4D8D1;
-  --mu-card-background-color: #FFFFFF;
-  --mu-code-background-color: #ECEFE8;
-  --mu-code-color: #232725;
-  --mu-primary: #176B60;
-  --mu-primary-hover: #105449;
-  --mu-primary-inverse: #FFFFFF;
-  --mu-primary-background: #E4EDE7;
-  --mu-primary-hover-background: #D3E4DC;
-  --mu-primary-focus: #176B60;
-  --mu-primary-underline: #176B60;
-  --mu-secondary-background: #ECEFE8;
-  --mu-form-element-background-color: #FFFFFF;
-  --mu-form-element-color: #232725;
-  --mu-form-element-border-color: #717B74;
-  --mu-contrast: #232725;
+  --mu-background-color: #F8F4EC;
+  --mu-color: #241A14;
+  --mu-muted-color: #5C4D40;
+  --mu-muted-border-color: #DDD2C0;
+  --mu-card-background-color: #FFFDF9;
+  --mu-code-background-color: #EFE8DA;
+  --mu-code-color: #241A14;
+  --mu-primary: #945B0E;
+  --mu-primary-hover: #754608;
+  --mu-primary-inverse: #FFFDF9;
+  --mu-primary-background: #F4E8CE;
+  --mu-primary-hover-background: #EAD7AE;
+  --mu-primary-focus: #945B0E;
+  --mu-primary-underline: #945B0E;
+  --mu-secondary-background: #EFE8DA;
+  --mu-form-element-background-color: #FFFDF9;
+  --mu-form-element-color: #241A14;
+  --mu-form-element-border-color: #82705E;
+  --mu-contrast: #241A14;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --mu-background-color: #191B1A;
-  --mu-color: #F2F1EA;
-  --mu-muted-color: #B9C1BA;
-  --mu-muted-border-color: #454D47;
-  --mu-card-background-color: #242725;
-  --mu-code-background-color: #242725;
-  --mu-code-color: #F2F1EA;
-  --mu-primary: #86D5C4;
-  --mu-primary-hover: #A3E4D6;
-  --mu-primary-inverse: #142923;
-  --mu-primary-background: #263D35;
-  --mu-primary-hover-background: #304C41;
-  --mu-primary-focus: #86D5C4;
-  --mu-primary-underline: #86D5C4;
-  --mu-secondary-background: #242725;
-  --mu-form-element-background-color: #242725;
-  --mu-form-element-color: #F2F1EA;
-  --mu-form-element-border-color: #88988D;
-  --mu-contrast: #F2F1EA;
+  --mu-background-color: #1A1410;
+  --mu-color: #F5EFE6;
+  --mu-muted-color: #C4B6A4;
+  --mu-muted-border-color: #4A3728;
+  --mu-card-background-color: #241C16;
+  --mu-code-background-color: #241A14;
+  --mu-code-color: #F5EFE6;
+  --mu-primary: #F2C96B;
+  --mu-primary-hover: #F7DA90;
+  --mu-primary-inverse: #241A14;
+  --mu-primary-background: #35281B;
+  --mu-primary-hover-background: #463423;
+  --mu-primary-focus: #F2C96B;
+  --mu-primary-underline: #F2C96B;
+  --mu-secondary-background: #241C16;
+  --mu-form-element-background-color: #241C16;
+  --mu-form-element-color: #F5EFE6;
+  --mu-form-element-border-color: #967D66;
+  --mu-contrast: #F5EFE6;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-  color-scheme: dark;
-  --mu-background-color: #191B1A;
-  --mu-color: #F2F1EA;
-  --mu-muted-color: #B9C1BA;
-  --mu-muted-border-color: #454D47;
-  --mu-card-background-color: #242725;
-  --mu-code-background-color: #242725;
-  --mu-code-color: #F2F1EA;
-  --mu-primary: #86D5C4;
-  --mu-primary-hover: #A3E4D6;
-  --mu-primary-inverse: #142923;
-  --mu-primary-background: #263D35;
-  --mu-primary-hover-background: #304C41;
-  --mu-primary-focus: #86D5C4;
-  --mu-primary-underline: #86D5C4;
-  --mu-secondary-background: #242725;
-  --mu-form-element-background-color: #242725;
-  --mu-form-element-color: #F2F1EA;
-  --mu-form-element-border-color: #88988D;
-  --mu-contrast: #F2F1EA;
+    color-scheme: dark;
+    --mu-background-color: #1A1410;
+    --mu-color: #F5EFE6;
+    --mu-muted-color: #C4B6A4;
+    --mu-muted-border-color: #4A3728;
+    --mu-card-background-color: #241C16;
+    --mu-code-background-color: #241A14;
+    --mu-code-color: #F5EFE6;
+    --mu-primary: #F2C96B;
+    --mu-primary-hover: #F7DA90;
+    --mu-primary-inverse: #241A14;
+    --mu-primary-background: #35281B;
+    --mu-primary-hover-background: #463423;
+    --mu-primary-focus: #F2C96B;
+    --mu-primary-underline: #F2C96B;
+    --mu-secondary-background: #241C16;
+    --mu-form-element-background-color: #241C16;
+    --mu-form-element-color: #F5EFE6;
+    --mu-form-element-border-color: #967D66;
+    --mu-contrast: #F5EFE6;
   }
 }
 
@@ -938,12 +938,32 @@ a:hover { color: var(--mu-primary-hover); }
 nav a { color: var(--mu-muted-color); }
 .brand { color: var(--mu-color); }
 .brand-mark { flex-basis: 40px; width: 40px; height: 40px; }
+.terminal {
+  border-color: var(--mu-muted-border-color);
+  background: #241A14;
+}
+.terminal figcaption {
+  background: var(--mu-code-background-color);
+  border-bottom-color: var(--mu-muted-border-color);
+  color: var(--mu-muted-color);
+}
+.terminal picture {
+  display: block;
+  padding: 0.45rem 0.55rem;
+  background: #241A14;
+}
+.terminal-demo {
+  display: block;
+  width: 100%;
+  height: auto;
+}
 .terminal pre, .usage-example pre, .accordion pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: normal;
 }
 .terminal pre { font-size: 0.85rem; line-height: 1.85; }
+.feature-list > div:nth-child(n) { --feature-accent: var(--mu-primary); }
 .feature-list dd { margin-left: 0; }
 .usage-example { margin-block: 2rem; }
 .usage-example h3 { margin-bottom: 0.6rem; }

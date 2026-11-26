@@ -53,3 +53,44 @@ run *ARGS:
 update:
     nix flake update
     cargo update
+
+# Record pages/demo.webp and pages/demo-still.png from ia-get.tape using ntrecord
+record:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    for tool in ntrecord ffmpeg; do
+        command -v "$tool" >/dev/null || {
+            printf "just record: %s not found; enter the Nix shell with 'nix develop'\n" "$tool" >&2
+            exit 1
+        }
+    done
+
+    cargo build --release --locked
+
+    repo_root="$PWD"
+    tmp_dir="$(mktemp -d)"
+
+    cleanup() {
+        rm -f -- "$repo_root/.demo.mp4"
+        if [[ -n "${tmp_dir:-}" && -d "$tmp_dir" ]]; then
+            rm -rf -- "$tmp_dir"
+        fi
+    }
+    trap cleanup EXIT
+
+    mkdir -p pages
+
+    font_env=()
+    if [[ -z "${NTRECORD_FONT_PATH:-}" && -d /run/current-system/sw/share/X11/fonts ]]; then
+        font_env=(NTRECORD_FONT_PATH=/run/current-system/sw/share/X11/fonts)
+    fi
+
+    env -u DIRENV_DIR -u DIRENV_FILE -u DIRENV_DIFF -u DIRENV_WATCHES \
+        -u PROMPT_COMMAND -u BASH_ENV \
+        PATH="$repo_root/target/release:$PATH" \
+        IA_GET_DEMO_DIR="$tmp_dir" \
+        "${font_env[@]}" \
+        ntrecord ia-get.tape
+
+    ffmpeg -y -v error -i "$repo_root/.demo.mp4" -c:v libwebp_anim -lossless 1 -loop 0 pages/demo.webp
