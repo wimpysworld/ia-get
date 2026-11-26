@@ -938,6 +938,13 @@ a:hover { color: var(--mu-primary-hover); }
 nav a { color: var(--mu-muted-color); }
 .brand { color: var(--mu-color); }
 .brand-mark { flex-basis: 40px; width: 40px; height: 40px; }
+.site-hero {
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.35fr);
+  gap: clamp(1.75rem, 3vw, 2.75rem);
+}
+.site-hero h1 {
+  font-size: clamp(1.9rem, 2.6vw, 2.3rem);
+}
 .terminal {
   border-color: var(--mu-muted-border-color);
   background: #241A14;
@@ -949,7 +956,7 @@ nav a { color: var(--mu-muted-color); }
 }
 .terminal picture {
   display: block;
-  padding: 0.45rem 0.55rem;
+  padding: 0;
   background: #241A14;
 }
 .terminal-demo {
@@ -963,6 +970,27 @@ nav a { color: var(--mu-muted-color); }
   word-break: normal;
 }
 .terminal pre { font-size: 0.85rem; line-height: 1.85; }
+.features {
+  display: block;
+}
+.features > .section-heading > p:not(.eyebrow) {
+  max-width: 40rem;
+}
+.feature-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2rem clamp(2rem, 4vw, 3.5rem);
+  margin-top: 2.25rem;
+}
+.feature-list > div {
+  border-top: 1px solid var(--mu-muted-border-color);
+  padding-top: 1.25rem;
+  margin-top: 0;
+}
+.feature-list > div + div {
+  margin-top: 0;
+  padding-top: 1.25rem;
+}
 .feature-list > div:nth-child(n) { --feature-accent: var(--mu-primary); }
 .feature-list dd { margin-left: 0; }
 .usage-example { margin-block: 2rem; }
@@ -973,8 +1001,93 @@ nav a { color: var(--mu-muted-color); }
 .accordion details[open] > summary { margin-bottom: 1rem; }
 .accordion pre { padding: 1rem; font-size: 0.85rem; }
 summary:focus-visible { outline: 3px solid var(--mu-primary); outline-offset: 5px; }
-.origin p:not(.eyebrow) { max-width: 48rem; color: var(--mu-muted-color); }
-.origin p:last-child { margin-bottom: 0; }
+.origin {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.6fr);
+  gap: clamp(2rem, 4vw, 4rem);
+  align-items: center;
+}
+.origin-copy p:not(.eyebrow) { max-width: 42rem; color: var(--mu-muted-color); }
+.origin-copy p:last-child { margin-bottom: 0; }
+.origin-media {
+  margin: 0;
+  justify-self: center;
+  text-align: center;
+  max-width: 240px;
+}
+.origin-cover-link {
+  position: relative;
+  display: inline-block;
+  border-radius: 3px;
+  transform: rotate(2deg);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  box-shadow:
+    3px 3px 0 #E6DAC4,
+    4px 4px 0 rgba(36, 26, 20, 0.16),
+    0 12px 24px -6px rgba(26, 20, 16, 0.3),
+    0 24px 42px -12px rgba(26, 20, 16, 0.22);
+}
+:root[data-theme="dark"] .origin-cover-link {
+  box-shadow:
+    3px 3px 0 #3E3024,
+    4px 4px 0 rgba(0, 0, 0, 0.5),
+    0 14px 28px -6px rgba(0, 0, 0, 0.6),
+    0 28px 48px -12px rgba(0, 0, 0, 0.5);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .origin-cover-link {
+    box-shadow:
+      3px 3px 0 #3E3024,
+      4px 4px 0 rgba(0, 0, 0, 0.5),
+      0 14px 28px -6px rgba(0, 0, 0, 0.6),
+      0 28px 48px -12px rgba(0, 0, 0, 0.5);
+  }
+}
+.origin-cover-link:is(:hover, :focus-visible) {
+  transform: rotate(0.5deg) translateY(-2px);
+}
+.origin-cover {
+  display: block;
+  width: 220px;
+  max-width: 100%;
+  height: auto;
+  border-radius: 3px;
+  border: 1px solid rgba(36, 26, 20, 0.18);
+}
+.origin-media figcaption {
+  margin-top: 1rem;
+  color: var(--mu-muted-color);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+@media (max-width: 960px) {
+  .site-hero {
+    grid-template-columns: 1fr;
+    gap: 2.25rem;
+  }
+}
+@media (max-width: 760px) {
+  .feature-list {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+    margin-top: 1.75rem;
+  }
+  .origin {
+    grid-template-columns: 1fr;
+    gap: 2.25rem;
+  }
+  .origin-media {
+    justify-self: start;
+    text-align: left;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .origin-cover-link,
+  .origin-cover-link:is(:hover, :focus-visible) {
+    transform: none;
+    transition: none;
+  }
+}
 .theme-picker select, .copy-button { border-color: var(--mu-form-element-border-color); }
 #theme-sun, #theme-moon { color: var(--mu-primary); }
 .copy-button[data-copied] { color: var(--mu-primary); border-color: var(--mu-primary); }
