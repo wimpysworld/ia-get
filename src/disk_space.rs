@@ -115,19 +115,6 @@ fn calculate_required_bytes_in_canonical_root(
     Ok(total)
 }
 
-/// Calculates the remaining byte count required to download `items` into `root`.
-///
-/// Accounts for already verified regular destination files and contained regular `.part` files,
-/// skips entries with unknown or zero expected size, and stops promptly when `signal` triggers.
-pub fn calculate_required_bytes(
-    root: &Path,
-    items: &[PlannedDownload],
-    signal: &ShutdownSignal,
-) -> Result<u64> {
-    let canonical_root = downloader::resolve_destination_root(root)?;
-    calculate_required_bytes_in_canonical_root(&canonical_root, items, signal)
-}
-
 fn ensure_sufficient_space(root: &Path, required: u64, available: u64) -> Result<()> {
     if required > available {
         return Err(IaGetError::InsufficientDiskSpace {
@@ -146,21 +133,13 @@ pub fn check_disk_space_with_available_and_signal(
     available_bytes: u64,
     signal: &ShutdownSignal,
 ) -> Result<()> {
-    let required = calculate_required_bytes(root, items, signal)?;
+    let canonical_root = downloader::resolve_destination_root(root)?;
+    let required = calculate_required_bytes_in_canonical_root(&canonical_root, items, signal)?;
     if required == 0 {
         return Ok(());
     }
 
     ensure_sufficient_space(root, required, available_bytes)
-}
-
-/// Checks whether `available_bytes` is sufficient for `items` in `root`.
-pub fn check_disk_space_with_available(
-    root: &Path,
-    items: &[PlannedDownload],
-    available_bytes: u64,
-) -> Result<()> {
-    check_disk_space_with_available_and_signal(root, items, available_bytes, &ShutdownSignal::new())
 }
 
 /// Checks available disk space on the destination volume for `root` against `items`,
@@ -187,11 +166,6 @@ pub fn check_disk_space_with_signal(
     ensure_sufficient_space(root, required, available)
 }
 
-/// Checks available disk space on the destination volume for `root` against `items`.
-pub fn check_disk_space(root: &Path, items: &[PlannedDownload]) -> Result<()> {
-    check_disk_space_with_signal(root, items, &ShutdownSignal::new())
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -208,6 +182,15 @@ mod tests {
         }
     }
 
+    fn required_bytes(
+        root: &Path,
+        items: &[PlannedDownload],
+        signal: &ShutdownSignal,
+    ) -> Result<u64> {
+        let canonical = downloader::resolve_destination_root(root)?;
+        calculate_required_bytes_in_canonical_root(&canonical, items, signal)
+    }
+
     #[test]
     fn calculate_required_bytes_sums_missing_skips_unknown_and_zero_and_saturates() {
         let sandbox = TempTestDir::new("disk-space-basic");
@@ -221,7 +204,7 @@ mod tests {
         ];
 
         assert_eq!(
-            calculate_required_bytes(sandbox.path(), &items, &signal).unwrap(),
+            required_bytes(sandbox.path(), &items, &signal).unwrap(),
             3_500
         );
 
@@ -230,7 +213,7 @@ mod tests {
             planned("huge2.bin", Some(100), None),
         ];
         assert_eq!(
-            calculate_required_bytes(sandbox.path(), &overflowing, &signal).unwrap(),
+            required_bytes(sandbox.path(), &overflowing, &signal).unwrap(),
             u64::MAX
         );
     }
@@ -323,8 +306,7 @@ mod tests {
 
         for (item, expected) in &cases {
             assert_eq!(
-                calculate_required_bytes(sandbox.path(), std::slice::from_ref(item), &signal)
-                    .unwrap(),
+                required_bytes(sandbox.path(), std::slice::from_ref(item), &signal).unwrap(),
                 *expected,
                 "case {}",
                 item.file_path
@@ -334,7 +316,7 @@ mod tests {
         let all_items: Vec<_> = cases.iter().map(|(item, _)| item.clone()).collect();
         let total_expected: u64 = cases.iter().map(|(_, expected)| *expected).sum();
         assert_eq!(
-            calculate_required_bytes(sandbox.path(), &all_items, &signal).unwrap(),
+            required_bytes(sandbox.path(), &all_items, &signal).unwrap(),
             total_expected
         );
     }
@@ -354,7 +336,7 @@ mod tests {
         ];
 
         assert_eq!(
-            calculate_required_bytes(sandbox.path(), &items, &signal).unwrap(),
+            required_bytes(sandbox.path(), &items, &signal).unwrap(),
             384
         );
     }
@@ -401,7 +383,7 @@ mod tests {
         ];
 
         assert_eq!(
-            calculate_required_bytes(sandbox.path(), &items, &signal).unwrap(),
+            required_bytes(sandbox.path(), &items, &signal).unwrap(),
             900
         );
     }
@@ -422,7 +404,7 @@ mod tests {
         ];
 
         assert!(matches!(
-            calculate_required_bytes(sandbox.path(), &items, &stopped),
+            required_bytes(sandbox.path(), &items, &stopped),
             Err(IaGetError::Interrupted)
         ));
         assert!(matches!(
@@ -442,8 +424,11 @@ mod tests {
 
         // Single-file exact fit and 1 MiB shortfall formatted via format_size
         let big = vec![planned("archive.iso", Some(2 * 1024 * 1024), None)];
-        check_disk_space_with_available(sandbox.path(), &big, 2 * 1024 * 1024).unwrap();
-        let err = check_disk_space_with_available(sandbox.path(), &big, 1024 * 1024).unwrap_err();
+        check_disk_space_with_available_and_signal(sandbox.path(), &big, 2 * 1024 * 1024, &signal)
+            .unwrap();
+        let err =
+            check_disk_space_with_available_and_signal(sandbox.path(), &big, 1024 * 1024, &signal)
+                .unwrap_err();
         assert!(matches!(
             &err,
             IaGetError::InsufficientDiskSpace {
@@ -465,8 +450,11 @@ mod tests {
         ];
         let required = 1_536;
         let available = required - 1;
-        check_disk_space_with_available(sandbox.path(), &multi, required).unwrap();
-        let err = check_disk_space_with_available(sandbox.path(), &multi, available).unwrap_err();
+        check_disk_space_with_available_and_signal(sandbox.path(), &multi, required, &signal)
+            .unwrap();
+        let err =
+            check_disk_space_with_available_and_signal(sandbox.path(), &multi, available, &signal)
+                .unwrap_err();
         assert!(matches!(
             &err,
             IaGetError::InsufficientDiskSpace {
@@ -486,12 +474,18 @@ mod tests {
             planned("extra.bin", Some(100), None),
         ];
         assert_eq!(
-            calculate_required_bytes(sandbox.path(), &saturated, &signal).unwrap(),
+            required_bytes(sandbox.path(), &saturated, &signal).unwrap(),
             u64::MAX
         );
-        check_disk_space_with_available(sandbox.path(), &saturated, u64::MAX).unwrap();
-        let sat_err =
-            check_disk_space_with_available(sandbox.path(), &saturated, u64::MAX - 1).unwrap_err();
+        check_disk_space_with_available_and_signal(sandbox.path(), &saturated, u64::MAX, &signal)
+            .unwrap();
+        let sat_err = check_disk_space_with_available_and_signal(
+            sandbox.path(),
+            &saturated,
+            u64::MAX - 1,
+            &signal,
+        )
+        .unwrap_err();
         assert!(matches!(
             sat_err,
             IaGetError::InsufficientDiskSpace {
@@ -505,6 +499,7 @@ mod tests {
     #[test]
     fn check_disk_space_handles_unknown_zero_and_mixed_entries() {
         let sandbox = TempTestDir::new("disk-space-unknown-mixed");
+        let signal = ShutdownSignal::new();
 
         for items in [
             vec![
@@ -516,8 +511,8 @@ mod tests {
                 planned("sub/unknown_b.bin", None, None),
             ],
         ] {
-            check_disk_space_with_available(sandbox.path(), &items, 0).unwrap();
-            check_disk_space(sandbox.path(), &items).unwrap();
+            check_disk_space_with_available_and_signal(sandbox.path(), &items, 0, &signal).unwrap();
+            check_disk_space_with_signal(sandbox.path(), &items, &signal).unwrap();
         }
 
         // Mixed known + None counts only known bytes
@@ -526,8 +521,9 @@ mod tests {
             planned("unknown.bin", None, None),
             planned("known_2.bin", Some(750), None),
         ];
-        check_disk_space_with_available(sandbox.path(), &mixed, 1_000).unwrap();
-        let err = check_disk_space_with_available(sandbox.path(), &mixed, 999).unwrap_err();
+        check_disk_space_with_available_and_signal(sandbox.path(), &mixed, 1_000, &signal).unwrap();
+        let err = check_disk_space_with_available_and_signal(sandbox.path(), &mixed, 999, &signal)
+            .unwrap_err();
         assert!(matches!(
             err,
             IaGetError::InsufficientDiskSpace {
@@ -541,12 +537,13 @@ mod tests {
     #[test]
     fn check_disk_space_queries_real_volume_for_small_and_impossibly_large_requirements() {
         let sandbox = TempTestDir::new("disk-space-real-fs");
+        let signal = ShutdownSignal::new();
 
         let tiny = vec![planned("tiny.txt", Some(1), None)];
-        check_disk_space(sandbox.path(), &tiny).unwrap();
+        check_disk_space_with_signal(sandbox.path(), &tiny, &signal).unwrap();
 
         let impossible = vec![planned("impossible.bin", Some(u64::MAX), None)];
-        let err = check_disk_space(sandbox.path(), &impossible).unwrap_err();
+        let err = check_disk_space_with_signal(sandbox.path(), &impossible, &signal).unwrap_err();
         assert!(matches!(
             err,
             IaGetError::InsufficientDiskSpace {
@@ -567,15 +564,15 @@ mod tests {
 
         for invalid in [&missing, &regular_file] {
             assert!(matches!(
-                calculate_required_bytes(invalid, &items, &signal),
+                required_bytes(invalid, &items, &signal),
                 Err(IaGetError::FileSystem(_))
             ));
             assert!(matches!(
-                check_disk_space_with_available(invalid, &items, 1_024),
+                check_disk_space_with_available_and_signal(invalid, &items, 1_024, &signal),
                 Err(IaGetError::FileSystem(_))
             ));
             assert!(matches!(
-                check_disk_space(invalid, &items),
+                check_disk_space_with_signal(invalid, &items, &signal),
                 Err(IaGetError::FileSystem(_))
             ));
         }

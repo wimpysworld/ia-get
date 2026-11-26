@@ -3,9 +3,6 @@
 /// User agent string for HTTP requests
 pub const USER_AGENT: &str = "ia-get";
 
-/// Regex pattern for validating archive.org details URLs
-pub const URL_PATTERN: &str = r"^https://archive\.org/details/[a-zA-Z0-9_\-.@]+/?$";
-
 /// Regex pattern for validating archive.org item identifiers
 pub const IDENTIFIER_PATTERN: &str = r"^[a-zA-Z0-9_\-.@]+$";
 

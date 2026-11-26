@@ -141,7 +141,7 @@ impl CookieSource {
 
 /// Returns `true` if `url` has a valid domain host equal to `archive.org` or
 /// a subdomain of `archive.org`.
-pub fn is_archive_org_host(url: &Url) -> bool {
+pub(crate) fn is_archive_org_host(url: &Url) -> bool {
     let Some(Host::Domain(domain)) = url.host() else {
         return false;
     };

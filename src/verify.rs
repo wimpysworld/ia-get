@@ -151,16 +151,6 @@ fn print_verification_summary(summary: &VerificationSummary) {
 }
 
 /// Verifies local files inside `root` against `files` without creating, modifying, or deleting
-/// any files or directories.
-pub fn verify_files(
-    root: &Path,
-    files: &[XmlFile],
-    signal: &ShutdownSignal,
-) -> Result<VerificationSummary> {
-    verify_files_with_logger(root, files, signal, &VerboseLogger::disabled())
-}
-
-/// Verifies local files inside `root` against `files` without creating, modifying, or deleting
 /// any files or directories, emitting diagnostic logs to `logger`.
 pub fn verify_files_with_logger(
     root: &Path,
@@ -360,10 +350,10 @@ mod tests {
             );
             assert!(
                 matches!(
-                    verify_files(invalid, &files, &signal),
+                    verify_files_with_logger(invalid, &files, &signal, &VerboseLogger::disabled()),
                     Err(IaGetError::FileSystem(_))
                 ),
-                "verify_files must reject {invalid:?}"
+                "verify_files_with_logger must reject {invalid:?}"
             );
         }
 
@@ -440,7 +430,9 @@ mod tests {
 
         let before = snapshot_dir(sandbox.path());
         let signal = ShutdownSignal::new();
-        let summary = verify_files(sandbox.path(), &files, &signal).unwrap();
+        let summary =
+            verify_files_with_logger(sandbox.path(), &files, &signal, &VerboseLogger::disabled())
+                .unwrap();
         let after = snapshot_dir(sandbox.path());
 
         assert_eq!(summary.ok, 7);
@@ -518,7 +510,9 @@ mod tests {
 
         let before = snapshot_dir(sandbox.path());
         let signal = ShutdownSignal::new();
-        let summary = verify_files(sandbox.path(), &files, &signal).unwrap();
+        let summary =
+            verify_files_with_logger(sandbox.path(), &files, &signal, &VerboseLogger::disabled())
+                .unwrap();
         let after = snapshot_dir(sandbox.path());
 
         assert_eq!(summary.ok, 0);
@@ -653,7 +647,9 @@ mod tests {
 
         let before = snapshot_dir(sandbox.path());
         let signal = ShutdownSignal::new();
-        let summary = verify_files(sandbox.path(), &files, &signal).unwrap();
+        let summary =
+            verify_files_with_logger(sandbox.path(), &files, &signal, &VerboseLogger::disabled())
+                .unwrap();
         let after = snapshot_dir(sandbox.path());
 
         assert_eq!(summary.ok, 0);
@@ -731,7 +727,9 @@ mod tests {
 
         let files = vec![xml_file("secret.bin", Some(16), None)];
         let signal = ShutdownSignal::new();
-        let summary = verify_files(sandbox.path(), &files, &signal).unwrap();
+        let summary =
+            verify_files_with_logger(sandbox.path(), &files, &signal, &VerboseLogger::disabled())
+                .unwrap();
 
         drop(restore_guard);
 
@@ -756,7 +754,9 @@ mod tests {
         let signal = ShutdownSignal::new();
         signal.trigger();
 
-        let summary = verify_files(sandbox.path(), &files, &signal).unwrap();
+        let summary =
+            verify_files_with_logger(sandbox.path(), &files, &signal, &VerboseLogger::disabled())
+                .unwrap();
         assert!(summary.interrupted);
         assert_eq!(summary.ok, 0);
         assert!(summary.failed.is_empty());

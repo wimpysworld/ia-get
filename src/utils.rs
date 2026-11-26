@@ -11,7 +11,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use url::Url;
 
 /// Spinner tick interval in milliseconds
-pub const SPINNER_TICK_INTERVAL: u64 = 100;
+const SPINNER_TICK_INTERVAL: u64 = 100;
 
 /// Size constants for formatting
 const KB: u64 = 1024;
@@ -44,14 +44,6 @@ impl ArchiveUrl {
     pub fn identifier(&self) -> &str {
         match self {
             Self::Details { identifier } | Self::Download { identifier, .. } => identifier,
-        }
-    }
-
-    /// Returns the decoded relative file path for download URLs, or `None` for details URLs.
-    pub fn file_path(&self) -> Option<&str> {
-        match self {
-            Self::Details { .. } => None,
-            Self::Download { file_path, .. } => Some(file_path),
         }
     }
 
@@ -207,28 +199,6 @@ pub fn parse_archive_url(url: &str) -> Result<ArchiveUrl> {
     }
 
     Err(invalid())
-}
-
-/// Validates an archive.org details or direct download URL format
-///
-/// # Arguments
-/// * `url` - The URL to validate
-///
-/// # Returns
-/// * `Ok(())` if the URL is valid
-/// * `Err(IaGetError::UrlFormat)` if the URL format is invalid
-///
-/// # Examples
-/// ```
-/// use ia_get::utils::validate_archive_url;
-///
-/// assert!(validate_archive_url("https://archive.org/details/valid-item").is_ok());
-/// assert!(validate_archive_url("https://archive.org/details/valid-item/").is_ok());
-/// assert!(validate_archive_url("https://archive.org/download/valid-item/dir/file.pdf").is_ok());
-/// assert!(validate_archive_url("https://example.com/invalid").is_err());
-/// ```
-pub fn validate_archive_url(url: &str) -> Result<()> {
-    parse_archive_url(url).map(|_| ())
 }
 
 /// Returns the shared draw target used by all `indicatif` progress indicators.
@@ -922,7 +892,6 @@ mod tests {
                 "url: {url:?}"
             );
             assert_eq!(parsed.identifier(), expected_id, "url: {url:?}");
-            assert_eq!(parsed.file_path(), None, "url: {url:?}");
             assert_eq!(
                 parsed.details_url(),
                 format!("https://archive.org/details/{expected_id}"),
@@ -932,10 +901,6 @@ mod tests {
                 parsed.xml_url(),
                 format!("https://archive.org/download/{expected_id}/{expected_id}_files.xml"),
                 "url: {url:?}"
-            );
-            assert!(
-                validate_archive_url(url).is_ok(),
-                "validate_archive_url should accept {url:?}"
             );
         }
     }
@@ -1002,7 +967,6 @@ mod tests {
                 "url: {url:?}"
             );
             assert_eq!(parsed.identifier(), expected_id, "url: {url:?}");
-            assert_eq!(parsed.file_path(), Some(expected_path), "url: {url:?}");
             assert_eq!(
                 parsed.details_url(),
                 format!("https://archive.org/details/{expected_id}"),
@@ -1012,10 +976,6 @@ mod tests {
                 parsed.xml_url(),
                 format!("https://archive.org/download/{expected_id}/{expected_id}_files.xml"),
                 "url: {url:?}"
-            );
-            assert!(
-                validate_archive_url(url).is_ok(),
-                "validate_archive_url should accept {url:?}"
             );
         }
     }
@@ -1082,11 +1042,6 @@ mod tests {
             assert!(
                 matches!(parse_err, IaGetError::UrlFormat(_)),
                 "expected UrlFormat from parse_archive_url({url:?}), got {parse_err:?}"
-            );
-            let validate_err = validate_archive_url(url).unwrap_err();
-            assert!(
-                matches!(validate_err, IaGetError::UrlFormat(_)),
-                "expected UrlFormat from validate_archive_url({url:?}), got {validate_err:?}"
             );
         }
     }

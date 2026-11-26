@@ -444,13 +444,6 @@ async fn run_planned_downloads_with_logger<F>(
 where
     F: FnOnce(&Path, &[disk_space::PlannedDownload], &downloader::ShutdownSignal) -> Result<()>,
 {
-    downloader::validate_download_paths_for_dir(
-        output_dir,
-        plan.items
-            .iter()
-            .map(|item| (item.file_path.as_str(), item.file_path.as_str())),
-    )?;
-
     check_space(output_dir, &plan.items, signal)?;
 
     print_sanitization_warnings(&plan.sanitized);
@@ -677,7 +670,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let options = downloader::DownloadOptions {
         retry_policy: downloader::RetryPolicy::default(),
         limit_rate: cli.limit_rate,
-        verbose: cli.verbose,
     };
 
     let summary = run_planned_downloads_with_logger(
@@ -740,15 +732,10 @@ mod tests {
         downloader::http_client_builder().build().unwrap()
     }
 
-    fn fast_options(
-        max_retries: u32,
-        limit_rate: Option<u64>,
-        verbose: bool,
-    ) -> downloader::DownloadOptions {
+    fn fast_options(max_retries: u32, limit_rate: Option<u64>) -> downloader::DownloadOptions {
         downloader::DownloadOptions {
             retry_policy: fast_retry_policy(max_retries),
             limit_rate,
-            verbose,
         }
     }
 
@@ -1571,7 +1558,9 @@ mod tests {
         assert_eq!(single_plan.items[0].file_path, "Season 1/Episode_.pdf");
 
         // Host filesystem case-sensitivity check leaves missing output dir untouched and cleans probes
-        let host_sensitivity = downloader::detect_path_case_sensitivity(&missing_dir);
+        let probe_dir = TempTestDir::new("plan-downloads-case-oracle");
+        probe_dir.write("case_probe.txt", b"x");
+        let host_is_case_insensitive = probe_dir.join("CASE_PROBE.TXT").exists();
         let case_result = plan_downloads_for_dir(
             XmlFiles {
                 files: vec![
@@ -1582,13 +1571,10 @@ mod tests {
             &base_url,
             &missing_dir,
         );
-        match host_sensitivity {
-            downloader::PathCaseSensitivity::CaseSensitive => {
-                assert_eq!(case_result.unwrap().items.len(), 2);
-            }
-            downloader::PathCaseSensitivity::CaseInsensitive => {
-                assert!(matches!(case_result, Err(IaGetError::PathCollision { .. })));
-            }
+        if host_is_case_insensitive {
+            assert!(matches!(case_result, Err(IaGetError::PathCollision { .. })));
+        } else {
+            assert_eq!(case_result.unwrap().items.len(), 2);
         }
         assert!(!missing_dir.exists());
         assert_eq!(std::fs::read_dir(sandbox.path()).unwrap().count(), 0);
@@ -1772,7 +1758,7 @@ mod tests {
         let client = test_client();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
-        let options = fast_options(1, None, false);
+        let options = fast_options(1, None);
 
         let (all_files, base_url) = fetch_test_xml(&server, &client, 1, &signal).await;
         let selected = select_target_files(all_files, &target).unwrap();
@@ -1855,7 +1841,7 @@ mod tests {
         let spinner = indicatif::ProgressBar::hidden();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
-        let options = fast_options(1, None, false);
+        let options = fast_options(1, None);
 
         let (all_files, base_url) = fetch_test_xml(&server, &client, 1, &signal).await;
         let filtered = select_and_filter_files(all_files, &target, &file_filter).unwrap();
@@ -2085,7 +2071,7 @@ mod tests {
         let client = test_client();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
-        let options = fast_options(0, None, false);
+        let options = fast_options(0, None);
         let filter = FileFilter::compile(["*.bin"]).unwrap();
         let target = parse_archive_url("https://archive.org/details/item").unwrap();
         let required_bytes = (alpha.len() + beta.len()) as u64;
@@ -2250,7 +2236,7 @@ mod tests {
 
         let plan = plan_downloads_for_dir(files, &base_url, &verified_dir).unwrap();
         assert!(matches!(
-            disk_space::check_disk_space(&verified_dir, &plan.items),
+            disk_space::check_disk_space_with_signal(&verified_dir, &plan.items, &signal),
             Err(IaGetError::InsufficientDiskSpace {
                 required: u64::MAX,
                 ..
@@ -2285,7 +2271,7 @@ mod tests {
         let client = test_client();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
-        let options = fast_options(0, cli.limit_rate, false);
+        let options = fast_options(0, cli.limit_rate);
 
         let (all_files, base_url) = fetch_test_xml(&server, &client, 0, &signal).await;
         let plan = plan_downloads_for_dir(all_files, &base_url, output_dir.path()).unwrap();
@@ -2331,12 +2317,15 @@ mod tests {
         build_http_client(&downloader::ProxyConfig::default())
             .expect("client should build without proxies");
 
-        let config = downloader::ProxyConfig::from_lookup(|name| match name {
-            "HTTP_PROXY" => Some("http://127.0.0.1:8080".to_string()),
-            "HTTPS_PROXY" => Some("https://127.0.0.1:8443".to_string()),
-            "ALL_PROXY" => Some("socks5h://127.0.0.1:1080".to_string()),
-            "NO_PROXY" => Some("localhost,127.0.0.1".to_string()),
-            _ => None,
+        let config = downloader::ProxyConfig::from_os_lookup(|name| {
+            match name {
+                "HTTP_PROXY" => Some("http://127.0.0.1:8080"),
+                "HTTPS_PROXY" => Some("https://127.0.0.1:8443"),
+                "ALL_PROXY" => Some("socks5h://127.0.0.1:1080"),
+                "NO_PROXY" => Some("localhost,127.0.0.1"),
+                _ => None,
+            }
+            .map(std::ffi::OsString::from)
         })
         .unwrap();
 
@@ -2354,8 +2343,8 @@ mod tests {
         ])
         .await;
         let proxy_url = format!("http://127.0.0.1:{}", proxy_server.port());
-        let proxy_config = downloader::ProxyConfig::from_lookup(|name| match name {
-            "HTTP_PROXY" => Some(proxy_url.clone()),
+        let proxy_config = downloader::ProxyConfig::from_os_lookup(|name| match name {
+            "HTTP_PROXY" => Some(std::ffi::OsString::from(&proxy_url)),
             _ => None,
         })
         .unwrap();
@@ -2431,7 +2420,7 @@ mod tests {
         let client = test_client();
         let spinner = indicatif::ProgressBar::hidden();
         let signal = downloader::ShutdownSignal::new();
-        let options = fast_options(0, None, true);
+        let options = fast_options(0, None);
 
         is_url_accessible_with_logger(
             &details_url,

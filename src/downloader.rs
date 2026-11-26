@@ -5,12 +5,12 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::future::Future;
-use std::hash::{BuildHasher, Hash};
+use std::hash::BuildHasher;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use colored::*;
 use reqwest::header::HeaderValue;
@@ -23,8 +23,8 @@ use crate::constants::{
 use crate::cookie::CookieSource;
 use crate::error::IaGetError; // Import IaGetError for explicit error conversion
 use crate::utils::{
-    create_progress_bar, format_duration, format_run_summary, format_size, format_transfer_rate,
-    print_run_summary, sanitize_url_for_log, VerboseLogger,
+    create_progress_bar, format_duration, format_size, format_transfer_rate, print_run_summary,
+    sanitize_url_for_log, VerboseLogger,
 };
 use crate::Result; // Import utility functions
 
@@ -58,12 +58,11 @@ impl Default for RetryPolicy {
 /// so network stalls cannot accumulate multi-second unthrottled bursts.
 const RATE_LIMIT_STALL_RESET_WINDOW: Duration = Duration::from_millis(100);
 
-/// Configuration controlling download retries, bandwidth throttling, and verbose logging.
+/// Configuration controlling download retries and bandwidth throttling.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DownloadOptions {
     pub retry_policy: RetryPolicy,
     pub limit_rate: Option<u64>,
-    pub verbose: bool,
 }
 
 /// Parses a bandwidth limit string into bytes per second.
@@ -331,226 +330,31 @@ pub fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
     !err.is_builder() && !err.is_redirect() && err.status().is_none_or(is_retryable_status)
 }
 
-fn parse_ascii_uint<T: std::str::FromStr>(input: &str, expected_len: Option<usize>) -> Option<T> {
-    let valid_len = expected_len.map_or(!input.is_empty(), |len| input.len() == len);
-    if !valid_len || !input.bytes().all(|b| b.is_ascii_digit()) {
+fn parse_ascii_u64(input: &str) -> Option<u64> {
+    if input.is_empty() || !input.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    input.parse::<T>().ok()
-}
-
-fn is_short_weekday(input: &str) -> bool {
-    matches!(input, "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat" | "Sun")
-}
-
-fn is_long_weekday(input: &str) -> bool {
-    matches!(
-        input,
-        "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday" | "Sunday"
-    )
-}
-
-fn parse_month(input: &str) -> Option<u8> {
-    match input {
-        "Jan" => Some(1),
-        "Feb" => Some(2),
-        "Mar" => Some(3),
-        "Apr" => Some(4),
-        "May" => Some(5),
-        "Jun" => Some(6),
-        "Jul" => Some(7),
-        "Aug" => Some(8),
-        "Sep" => Some(9),
-        "Oct" => Some(10),
-        "Nov" => Some(11),
-        "Dec" => Some(12),
-        _ => None,
-    }
-}
-
-fn parse_hms(input: &str) -> Option<(u8, u8, u8)> {
-    let bytes = input.as_bytes();
-    if bytes.len() != 8 || bytes[2] != b':' || bytes[5] != b':' {
-        return None;
-    }
-    let hour = parse_ascii_uint::<u8>(&input[0..2], Some(2))?;
-    let minute = parse_ascii_uint::<u8>(&input[3..5], Some(2))?;
-    let second = parse_ascii_uint::<u8>(&input[6..8], Some(2))?;
-    if hour > 23 || minute > 59 || second > 59 {
-        return None;
-    }
-    Some((hour, minute, second))
-}
-
-fn is_leap_year(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
-}
-
-fn days_in_month(year: i64, month: u8) -> u8 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 => {
-            if is_leap_year(year) {
-                29
-            } else {
-                28
-            }
-        }
-        _ => 0,
-    }
-}
-
-fn days_from_civil(year: i64, month: u8, day: u8) -> i64 {
-    let y = year - i64::from(month <= 2);
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400);
-    let m = i64::from(month);
-    let d = i64::from(day);
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-fn civil_year_from_days(days_since_epoch: i64) -> i64 {
-    let z = days_since_epoch + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    y + i64::from(m <= 2)
-}
-
-fn system_time_to_unix_nanos(time: SystemTime) -> i128 {
-    match time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => {
-            i128::from(duration.as_secs()) * 1_000_000_000 + i128::from(duration.subsec_nanos())
-        }
-        Err(err) => {
-            let duration = err.duration();
-            -(i128::from(duration.as_secs()) * 1_000_000_000 + i128::from(duration.subsec_nanos()))
-        }
-    }
-}
-
-fn parse_imf_fixdate(input: &str) -> Option<(i64, u8, u8, u8, u8, u8)> {
-    if input.len() != 29 {
-        return None;
-    }
-    let bytes = input.as_bytes();
-    if !is_short_weekday(&input[0..3])
-        || &input[3..5] != ", "
-        || bytes[7] != b' '
-        || bytes[11] != b' '
-        || bytes[16] != b' '
-        || &input[25..29] != " GMT"
-    {
-        return None;
-    }
-    let day = parse_ascii_uint::<u8>(&input[5..7], Some(2))?;
-    let month = parse_month(&input[8..11])?;
-    let year = parse_ascii_uint::<i64>(&input[12..16], Some(4))?;
-    let (hour, minute, second) = parse_hms(&input[17..25])?;
-    Some((year, month, day, hour, minute, second))
-}
-
-fn parse_rfc850_date(input: &str, now_year: i64) -> Option<(i64, u8, u8, u8, u8, u8)> {
-    let (weekday, rest) = input.split_once(", ")?;
-    if !is_long_weekday(weekday) || rest.len() != 22 {
-        return None;
-    }
-    let bytes = rest.as_bytes();
-    if bytes[2] != b'-' || bytes[6] != b'-' || bytes[9] != b' ' || &rest[18..22] != " GMT" {
-        return None;
-    }
-    let day = parse_ascii_uint::<u8>(&rest[0..2], Some(2))?;
-    let month = parse_month(&rest[3..6])?;
-    let two_digit_year = parse_ascii_uint::<i64>(&rest[7..9], Some(2))?;
-    let (hour, minute, second) = parse_hms(&rest[10..18])?;
-
-    let mut year = (now_year / 100) * 100 + two_digit_year;
-    if year > now_year + 50 {
-        year -= 100;
-    } else if year + 50 <= now_year {
-        year += 100;
-    }
-
-    Some((year, month, day, hour, minute, second))
-}
-
-fn parse_asctime_date(input: &str) -> Option<(i64, u8, u8, u8, u8, u8)> {
-    if input.len() != 24 {
-        return None;
-    }
-    let bytes = input.as_bytes();
-    if !is_short_weekday(&input[0..3])
-        || bytes[3] != b' '
-        || bytes[7] != b' '
-        || bytes[10] != b' '
-        || bytes[19] != b' '
-    {
-        return None;
-    }
-    let month = parse_month(&input[4..7])?;
-    let day_str = &input[8..10];
-    let day = if let Some(single_digit) = day_str.strip_prefix(' ') {
-        parse_ascii_uint::<u8>(single_digit, Some(1))?
-    } else {
-        parse_ascii_uint::<u8>(day_str, Some(2))?
-    };
-    let (hour, minute, second) = parse_hms(&input[11..19])?;
-    let year = parse_ascii_uint::<i64>(&input[20..24], Some(4))?;
-    Some((year, month, day, hour, minute, second))
+    input.parse::<u64>().ok()
 }
 
 /// Parses an RFC 9110 Section 10.2.3 `Retry-After` header (delta-seconds or HTTP-date)
 /// and clamps the resulting delay to `max_delay`.
 pub fn parse_retry_after(value: &str, now: SystemTime, max_delay: Duration) -> Option<Duration> {
     let trimmed = value.trim_matches(|c| c == ' ' || c == '\t');
-    if trimmed.is_empty() || !trimmed.is_ascii() {
+    if trimmed.is_empty() || !trimmed.is_ascii() || trimmed.bytes().any(|b| b.is_ascii_control()) {
         return None;
     }
 
     if trimmed.bytes().all(|b| b.is_ascii_digit()) {
-        return Some(match parse_ascii_uint::<u64>(trimmed, None) {
-            Some(secs) => Duration::from_secs(secs).min(max_delay),
-            None => max_delay,
+        return Some(match trimmed.parse::<u64>() {
+            Ok(secs) => Duration::from_secs(secs).min(max_delay),
+            Err(_) => max_delay,
         });
     }
 
-    let now_nanos = system_time_to_unix_nanos(now);
-    let now_secs = now_nanos.div_euclid(1_000_000_000);
-    let now_days = now_secs.div_euclid(86_400) as i64;
-    let now_year = civil_year_from_days(now_days);
-
-    let (year, month, day, hour, minute, second) = parse_imf_fixdate(trimmed)
-        .or_else(|| parse_rfc850_date(trimmed, now_year))
-        .or_else(|| parse_asctime_date(trimmed))?;
-
-    if day == 0 || day > days_in_month(year, month) {
-        return None;
-    }
-
-    let target_secs = i128::from(days_from_civil(year, month, day)) * 86_400
-        + i128::from(hour) * 3600
-        + i128::from(minute) * 60
-        + i128::from(second);
-    let target_nanos = target_secs * 1_000_000_000;
-    let delta_nanos = target_nanos - now_nanos;
-
-    if delta_nanos <= 0 {
-        return Some(Duration::ZERO);
-    }
-
-    let max_nanos =
-        i128::from(max_delay.as_secs()) * 1_000_000_000 + i128::from(max_delay.subsec_nanos());
-    let clamped_nanos = delta_nanos.min(max_nanos);
-    let secs = (clamped_nanos / 1_000_000_000) as u64;
-    let subsec_nanos = (clamped_nanos % 1_000_000_000) as u32;
-    Some(Duration::new(secs, subsec_nanos))
+    let target = httpdate::parse_http_date(trimmed).ok()?;
+    let delta = target.duration_since(now).unwrap_or(Duration::ZERO);
+    Some(delta.min(max_delay))
 }
 
 fn random_u64() -> u64 {
@@ -607,17 +411,6 @@ fn compute_retry_delay_with_source(
         compute_backoff_delay_with_sample(attempt, policy, random_u64()),
         "backoff",
     )
-}
-
-/// Computes the retry delay for a 1-based `attempt`, preferring a valid `Retry-After` header
-/// and falling back to jittered exponential backoff otherwise.
-pub fn compute_retry_delay(
-    attempt: u32,
-    retry_after_header: Option<&str>,
-    now: SystemTime,
-    policy: &RetryPolicy,
-) -> Duration {
-    compute_retry_delay_with_source(attempt, retry_after_header, now, policy).0
 }
 
 /// Supported proxy URL schemes for environment-based proxy configuration.
@@ -757,14 +550,6 @@ where
 }
 
 impl ProxyConfig {
-    /// Resolves and validates proxy configuration from a string lookup function.
-    pub fn from_lookup<F>(lookup: F) -> Result<Self>
-    where
-        F: Fn(&str) -> Option<String>,
-    {
-        Self::from_os_lookup(|name| lookup(name).map(OsString::from))
-    }
-
     /// Resolves and validates proxy configuration from an OS-string lookup function.
     pub fn from_os_lookup<F>(lookup: F) -> Result<Self>
     where
@@ -863,13 +648,6 @@ pub fn http_client_builder_with_proxy(proxy_config: &ProxyConfig) -> Result<Clie
     }
 
     Ok(builder)
-}
-
-/// Returns a [`reqwest::ClientBuilder`] with automatic redirect following disabled
-/// and proxy configuration loaded from the current process environment.
-pub fn http_client_builder_from_env() -> Result<ClientBuilder> {
-    let proxy_config = ProxyConfig::from_env()?;
-    http_client_builder_with_proxy(&proxy_config)
 }
 
 fn is_redirect_status(status: StatusCode) -> bool {
@@ -1226,30 +1004,6 @@ where
     sleep_interruptible(delay, signal).await
 }
 
-/// Sends an HTTP request with retries on transient transport errors and retryable HTTP statuses,
-/// following redirects manually per attempt and honouring `Retry-After` headers and `ShutdownSignal`.
-pub async fn send_with_retry<F, H>(
-    initial_url: &Url,
-    policy: &RetryPolicy,
-    signal: &ShutdownSignal,
-    build_request: F,
-    on_retry: H,
-) -> Result<Response>
-where
-    F: FnMut(&Url) -> Result<RequestBuilder>,
-    H: FnMut(&RetryEvent<'_>),
-{
-    send_with_retry_with_logger(
-        initial_url,
-        policy,
-        signal,
-        &VerboseLogger::disabled(),
-        build_request,
-        on_retry,
-    )
-    .await
-}
-
 /// Sends an HTTP request with retries and diagnostic logging on transient transport errors and
 /// retryable HTTP statuses, following redirects manually per attempt and honouring `Retry-After`
 /// headers and `ShutdownSignal`.
@@ -1299,31 +1053,6 @@ where
             }
         }
     }
-}
-
-/// Fetches a text response body with retries on transient transport errors, retryable HTTP
-/// statuses, and transient body read errors, following redirects manually per attempt and
-/// honouring `Retry-After` and `ShutdownSignal`.
-pub async fn fetch_text_with_retry<F, H>(
-    initial_url: &Url,
-    policy: &RetryPolicy,
-    signal: &ShutdownSignal,
-    build_request: F,
-    on_retry: H,
-) -> Result<String>
-where
-    F: FnMut(&Url) -> Result<RequestBuilder>,
-    H: FnMut(&RetryEvent<'_>),
-{
-    fetch_text_with_retry_with_logger(
-        initial_url,
-        policy,
-        signal,
-        &VerboseLogger::disabled(),
-        build_request,
-        on_retry,
-    )
-    .await
 }
 
 /// Fetches a text response body with retries and diagnostic logging on transient transport errors,
@@ -1450,13 +1179,13 @@ fn parse_content_range(header: &str) -> Option<ContentRange> {
     let (range_part, total_part) = range_spec.split_once('/')?;
 
     if range_part == "*" {
-        let complete_length = parse_ascii_uint::<u64>(total_part, None)?;
+        let complete_length = parse_ascii_u64(total_part)?;
         return Some(ContentRange::Unsatisfied { complete_length });
     }
 
     let (start_str, end_str) = range_part.split_once('-')?;
-    let start = parse_ascii_uint::<u64>(start_str, None)?;
-    let end = parse_ascii_uint::<u64>(end_str, None)?;
+    let start = parse_ascii_u64(start_str)?;
+    let end = parse_ascii_u64(end_str)?;
 
     if start > end {
         return None;
@@ -1465,7 +1194,7 @@ fn parse_content_range(header: &str) -> Option<ContentRange> {
     let complete_length = if total_part == "*" {
         None
     } else {
-        let total = parse_ascii_uint::<u64>(total_part, None)?;
+        let total = parse_ascii_u64(total_part)?;
         if end >= total {
             return None;
         }
@@ -1957,28 +1686,6 @@ pub enum PathCaseSensitivity {
     CaseInsensitive,
 }
 
-/// Guard that removes a temporary filesystem probe file when dropped.
-struct ProbeFileGuard(PathBuf);
-
-impl Drop for ProbeFileGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
-/// Returns the default filesystem case sensitivity for the current target platform when a
-/// directory cannot be probed directly.
-const fn default_platform_case_sensitivity() -> PathCaseSensitivity {
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
-    {
-        PathCaseSensitivity::CaseInsensitive
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
-    {
-        PathCaseSensitivity::CaseSensitive
-    }
-}
-
 /// Resolves `dir` (or its nearest existing ancestor directory) for filesystem probing.
 fn resolve_existing_probe_dir(dir: &Path) -> Option<PathBuf> {
     if dir.as_os_str().is_empty() {
@@ -2077,68 +1784,6 @@ fn probe_existing_child_case_sensitivity(probe_dir: &Path) -> Option<PathCaseSen
     None
 }
 
-/// Probes case sensitivity inside `probe_dir` by creating and immediately removing a unique
-/// zero-byte file with `create_new(true)`.
-fn probe_temp_file_case_sensitivity(probe_dir: &Path) -> Option<PathCaseSensitivity> {
-    let pid = std::process::id();
-
-    for _ in 0..MAX_TEMP_CASE_PROBE_ATTEMPTS {
-        let seq = CASE_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let lower_path = probe_dir.join(format!(".ia-get-case-probe-{pid}-{seq}-a"));
-        let upper_path = probe_dir.join(format!(".ia-get-case-probe-{pid}-{seq}-A"));
-
-        match fs::symlink_metadata(&upper_path) {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Ok(_) => continue,
-            Err(_) => return None,
-        }
-
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        configure_no_follow(&mut options);
-
-        let file = match options.open(&lower_path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return None,
-        };
-        let _guard = ProbeFileGuard(lower_path);
-        drop(file);
-
-        return match fs::symlink_metadata(&upper_path) {
-            Ok(_) => Some(PathCaseSensitivity::CaseInsensitive),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                Some(PathCaseSensitivity::CaseSensitive)
-            }
-            Err(_) => None,
-        };
-    }
-
-    None
-}
-
-/// Detects whether the filesystem hosting `dir` (or its nearest existing ancestor directory when
-/// `dir` does not exist yet) treats filenames as case-sensitive or case-insensitive.
-///
-/// Tries a read-only probe of existing entries inside the directory first, then a temporary
-/// probe file with guaranteed cleanup, and falls back to the platform default when the directory
-/// is unreadable or unwritable.
-pub fn detect_path_case_sensitivity(dir: &Path) -> PathCaseSensitivity {
-    let Some(probe_dir) = resolve_existing_probe_dir(dir) else {
-        return default_platform_case_sensitivity();
-    };
-
-    if let Some(sensitivity) = probe_existing_child_case_sensitivity(&probe_dir) {
-        return sensitivity;
-    }
-
-    if let Some(sensitivity) = probe_temp_file_case_sensitivity(&probe_dir) {
-        return sensitivity;
-    }
-
-    default_platform_case_sensitivity()
-}
-
 /// Normalises a relative destination path into a collision-detection key.
 fn collision_path_key(path: &Path) -> PathBuf {
     validate_relative_path(path).unwrap_or_else(|_| path.to_path_buf())
@@ -2160,102 +1805,54 @@ fn format_collision_path(path: &Path) -> String {
     }
 }
 
-/// Normalises a relative destination path into a Unicode case-folded key for case-insensitive
-/// collision detection.
-fn case_folded_collision_key(path: &Path) -> String {
-    format_collision_path(path).to_lowercase()
-}
-
-/// Checks planned `(entry_label, local_path)` pairs for final and `.part` staging collisions
-/// using `make_key` to derive comparison keys while preserving exact display paths in errors.
-fn validate_collision_keys<K, F>(
-    entries: &[(&str, &str)],
-    mut make_key: F,
-    reason_suffix: &str,
-) -> Result<()>
-where
-    K: Eq + Hash,
-    F: FnMut(&Path) -> K,
-{
-    let mut final_paths: HashMap<K, String> = HashMap::new();
-    let mut staging_paths: HashMap<K, String> = HashMap::new();
+/// Checks planned `(entry_label, local_path)` pairs for exact final and `.part` staging collisions.
+fn validate_exact_collisions(entries: &[(&str, &str)]) -> Result<()> {
+    let mut final_paths: HashMap<PathBuf, String> = HashMap::new();
+    let mut staging_paths: HashMap<PathBuf, String> = HashMap::new();
 
     for &(entry_label, local_path) in entries {
         let clean_final = collision_path_key(Path::new(local_path));
         let part_path = part_file_path(local_path);
         let clean_staging = collision_path_key(&part_path);
 
-        let final_key = make_key(&clean_final);
-        let staging_key = make_key(&clean_staging);
-
-        if let Some(first_entry) = final_paths.get(&final_key) {
+        if let Some(first_entry) = final_paths.get(&clean_final) {
             return Err(IaGetError::PathCollision {
                 local_path: format_collision_path(&clean_final),
                 first_entry: first_entry.clone(),
                 second_entry: entry_label.to_string(),
-                reason: format!("both entries map to the same destination path{reason_suffix}"),
+                reason: "both entries map to the same destination path".to_string(),
             });
         }
 
-        if let Some(first_entry) = staging_paths.get(&final_key) {
+        if let Some(first_entry) = staging_paths.get(&clean_final) {
             return Err(IaGetError::PathCollision {
                 local_path: format_collision_path(&clean_final),
                 first_entry: first_entry.clone(),
                 second_entry: entry_label.to_string(),
-                reason: format!(
-                    "destination path collides with staging '.part' path{reason_suffix}"
-                ),
+                reason: "destination path collides with staging '.part' path".to_string(),
             });
         }
 
-        if let Some(first_entry) = final_paths.get(&staging_key) {
+        if let Some(first_entry) = final_paths.get(&clean_staging) {
             return Err(IaGetError::PathCollision {
                 local_path: format_collision_path(&clean_staging),
                 first_entry: first_entry.clone(),
                 second_entry: entry_label.to_string(),
-                reason: format!(
-                    "staging '.part' path collides with destination path{reason_suffix}"
-                ),
+                reason: "staging '.part' path collides with destination path".to_string(),
             });
         }
 
-        if let Some(first_entry) = staging_paths.get(&staging_key) {
+        if let Some(first_entry) = staging_paths.get(&clean_staging) {
             return Err(IaGetError::PathCollision {
                 local_path: format_collision_path(&clean_staging),
                 first_entry: first_entry.clone(),
                 second_entry: entry_label.to_string(),
-                reason: format!("both entries map to the same staging '.part' path{reason_suffix}"),
+                reason: "both entries map to the same staging '.part' path".to_string(),
             });
         }
 
-        final_paths.insert(final_key, entry_label.to_string());
-        staging_paths.insert(staging_key, entry_label.to_string());
-    }
-
-    Ok(())
-}
-
-/// Validates that no two planned entries collide on either a final destination path
-/// or a `.part` staging path under an explicit [`PathCaseSensitivity`] rule.
-///
-/// Each item is `(entry_label, local_path)`, where `entry_label` identifies the source
-/// archive entry for error reporting and `local_path` is the local destination path.
-pub fn validate_download_paths_with_case_sensitivity<'a, I>(
-    entries: I,
-    case_sensitivity: PathCaseSensitivity,
-) -> Result<()>
-where
-    I: IntoIterator<Item = (&'a str, &'a str)>,
-{
-    let entries: Vec<(&'a str, &'a str)> = entries.into_iter().collect();
-    validate_collision_keys(&entries, Path::to_path_buf, "")?;
-
-    if case_sensitivity == PathCaseSensitivity::CaseInsensitive {
-        validate_collision_keys(
-            &entries,
-            case_folded_collision_key,
-            " on a case-insensitive filesystem",
-        )?;
+        final_paths.insert(clean_final, entry_label.to_string());
+        staging_paths.insert(clean_staging, entry_label.to_string());
     }
 
     Ok(())
@@ -2267,24 +1864,6 @@ struct ProbeDirGuard(PathBuf);
 impl Drop for ProbeDirGuard {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Guard that removes every temporary probe file created directly inside a directory when dropped.
-#[derive(Default)]
-struct ProbeFilesGuard(Vec<PathBuf>);
-
-impl ProbeFilesGuard {
-    fn push(&mut self, path: PathBuf) {
-        self.0.push(path);
-    }
-}
-
-impl Drop for ProbeFilesGuard {
-    fn drop(&mut self) {
-        for path in self.0.drain(..).rev() {
-            let _ = fs::remove_file(path);
-        }
     }
 }
 
@@ -2341,22 +1920,7 @@ trait DirectoryLookup {
 }
 
 /// Production [`DirectoryLookup`] backed by the host OS filesystem.
-struct OsDirectoryLookup {
-    allow_temp_subdir_probe: bool,
-}
-
-impl OsDirectoryLookup {
-    const PRODUCTION: Self = Self {
-        allow_temp_subdir_probe: true,
-    };
-
-    #[cfg(test)]
-    const fn without_temp_subdir_probe() -> Self {
-        Self {
-            allow_temp_subdir_probe: false,
-        }
-    }
-}
+struct OsDirectoryLookup;
 
 /// Resolves `dir` into its existing probe directory and, when `dir` itself exists as a directory,
 /// its canonical on-disk path.
@@ -2452,9 +2016,6 @@ fn select_probe_candidates(names: &[String]) -> Vec<usize> {
         .collect()
 }
 
-/// Maximum bytes read from a probe file token (`"<idx>"` or `"<pid>:<seq>:<idx>"`).
-const MAX_PROBE_TOKEN_BYTES: u64 = 128;
-
 /// Returns `true` when `name` is a single normal path component safe to probe on the host OS.
 fn is_probable_component_name(name: &str) -> bool {
     #[cfg(windows)]
@@ -2495,69 +2056,10 @@ fn unverified_probe_error(probe_dir: Option<&Path>) -> String {
 enum TempDirProbeOutcome {
     /// Successfully determined equivalence groups for all candidates.
     Resolved(Vec<usize>),
-    /// Could not create the temporary subdirectory inside `probe_dir` (for example, directory
-    /// permissions allow file creation but deny `mkdir`, or the directory is read-only).
-    TempDirUnavailable,
-    /// Candidate names could not be probed even inside a temporary directory (for example,
-    /// overlong or host-invalid filenames).
-    Inconclusive,
-}
-
-/// Outcome of probing candidate names directly in `probe_dir` using uniquely prefixed files.
-#[derive(Debug, PartialEq, Eq)]
-enum PrefixedProbeOutcome {
-    /// Successfully determined equivalence groups for all candidates.
-    Resolved(Vec<usize>),
-    /// `probe_dir` denied file creation because it is unwritable or read-only.
+    /// `probe_dir` denied directory creation because it is unwritable or read-only.
     DirUnwritable,
     /// Candidate names could not be probed conclusively.
     Inconclusive,
-}
-
-/// Outcome of reading a bounded probe token back from an already-existing probe file.
-enum ProbeTokenRead {
-    Matched(usize),
-    ForeignOrUnreadable,
-    InvalidIndex,
-}
-
-/// Reads and validates a bounded probe token from `probe_path` without following symlinks.
-fn read_probe_token_index(
-    probe_path: &Path,
-    token_prefix: &str,
-    current_idx: usize,
-    names_len: usize,
-) -> ProbeTokenRead {
-    let mut read_opts = fs::OpenOptions::new();
-    read_opts.read(true);
-    configure_no_follow(&mut read_opts);
-    let Ok(mut file) = read_opts.open(probe_path) else {
-        return ProbeTokenRead::ForeignOrUnreadable;
-    };
-    if !file.metadata().ok().map(|m| m.is_file()).unwrap_or(false) {
-        return ProbeTokenRead::ForeignOrUnreadable;
-    }
-    let mut bytes = Vec::new();
-    let read_res = (&mut file)
-        .take(MAX_PROBE_TOKEN_BYTES)
-        .read_to_end(&mut bytes);
-    drop(file);
-    if read_res.is_err() || bytes.len() as u64 == MAX_PROBE_TOKEN_BYTES {
-        return ProbeTokenRead::ForeignOrUnreadable;
-    }
-    let Some(idx_str) = std::str::from_utf8(&bytes)
-        .ok()
-        .and_then(|tag| tag.trim().strip_prefix(token_prefix))
-    else {
-        return ProbeTokenRead::ForeignOrUnreadable;
-    };
-    let Ok(earlier_idx) = idx_str.parse::<usize>() else {
-        return ProbeTokenRead::InvalidIndex;
-    };
-    if earlier_idx >= current_idx || earlier_idx >= names_len {
-        return ProbeTokenRead::InvalidIndex;
-    }
-    ProbeTokenRead::Matched(earlier_idx)
 }
 
 /// Probes actual filename equivalence inside a private temporary directory created in `probe_dir`.
@@ -2573,8 +2075,17 @@ fn probe_names_in_dir(
         return TempDirProbeOutcome::Inconclusive;
     }
 
-    let Ok(temp_dir) = create_temp_probe_dir(probe_dir) else {
-        return TempDirProbeOutcome::TempDirUnavailable;
+    let temp_dir = match create_temp_probe_dir(probe_dir) {
+        Ok(dir) => dir,
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            return TempDirProbeOutcome::DirUnwritable;
+        }
+        Err(_) => return TempDirProbeOutcome::Inconclusive,
     };
     let mut groups: Vec<usize> = (0..names.len()).collect();
 
@@ -2595,12 +2106,33 @@ fn probe_names_in_dir(
                 groups[idx] = idx;
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                match read_probe_token_index(&probe_path, "", idx, names.len()) {
-                    ProbeTokenRead::Matched(earlier_idx) => groups[idx] = groups[earlier_idx],
-                    ProbeTokenRead::ForeignOrUnreadable | ProbeTokenRead::InvalidIndex => {
-                        return TempDirProbeOutcome::Inconclusive;
-                    }
+                let mut read_opts = fs::OpenOptions::new();
+                read_opts.read(true);
+                configure_no_follow(&mut read_opts);
+                let Ok(mut file) = read_opts.open(&probe_path) else {
+                    return TempDirProbeOutcome::Inconclusive;
+                };
+                if !file.metadata().ok().map(|m| m.is_file()).unwrap_or(false) {
+                    return TempDirProbeOutcome::Inconclusive;
                 }
+                let mut bytes = Vec::new();
+                let read_res = (&mut file).take(64).read_to_end(&mut bytes);
+                drop(file);
+                if read_res.is_err() || bytes.len() == 64 {
+                    return TempDirProbeOutcome::Inconclusive;
+                }
+                let Ok(earlier_idx) = std::str::from_utf8(&bytes)
+                    .ok()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .parse::<usize>()
+                else {
+                    return TempDirProbeOutcome::Inconclusive;
+                };
+                if earlier_idx >= idx || earlier_idx >= names.len() {
+                    return TempDirProbeOutcome::Inconclusive;
+                }
+                groups[idx] = groups[earlier_idx];
             }
             Err(_) => return TempDirProbeOutcome::Inconclusive,
         }
@@ -2608,97 +2140,6 @@ fn probe_names_in_dir(
 
     drop(temp_dir);
     TempDirProbeOutcome::Resolved(groups)
-}
-
-/// Probes actual filename equivalence directly inside `probe_dir` using uniquely prefixed
-/// temporary files (`.ia-get-fs-probe-<pid>-<seq>-<name>`) with RAII cleanup.
-fn probe_prefixed_names_in_dir(
-    probe_dir: &Path,
-    names: &[String],
-    candidates: &[usize],
-) -> PrefixedProbeOutcome {
-    probe_prefixed_names_in_dir_with_seq(probe_dir, names, candidates, || {
-        CASE_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed)
-    })
-}
-
-/// Internal implementation of [`probe_prefixed_names_in_dir`] accepting a sequence generator for
-/// deterministic collision-avoidance unit tests.
-fn probe_prefixed_names_in_dir_with_seq<F>(
-    probe_dir: &Path,
-    names: &[String],
-    candidates: &[usize],
-    mut next_seq: F,
-) -> PrefixedProbeOutcome
-where
-    F: FnMut() -> u64,
-{
-    if !candidates
-        .iter()
-        .all(|&idx| is_probable_component_name(&names[idx]))
-    {
-        return PrefixedProbeOutcome::Inconclusive;
-    }
-
-    let pid = std::process::id();
-
-    for _ in 0..MAX_TEMP_CASE_PROBE_ATTEMPTS {
-        let seq = next_seq();
-        let prefix = format!(".ia-get-fs-probe-{pid}-{seq}-");
-        let token_prefix = format!("{pid}:{seq}:");
-        let mut created = ProbeFilesGuard::default();
-        let mut groups: Vec<usize> = (0..names.len()).collect();
-        let mut retry_with_new_seq = false;
-
-        for &idx in candidates {
-            let name = &names[idx];
-            let probe_path = probe_dir.join(format!("{prefix}{name}"));
-            let mut create_opts = fs::OpenOptions::new();
-            create_opts.write(true).create_new(true);
-            configure_no_follow(&mut create_opts);
-
-            match create_opts.open(&probe_path) {
-                Ok(mut file) => {
-                    created.push(probe_path);
-                    let write_res = file.write_all(format!("{token_prefix}{idx}").as_bytes());
-                    drop(file);
-                    if write_res.is_err() {
-                        return PrefixedProbeOutcome::Inconclusive;
-                    }
-                    groups[idx] = idx;
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    match read_probe_token_index(&probe_path, &token_prefix, idx, names.len()) {
-                        ProbeTokenRead::Matched(earlier_idx) => groups[idx] = groups[earlier_idx],
-                        ProbeTokenRead::ForeignOrUnreadable => {
-                            retry_with_new_seq = true;
-                            break;
-                        }
-                        ProbeTokenRead::InvalidIndex => {
-                            return PrefixedProbeOutcome::Inconclusive;
-                        }
-                    }
-                }
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        std::io::ErrorKind::PermissionDenied
-                            | std::io::ErrorKind::ReadOnlyFilesystem
-                    ) =>
-                {
-                    return PrefixedProbeOutcome::DirUnwritable;
-                }
-                Err(_) => return PrefixedProbeOutcome::Inconclusive,
-            }
-        }
-
-        drop(created);
-        if !retry_with_new_seq {
-            return PrefixedProbeOutcome::Resolved(groups);
-        }
-    }
-
-    PrefixedProbeOutcome::Inconclusive
 }
 
 /// Fail-closed fallback filename equivalence check when live probing cannot run.
@@ -2788,38 +2229,18 @@ impl DirectoryLookup for OsDirectoryLookup {
         let mut allow_read_only_distinct = false;
 
         if let Some(dir) = probe_dir {
-            let try_prefixed = if self.allow_temp_subdir_probe {
-                match probe_names_in_dir(dir, names, candidates) {
-                    TempDirProbeOutcome::Resolved(groups) => {
-                        return Ok(DirEquivalenceResult {
-                            groups,
-                            reason_suffix:
-                                " under the destination directory's filesystem lookup rules",
-                            unverified_error: None,
-                        });
-                    }
-                    TempDirProbeOutcome::TempDirUnavailable => true,
-                    TempDirProbeOutcome::Inconclusive => false,
+            match probe_names_in_dir(dir, names, candidates) {
+                TempDirProbeOutcome::Resolved(groups) => {
+                    return Ok(DirEquivalenceResult {
+                        groups,
+                        reason_suffix: " under the destination directory's filesystem lookup rules",
+                        unverified_error: None,
+                    });
                 }
-            } else {
-                true
-            };
-
-            if try_prefixed {
-                match probe_prefixed_names_in_dir(dir, names, candidates) {
-                    PrefixedProbeOutcome::Resolved(groups) => {
-                        return Ok(DirEquivalenceResult {
-                            groups,
-                            reason_suffix:
-                                " under the destination directory's filesystem lookup rules",
-                            unverified_error: None,
-                        });
-                    }
-                    PrefixedProbeOutcome::DirUnwritable => {
-                        allow_read_only_distinct = true;
-                    }
-                    PrefixedProbeOutcome::Inconclusive => {}
+                TempDirProbeOutcome::DirUnwritable => {
+                    allow_read_only_distinct = true;
                 }
+                TempDirProbeOutcome::Inconclusive => {}
             }
         }
 
@@ -3033,7 +2454,7 @@ fn validate_download_paths_with_lookup(
     lookup: &impl DirectoryLookup,
 ) -> Result<()> {
     // Fast exact pass catches byte-identical final and `.part` collisions with zero I/O.
-    validate_collision_keys(entries, Path::to_path_buf, "")?;
+    validate_exact_collisions(entries)?;
 
     if entries.len() < 2 {
         return Ok(());
@@ -3204,23 +2625,7 @@ where
     I: IntoIterator<Item = (&'a str, &'a str)>,
 {
     let entries: Vec<(&'a str, &'a str)> = entries.into_iter().collect();
-    validate_download_paths_with_lookup(dir, &entries, &OsDirectoryLookup::PRODUCTION)
-}
-
-/// Validates that no two planned entries collide on either a final destination path
-/// or a `.part` staging path using exact (case-sensitive) matching.
-///
-/// Each item is `(entry_label, local_path)`, where `entry_label` identifies the source
-/// archive entry for error reporting and `local_path` is the local destination path.
-///
-/// Callers targeting a specific destination directory should use
-/// [`validate_download_paths_for_dir`] so case-insensitive filesystems also reject
-/// case-only collisions.
-pub fn validate_download_paths<'a, I>(entries: I) -> Result<()>
-where
-    I: IntoIterator<Item = (&'a str, &'a str)>,
-{
-    validate_download_paths_with_case_sensitivity(entries, PathCaseSensitivity::CaseSensitive)
+    validate_download_paths_with_lookup(dir, &entries, &OsDirectoryLookup)
 }
 
 /// Returns the current byte length of a `.part` file inside `root`, or `0` if it does not exist.
@@ -3987,20 +3392,6 @@ pub struct BatchSummary {
     pub interrupted: bool,
 }
 
-/// Formats a plain-text summary of a batch download session, including any failed files.
-pub fn format_batch_summary(summary: &BatchSummary) -> String {
-    format_run_summary(
-        "Summary:",
-        summary.ok,
-        Some(summary.skipped),
-        summary
-            .failed
-            .iter()
-            .map(|failed| (failed.file_path.as_str(), failed.error.as_str())),
-        summary.interrupted,
-    )
-}
-
 /// Prints a coloured end-of-batch summary to stdout.
 fn print_batch_summary(summary: &BatchSummary) {
     print_run_summary(
@@ -4253,137 +3644,10 @@ where
     Ok(summary)
 }
 
-/// Downloads multiple files into destination `root` with explicit [`DownloadOptions`] and
-/// shutdown signal.
-///
-/// Validates and prepares `root` before downloading, continues past per-file failures
-/// after printing a warning, stops promptly on shutdown signal interruption, prints an
-/// end-of-batch summary, and returns the collected [`BatchSummary`].
-pub async fn download_files_in_dir_with_options<I>(
-    client: &Client,
-    root: &Path,
-    files: I,
-    total_files: usize,
-    cookie_source: Option<&CookieSource>,
-    options: &DownloadOptions,
-    signal: &ShutdownSignal,
-) -> Result<BatchSummary>
-where
-    I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
-{
-    let logger = VerboseLogger::from_enabled(options.verbose);
-    download_files_in_dir_with_logger(
-        client,
-        root,
-        files,
-        total_files,
-        cookie_source,
-        options,
-        signal,
-        &logger,
-    )
-    .await
-}
-
-/// Downloads multiple files into destination `root` with an explicit retry policy and shutdown signal.
-///
-/// Validates and prepares `root` before downloading, continues past per-file failures
-/// after printing a warning, stops promptly on shutdown signal interruption, prints an
-/// end-of-batch summary, and returns the collected [`BatchSummary`].
-pub async fn download_files_in_dir<I>(
-    client: &Client,
-    root: &Path,
-    files: I,
-    total_files: usize,
-    cookie_source: Option<&CookieSource>,
-    policy: &RetryPolicy,
-    signal: &ShutdownSignal,
-) -> Result<BatchSummary>
-where
-    I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
-{
-    let options = DownloadOptions {
-        retry_policy: *policy,
-        limit_rate: None,
-        verbose: false,
-    };
-    download_files_in_dir_with_options(
-        client,
-        root,
-        files,
-        total_files,
-        cookie_source,
-        &options,
-        signal,
-    )
-    .await
-}
-
-/// Downloads multiple files with an explicit retry policy and shutdown signal.
-///
-/// Continues past per-file failures after printing a warning, stops promptly on
-/// shutdown signal interruption, prints an end-of-batch summary, and returns the
-/// collected [`BatchSummary`].
-pub async fn download_files_with_policy_and_signal<I>(
-    client: &Client,
-    files: I,
-    total_files: usize,
-    cookie_source: Option<&CookieSource>,
-    policy: &RetryPolicy,
-    signal: &ShutdownSignal,
-) -> Result<BatchSummary>
-where
-    I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
-{
-    let options = DownloadOptions {
-        retry_policy: *policy,
-        limit_rate: None,
-        verbose: false,
-    };
-    download_files_in_dir_with_options(
-        client,
-        Path::new("."),
-        files,
-        total_files,
-        cookie_source,
-        &options,
-        signal,
-    )
-    .await
-}
-
-/// Download multiple files with shared signal handling.
-///
-/// Prepares `output_dir` (defaulting to the current working directory when `None`),
-/// sets up signal handling once for the entire download session, continues past
-/// individual file failures, prints an end-of-batch summary, and returns the
-/// collected [`BatchSummary`].
-pub async fn download_files<I>(
-    client: &Client,
-    output_dir: Option<&Path>,
-    files: I,
-    total_files: usize,
-    cookie_source: Option<&CookieSource>,
-) -> Result<BatchSummary>
-where
-    I: IntoIterator<Item = (String, String, Option<String>)>, // (url, filename, md5)
-{
-    let root = output_dir.unwrap_or_else(|| Path::new("."));
-    let signal = install_signal_handler();
-    download_files_in_dir_with_options(
-        client,
-        root,
-        files,
-        total_files,
-        cookie_source,
-        &DownloadOptions::default(),
-        &signal,
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::UNIX_EPOCH;
+
     use super::*;
     use crate::test_support::{
         fast_retry_policy, md5_hex, slow_retry_policy, CapturedLogs, CapturedRequest, MockResponse,
@@ -4407,7 +3671,6 @@ mod tests {
         let options = DownloadOptions {
             retry_policy: *policy,
             limit_rate: None,
-            verbose: false,
         };
         download_single_file_with_options(
             client,
@@ -4418,6 +3681,34 @@ mod tests {
             signal,
             cookie_source,
             &options,
+            &VerboseLogger::disabled(),
+        )
+        .await
+    }
+
+    async fn run_batch_in_dir<I>(
+        client: &Client,
+        root: &Path,
+        files: I,
+        total_files: usize,
+        policy: &RetryPolicy,
+        signal: &ShutdownSignal,
+    ) -> Result<BatchSummary>
+    where
+        I: IntoIterator<Item = (String, String, Option<String>)>,
+    {
+        let options = DownloadOptions {
+            retry_policy: *policy,
+            limit_rate: None,
+        };
+        download_files_in_dir_with_logger(
+            client,
+            root,
+            files,
+            total_files,
+            None,
+            &options,
+            signal,
             &VerboseLogger::disabled(),
         )
         .await
@@ -4625,10 +3916,10 @@ mod tests {
     }
 
     fn proxy_config_from_vars(vars: &[(&str, &str)]) -> Result<ProxyConfig> {
-        ProxyConfig::from_lookup(|name| {
+        ProxyConfig::from_os_lookup(|name| {
             vars.iter()
                 .find(|(k, _)| *k == name)
-                .map(|(_, v)| (*v).to_string())
+                .map(|(_, v)| OsString::from(*v))
         })
     }
 
@@ -5503,10 +4794,15 @@ mod tests {
     }
 
     fn utc_time(year: i64, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> SystemTime {
-        let secs = days_from_civil(year, month, day) * 86_400
-            + i64::from(hour) * 3600
-            + i64::from(minute) * 60
-            + i64::from(second);
+        let y = year - i64::from(month <= 2);
+        let era = y.div_euclid(400);
+        let yoe = y.rem_euclid(400);
+        let m = i64::from(month);
+        let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        let secs =
+            days * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second);
         if secs >= 0 {
             UNIX_EPOCH + Duration::from_secs(secs as u64)
         } else {
@@ -5716,7 +5012,7 @@ mod tests {
             Duration::ZERO
         );
 
-        // compute_retry_delay prefers valid Retry-After (clamped) and falls back to jittered backoff
+        // compute_retry_delay_with_source prefers valid Retry-After (clamped) and falls back to jittered backoff
         let now = utc_time(2026, 5, 1, 12, 0, 0);
         let retry_policy = RetryPolicy {
             max_retries: 3,
@@ -5725,19 +5021,23 @@ mod tests {
             max_retry_after: Duration::from_secs(30),
         };
         assert_eq!(
-            compute_retry_delay(1, Some("12"), now, &retry_policy),
-            Duration::from_secs(12)
+            compute_retry_delay_with_source(1, Some("12"), now, &retry_policy),
+            (Duration::from_secs(12), "retry-after")
         );
         assert_eq!(
-            compute_retry_delay(1, Some("120"), now, &retry_policy),
-            Duration::from_secs(30)
+            compute_retry_delay_with_source(1, Some("120"), now, &retry_policy),
+            (Duration::from_secs(30), "retry-after")
         );
-        let fallback_none = compute_retry_delay(1, None, now, &retry_policy);
+        let (fallback_none, source_none) =
+            compute_retry_delay_with_source(1, None, now, &retry_policy);
+        assert_eq!(source_none, "backoff");
         assert!(
             fallback_none >= Duration::from_secs(1) && fallback_none <= Duration::from_secs(2),
             "expected fallback in [1s, 2s], got {fallback_none:?}"
         );
-        let fallback_invalid = compute_retry_delay(2, Some("not-a-date"), now, &retry_policy);
+        let (fallback_invalid, source_invalid) =
+            compute_retry_delay_with_source(2, Some("not-a-date"), now, &retry_policy);
+        assert_eq!(source_invalid, "backoff");
         assert!(
             fallback_invalid >= Duration::from_secs(2)
                 && fallback_invalid <= Duration::from_secs(4),
@@ -5844,6 +5144,7 @@ mod tests {
         let client = http_client_builder().build().unwrap();
         let policy = fast_retry_policy(3);
         let signal = ShutdownSignal::new();
+        let logger = VerboseLogger::disabled();
 
         // Transient 503 + 429 (with Retry-After: 0) then 200 succeeds
         let server = MockServer::start(vec![
@@ -5854,10 +5155,11 @@ mod tests {
         .await;
         let mut events = Vec::new();
         let meta_url = server.parsed_url("/meta.xml");
-        let body = fetch_text_with_retry(
+        let body = fetch_text_with_retry_with_logger(
             &meta_url,
             &policy,
             &signal,
+            &logger,
             |target_url| Ok(client.get(target_url.clone())),
             |event| {
                 events.push((
@@ -5885,10 +5187,11 @@ mod tests {
             MockServer::start(vec![MockResponse::status("404 Not Found", b"missing")]).await;
         let mut retry_calls = 0;
         let missing_url = server_404.parsed_url("/missing");
-        let err = send_with_retry(
+        let err = send_with_retry_with_logger(
             &missing_url,
             &policy,
             &signal,
+            &logger,
             |target_url| Ok(client.get(target_url.clone())),
             |_| retry_calls += 1,
         )
@@ -5908,10 +5211,11 @@ mod tests {
         .await;
         let mut attempts = Vec::new();
         let down_url = server_503.parsed_url("/down");
-        let err = send_with_retry(
+        let err = send_with_retry_with_logger(
             &down_url,
             &small_policy,
             &signal,
+            &logger,
             |target_url| Ok(client.get(target_url.clone())),
             |event| attempts.push(event.attempt),
         )
@@ -5932,10 +5236,11 @@ mod tests {
         let trigger_signal = cancel_signal.clone();
         let start = std::time::Instant::now();
         let rate_limited_url = server_cancel.parsed_url("/rate-limited");
-        let err = send_with_retry(
+        let err = send_with_retry_with_logger(
             &rate_limited_url,
             &slow_retry_policy(2),
             &cancel_signal,
+            &logger,
             |target_url| Ok(client.get(target_url.clone())),
             |_| trigger_signal.trigger(),
         )
@@ -6139,10 +5444,9 @@ mod tests {
             ),
         ];
 
-        let summary =
-            download_files_in_dir(&fx.client, fx.path(), files, 6, None, &policy, &fx.signal)
-                .await
-                .unwrap();
+        let summary = run_batch_in_dir(&fx.client, fx.path(), files, 6, &policy, &fx.signal)
+            .await
+            .unwrap();
 
         let requests = server.finish().await;
         let expected_lines = [
@@ -6196,15 +5500,6 @@ mod tests {
             fs::read(fx.part_path("corrupt.bin")).unwrap(),
             corrupt_payload
         );
-
-        let formatted = format_batch_summary(&summary);
-        assert!(formatted.contains("1 ok"), "summary was: {formatted}");
-        assert!(formatted.contains("2 skipped"), "summary was: {formatted}");
-        assert!(formatted.contains("3 failed"), "summary was: {formatted}");
-        assert!(
-            formatted.contains("missing.bin"),
-            "summary was: {formatted}"
-        );
     }
 
     #[tokio::test]
@@ -6244,10 +5539,9 @@ mod tests {
             (server.url("/file3.bin"), "file3.bin".to_string(), None),
         ];
 
-        let summary =
-            download_files_in_dir(&fx.client, fx.path(), files, 3, None, &policy, &fx.signal)
-                .await
-                .unwrap();
+        let summary = run_batch_in_dir(&fx.client, fx.path(), files, 3, &policy, &fx.signal)
+            .await
+            .unwrap();
 
         let requests = server.abort().await;
         assert_eq!(requests.len(), 2);
@@ -6287,10 +5581,9 @@ mod tests {
             (server.url("/file2.bin"), "file2.bin".to_string(), None),
         ];
 
-        let summary =
-            download_files_in_dir(&fx.client, fx.path(), files, 2, None, &policy, &fx.signal)
-                .await
-                .unwrap();
+        let summary = run_batch_in_dir(&fx.client, fx.path(), files, 2, &policy, &fx.signal)
+            .await
+            .unwrap();
 
         let requests = server.abort().await;
         assert!(requests.is_empty(), "expected 0 requests, got {requests:?}");
@@ -6302,74 +5595,6 @@ mod tests {
             assert!(!fx.join(name).exists());
             assert!(!fx.part_path(name).exists());
         }
-    }
-
-    #[test]
-    fn test_format_batch_summary_outputs_counts_failed_files_and_interrupted_state() {
-        let all_ok = BatchSummary {
-            ok: 3,
-            skipped: 0,
-            failed: Vec::new(),
-            interrupted: false,
-        };
-        assert_eq!(
-            format_batch_summary(&all_ok),
-            "Summary: 3 ok, 0 skipped, 0 failed"
-        );
-
-        let mixed = BatchSummary {
-            ok: 2,
-            skipped: 1,
-            failed: vec![
-                FailedFile {
-                    file_path: "first.bin".to_string(),
-                    error: "Network error: HTTP error 404 Not Found".to_string(),
-                },
-                FailedFile {
-                    file_path: "second.bin".to_string(),
-                    error: "Integrity check failed: MD5 mismatch for second.bin".to_string(),
-                },
-            ],
-            interrupted: false,
-        };
-        assert_eq!(
-            format_batch_summary(&mixed),
-            concat!(
-                "Summary: 2 ok, 1 skipped, 2 failed\n",
-                "Failed files:\n",
-                "  - first.bin: Network error: HTTP error 404 Not Found\n",
-                "  - second.bin: Integrity check failed: MD5 mismatch for second.bin"
-            )
-        );
-
-        let interrupted_clean = BatchSummary {
-            ok: 1,
-            skipped: 2,
-            failed: Vec::new(),
-            interrupted: true,
-        };
-        assert_eq!(
-            format_batch_summary(&interrupted_clean),
-            "Summary: 1 ok, 2 skipped, 0 failed, interrupted"
-        );
-
-        let interrupted_with_failure = BatchSummary {
-            ok: 1,
-            skipped: 0,
-            failed: vec![FailedFile {
-                file_path: "broken.bin".to_string(),
-                error: "Network error: HTTP error 503 Service Unavailable".to_string(),
-            }],
-            interrupted: true,
-        };
-        assert_eq!(
-            format_batch_summary(&interrupted_with_failure),
-            concat!(
-                "Summary: 1 ok, 0 skipped, 1 failed, interrupted\n",
-                "Failed files:\n",
-                "  - broken.bin: Network error: HTTP error 503 Service Unavailable"
-            )
-        );
     }
 
     #[test]
@@ -6795,12 +6020,11 @@ mod tests {
                 Some(md5_hex(batch_payload)),
             ),
         ];
-        let summary = download_files_in_dir(
+        let summary = run_batch_in_dir(
             &client,
             &link_root,
             files,
             2,
-            None,
             &RetryPolicy::default(),
             &signal,
         )
@@ -7332,7 +6556,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_files_with_policy_and_signal_writes_to_default_working_dir() {
+    async fn test_download_files_in_dir_writes_to_default_working_dir() {
         let _cwd_lock = CURRENT_DIR_LOCK.lock().await;
         let fx = DownloadFixture::new("default-cwd-download");
         let _cwd_guard = CurrentDirGuard::enter(fx.path());
@@ -7358,11 +6582,11 @@ mod tests {
             ),
         ];
 
-        let summary = download_files_with_policy_and_signal(
+        let summary = run_batch_in_dir(
             &fx.client,
+            Path::new("."),
             files,
             2,
-            None,
             &RetryPolicy::default(),
             &fx.signal,
         )
@@ -7430,17 +6654,16 @@ mod tests {
             ),
         ];
 
-        let summary = download_files_in_dir(
+        let summary = run_batch_in_dir(
             &client,
             &output_dir,
             files,
             3,
-            None,
             &RetryPolicy::default(),
             &signal,
         )
         .await
-        .expect("download_files_in_dir should create missing nested output dir");
+        .expect("download_files_in_dir_with_logger should create missing nested output dir");
 
         assert_eq!(server.finish().await.len(), 3);
         assert!(output_dir.is_dir());
@@ -7504,12 +6727,11 @@ mod tests {
 
             let server =
                 MockServer::start(vec![MockResponse::ok(b"must never be requested")]).await;
-            let dl_err = download_files_in_dir(
+            let dl_err = run_batch_in_dir(
                 &client,
                 &bad_path,
                 vec![(server.url("/file.bin"), "file.bin".to_string(), None)],
                 1,
-                None,
                 &RetryPolicy::default(),
                 &signal,
             )
@@ -7517,7 +6739,7 @@ mod tests {
             .unwrap_err();
             assert!(
                 matches!(dl_err, IaGetError::FileSystem(_)),
-                "case {label}: expected FileSystem error from download_files_in_dir, got {dl_err:?}"
+                "case {label}: expected FileSystem error from download_files_in_dir_with_logger, got {dl_err:?}"
             );
             assert!(
                 server.abort().await.is_empty(),
@@ -7580,12 +6802,11 @@ mod tests {
             ),
         ];
 
-        let summary = download_files_in_dir(
+        let summary = run_batch_in_dir(
             &client,
             &output_dir,
             files,
             3,
-            None,
             &RetryPolicy::default(),
             &signal,
         )
@@ -7932,11 +7153,10 @@ mod tests {
         let options = DownloadOptions {
             retry_policy: RetryPolicy::default(),
             limit_rate: Some(parse_rate_limit("100K").unwrap()),
-            verbose: false,
         };
 
         let started = Instant::now();
-        let summary = download_files_in_dir_with_options(
+        let summary = download_files_in_dir_with_logger(
             &fx.client,
             fx.path(),
             vec![(
@@ -7948,6 +7168,7 @@ mod tests {
             None,
             &options,
             &fx.signal,
+            &VerboseLogger::disabled(),
         )
         .await
         .expect("throttled download should succeed");
@@ -7973,7 +7194,6 @@ mod tests {
         let options = DownloadOptions {
             retry_policy: RetryPolicy::default(),
             limit_rate: Some(parse_rate_limit("1K").unwrap()),
-            verbose: false,
         };
 
         let part_path = fx.part_path("interrupted.bin");
@@ -7995,7 +7215,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let summary = download_files_in_dir_with_options(
+        let summary = download_files_in_dir_with_logger(
             &fx.client,
             fx.path(),
             vec![(
@@ -8007,6 +7227,7 @@ mod tests {
             None,
             &options,
             &fx.signal,
+            &VerboseLogger::disabled(),
         )
         .await
         .expect("interrupted throttled batch should return summary");
@@ -8050,11 +7271,10 @@ mod tests {
         let options = DownloadOptions {
             retry_policy: RetryPolicy::default(),
             limit_rate: Some(parse_rate_limit("100K").unwrap()),
-            verbose: false,
         };
 
         let started = Instant::now();
-        let summary = download_files_in_dir_with_options(
+        let summary = download_files_in_dir_with_logger(
             &fx.client,
             fx.path(),
             vec![(
@@ -8066,6 +7286,7 @@ mod tests {
             None,
             &options,
             &fx.signal,
+            &VerboseLogger::disabled(),
         )
         .await
         .expect("resumed throttled download should succeed");
@@ -8806,7 +8027,6 @@ mod tests {
         let options = DownloadOptions {
             retry_policy: fast_retry_policy(0),
             limit_rate: None,
-            verbose: true,
         };
         let captured = CapturedLogs::new();
         let logger = VerboseLogger::with_writer(captured.clone_writer());
@@ -8890,7 +8110,6 @@ mod tests {
         let options = DownloadOptions {
             retry_policy: fast_retry_policy(3),
             limit_rate: None,
-            verbose: true,
         };
         let captured = CapturedLogs::new();
         let logger = VerboseLogger::with_writer(captured.clone_writer());
@@ -8960,7 +8179,6 @@ mod tests {
         let options = DownloadOptions {
             retry_policy: fast_retry_policy(0),
             limit_rate: None,
-            verbose: true,
         };
         let captured = CapturedLogs::new();
         let logger = VerboseLogger::with_writer(captured.clone_writer());
@@ -9027,18 +8245,14 @@ mod tests {
     }
 
     #[test]
-    fn test_verbose_logging_disabled_by_default() {
-        let default_options = DownloadOptions::default();
-        assert!(
-            !default_options.verbose,
-            "DownloadOptions::default() must disable verbose logging"
-        );
-        assert!(!VerboseLogger::from_enabled(default_options.verbose).is_enabled());
-        assert!(!VerboseLogger::disabled().is_enabled());
-    }
-
-    #[test]
     fn test_validate_download_paths_exact_and_case_sensitivity_modes() {
+        let lookup = MockDirectoryLookup::new([
+            ("/cs", MockDirRule::Exact),
+            ("/ci", MockDirRule::CaseAndNormalizationInsensitive),
+        ]);
+        let cs = Path::new("/cs");
+        let ci = Path::new("/ci");
+
         // Exact mode: final duplicates, normalised slash duplicates, staging collisions in both orders
         for (label, first, second, expected_local, check_entries) in [
             (
@@ -9070,7 +8284,8 @@ mod tests {
                 true,
             ),
         ] {
-            let err = validate_download_paths([first, second]).unwrap_err();
+            let err =
+                validate_download_paths_with_lookup(cs, &[first, second], &lookup).unwrap_err();
             assert_path_collision(
                 err,
                 expected_local,
@@ -9081,14 +8296,18 @@ mod tests {
             );
         }
 
-        assert!(validate_download_paths(same_paths(&[
-            "foo.txt",
-            "foo.txt.bak",
-            "a/foo.txt",
-            "b/foo.txt",
-            "README.md",
-            "readme.md",
-        ]))
+        assert!(validate_download_paths_with_lookup(
+            cs,
+            &same_paths(&[
+                "foo.txt",
+                "foo.txt.bak",
+                "a/foo.txt",
+                "b/foo.txt",
+                "README.md",
+                "readme.md",
+            ]),
+            &lookup,
+        )
         .is_ok());
 
         // Case-insensitive mode: filename/dir/staging/Unicode/sanitised case collisions
@@ -9150,25 +8369,23 @@ mod tests {
         ];
 
         for (label, first, second, expected_local) in ci_cases {
-            let err = validate_download_paths_with_case_sensitivity(
-                [first, second],
-                PathCaseSensitivity::CaseInsensitive,
-            )
-            .unwrap_err();
+            let err =
+                validate_download_paths_with_lookup(ci, &[first, second], &lookup).unwrap_err();
             assert_path_collision(
                 err,
                 expected_local,
                 Some(first.0),
                 Some(second.0),
-                Some("case-insensitive"),
+                Some("filesystem lookup rules"),
                 label,
             );
         }
 
-        // Exact duplicates still report the exact reason even in case-insensitive mode.
-        let exact_err = validate_download_paths_with_case_sensitivity(
-            [("foo?.txt", "foo_.txt"), ("foo*.txt", "foo_.txt")],
-            PathCaseSensitivity::CaseInsensitive,
+        // Exact duplicates still report the exact reason even on a case-insensitive filesystem.
+        let exact_err = validate_download_paths_with_lookup(
+            ci,
+            &[("foo?.txt", "foo_.txt"), ("foo*.txt", "foo_.txt")],
+            &lookup,
         )
         .unwrap_err();
         assert_path_collision(
@@ -9181,8 +8398,9 @@ mod tests {
         );
 
         // Case-sensitive mode allows all case-only differences.
-        assert!(validate_download_paths_with_case_sensitivity(
-            same_paths(&[
+        assert!(validate_download_paths_with_lookup(
+            cs,
+            &same_paths(&[
                 "Foo.txt",
                 "foo.txt",
                 "Dir/a.txt",
@@ -9193,7 +8411,7 @@ mod tests {
                 "Caf\u{00e9}.txt",
                 "CAF\u{00c9}.txt",
             ]),
-            PathCaseSensitivity::CaseSensitive,
+            &lookup,
         )
         .is_ok());
     }
@@ -9233,12 +8451,11 @@ mod tests {
                 .collect();
             let total = files.len();
 
-            let err = download_files_in_dir(
+            let err = run_batch_in_dir(
                 &client,
                 &target_dir,
                 files,
                 total,
-                None,
                 &RetryPolicy::default(),
                 &signal,
             )
@@ -9267,7 +8484,7 @@ mod tests {
         .await;
         let long_nfc = format!("Caf\u{00e9}-{}", "a".repeat(300));
         let long_nfd = format!("Cafe\u{0301}-{}", "a".repeat(300));
-        let err = download_files_in_dir(
+        let err = run_batch_in_dir(
             &client,
             sandbox.path(),
             vec![
@@ -9275,7 +8492,6 @@ mod tests {
                 (server.url("/nfd"), long_nfd, None),
             ],
             2,
-            None,
             &RetryPolicy::default(),
             &signal,
         )
@@ -9293,24 +8509,33 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_path_case_sensitivity_and_validate_for_dir_match_host_filesystem() {
+    fn test_probe_existing_child_and_validate_for_dir_match_host_filesystem() {
         let oracle_dir = TempTestDir::new("case-oracle");
         let expected = measure_host_dir_case_sensitivity(oracle_dir.path());
 
-        // 1. Empty existing directory (exercises temp probe file + cleanup).
+        // 1. Empty existing directory yields None for read-only child probe.
         let empty_dir = TempTestDir::new("case-empty");
-        assert_eq!(detect_path_case_sensitivity(empty_dir.path()), expected);
+        assert_eq!(
+            probe_existing_child_case_sensitivity(empty_dir.path()),
+            None
+        );
         assert_eq!(fs::read_dir(empty_dir.path()).unwrap().count(), 0);
 
-        // 2. Non-empty existing directory (exercises read-only child probe).
+        // 2. Non-empty existing directory detects host sensitivity without writes.
         let populated_dir = TempTestDir::new("case-populated");
         populated_dir.write("Existing.txt", b"data");
-        assert_eq!(detect_path_case_sensitivity(populated_dir.path()), expected);
+        assert_eq!(
+            probe_existing_child_case_sensitivity(populated_dir.path()),
+            Some(expected)
+        );
         assert_eq!(fs::read_dir(populated_dir.path()).unwrap().count(), 1);
 
         // 3. Not-yet-created nested directory resolves nearest existing ancestor without creating it.
         let missing_dir = empty_dir.join("not-created-yet/nested");
-        assert_eq!(detect_path_case_sensitivity(&missing_dir), expected);
+        assert_eq!(
+            resolve_existing_probe_dir(&missing_dir).as_deref(),
+            Some(empty_dir.path())
+        );
         assert!(!empty_dir.join("not-created-yet").exists());
 
         // 4. Read-only directory with an existing child still probes cleanly on Unix.
@@ -9319,9 +8544,9 @@ mod tests {
             let ro_dir = TempTestDir::new("case-readonly");
             ro_dir.write("Sample.txt", b"ro");
             let detected = with_readonly_dir(ro_dir.path(), || {
-                detect_path_case_sensitivity(ro_dir.path())
+                probe_existing_child_case_sensitivity(ro_dir.path())
             });
-            assert_eq!(detected, expected);
+            assert_eq!(detected, Some(expected));
         }
 
         // 5. validate_download_paths_for_dir matches host sensitivity for case-only pairs.
@@ -9370,12 +8595,11 @@ mod tests {
             ),
         ];
 
-        let result = download_files_in_dir(
+        let result = run_batch_in_dir(
             &client,
             &target_dir,
             files,
             2,
-            None,
             &RetryPolicy::default(),
             &signal,
         )
@@ -9979,15 +9203,6 @@ mod tests {
             ),
             Err(IaGetError::FileSystem(_))
         ));
-        let no_subdir_lookup = OsDirectoryLookup::without_temp_subdir_probe();
-        assert!(matches!(
-            validate_download_paths_with_lookup(
-                populated.path(),
-                &same_paths(&[long_nfc.as_str(), long_nfd.as_str()]),
-                &no_subdir_lookup,
-            ),
-            Err(IaGetError::FileSystem(_))
-        ));
         assert_no_probe_dirs_remaining(populated.path());
 
         // 4. Symlinks inside output_dir are never followed for probing; read-only dirs preserve
@@ -10065,77 +9280,68 @@ mod tests {
     }
 
     #[test]
-    fn test_prefixed_file_probe_fallback_when_temp_subdir_unavailable() {
-        let sandbox = TempTestDir::new("prefixed-probe-fallback");
+    fn test_temp_dir_probe_and_fallback_dir_equivalence() {
+        let sandbox = TempTestDir::new("temp-dir-probe-and-fallback");
         let host_case = measure_host_dir_case_sensitivity(sandbox.path());
-        let host_nfc_nfd = probe_host_dir_equivalent(
-            sandbox.path(),
-            "host-nfc-probe-caf\u{00e9}.txt",
-            "host-nfc-probe-cafe\u{0301}.txt",
-        );
-        let no_subdir_lookup = OsDirectoryLookup::without_temp_subdir_probe();
 
-        // 1. ASCII case-only pair matches host semantics when temp subdir creation is unavailable.
-        let case_res = validate_download_paths_with_lookup(
-            sandbox.path(),
-            &same_paths(&["Foo.txt", "foo.txt"]),
-            &no_subdir_lookup,
-        );
-        assert_matches_host_case(&case_res, host_case, "prefixed-case");
-        assert_no_probe_dirs_remaining(sandbox.path());
-
-        // 2. Unicode NFC vs NFD final and `.part` pairs match host semantics via prefixed files.
-        for pair in [
-            ["Caf\u{00e9}.txt", "Cafe\u{0301}.txt"],
-            ["Caf\u{00e9}.txt", "Cafe\u{0301}.txt.part"],
-        ] {
-            let result = validate_download_paths_with_lookup(
-                sandbox.path(),
-                &same_paths(&pair),
-                &no_subdir_lookup,
-            );
-            assert_matches_host_nfc(&result, host_nfc_nfd, "prefixed-nfc");
-            assert_no_probe_dirs_remaining(sandbox.path());
-        }
-
-        // 3. Direct prefixed probe verifies collision detection and distinctness with clean teardown.
+        // 1. Direct temp-subdir probe detects collisions and distinctness with clean teardown.
         let colliding_names = vec!["same.txt".to_string(), "same.txt".to_string()];
         assert_eq!(
-            probe_prefixed_names_in_dir(sandbox.path(), &colliding_names, &[0, 1]),
-            PrefixedProbeOutcome::Resolved(vec![0, 0])
+            probe_names_in_dir(sandbox.path(), &colliding_names, &[0, 1]),
+            TempDirProbeOutcome::Resolved(vec![0, 0])
         );
         assert_no_probe_dirs_remaining(sandbox.path());
 
         let distinct_names = vec!["alpha.txt".to_string(), "beta.txt".to_string()];
         assert_eq!(
-            probe_prefixed_names_in_dir(sandbox.path(), &distinct_names, &[0, 1]),
-            PrefixedProbeOutcome::Resolved(vec![0, 1])
+            probe_names_in_dir(sandbox.path(), &distinct_names, &[0, 1]),
+            TempDirProbeOutcome::Resolved(vec![0, 1])
         );
         assert_no_probe_dirs_remaining(sandbox.path());
 
-        // 4. Pre-existing foreign file matching the first probe filename is never removed or mistaken.
-        let pid = std::process::id();
-        let initial_seq: u64 = 900_000_000;
-        let foreign_path = sandbox.write(
-            format!(".ia-get-fs-probe-{pid}-{initial_seq}-beta.txt"),
-            b"pre-existing-foreign-file",
-        );
-
-        let mut seq = initial_seq;
-        let foreign_res =
-            probe_prefixed_names_in_dir_with_seq(sandbox.path(), &distinct_names, &[0, 1], || {
-                let current = seq;
-                seq += 1;
-                current
+        // 2. Read-only directory routes mkdir PermissionDenied to DirUnwritable.
+        #[cfg(unix)]
+        {
+            let ro_dir = TempTestDir::new("temp-dir-probe-ro");
+            let case_names = vec!["Foo.txt".to_string(), "foo.txt".to_string()];
+            let outcome = with_readonly_dir(ro_dir.path(), || {
+                probe_names_in_dir(ro_dir.path(), &case_names, &[0, 1])
             });
-        assert_eq!(foreign_res, PrefixedProbeOutcome::Resolved(vec![0, 1]));
-        assert_eq!(seq, initial_seq + 2);
-        assert_eq!(
-            fs::read(&foreign_path).unwrap(),
-            b"pre-existing-foreign-file"
-        );
-        fs::remove_file(&foreign_path).unwrap();
-        assert_no_probe_dirs_remaining(sandbox.path());
+            assert_eq!(outcome, TempDirProbeOutcome::DirUnwritable);
+            assert_no_probe_dirs_remaining(ro_dir.path());
+        }
+
+        // 3. fallback_dir_equivalence fails closed when dir is absent, empty, non-ASCII, or
+        // allow_read_only_distinct is false on a case-sensitive volume.
+        let case_names = vec!["Foo.txt".to_string(), "foo.txt".to_string()];
+        assert!(matches!(
+            fallback_dir_equivalence(None, &case_names, &[0, 1], true),
+            Err(IaGetError::FileSystem(_))
+        ));
+        assert!(matches!(
+            fallback_dir_equivalence(Some(sandbox.path()), &case_names, &[0, 1], true),
+            Err(IaGetError::FileSystem(_))
+        ));
+
+        sandbox.write("Sample.txt", b"existing");
+        let strict = fallback_dir_equivalence(Some(sandbox.path()), &case_names, &[0, 1], false);
+        let relaxed = fallback_dir_equivalence(Some(sandbox.path()), &case_names, &[0, 1], true);
+        match host_case {
+            PathCaseSensitivity::CaseSensitive => {
+                assert!(matches!(strict, Err(IaGetError::FileSystem(_))));
+                let eq = relaxed.expect("read-only CS fallback allows plain ASCII");
+                assert_eq!(eq.groups, vec![0, 1]);
+                assert_eq!(eq.unverified_error, None);
+            }
+            PathCaseSensitivity::CaseInsensitive => {
+                let eq = strict.expect("CI fallback detects ASCII collision");
+                assert_eq!(eq.groups, vec![0, 0]);
+                assert!(eq.unverified_error.is_some());
+                let relaxed_eq = relaxed.expect("read-only CI fallback detects plain ASCII");
+                assert_eq!(relaxed_eq.groups, vec![0, 0]);
+                assert_eq!(relaxed_eq.unverified_error, None);
+            }
+        }
     }
 
     #[test]

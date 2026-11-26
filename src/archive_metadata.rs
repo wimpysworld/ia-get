@@ -22,23 +22,12 @@ pub struct XmlFiles {
 ///   ...
 /// </file>
 /// ```
-#[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 pub struct XmlFile {
     #[serde(rename = "@name")]
     pub name: String,
-    #[serde(rename = "@source")]
-    pub source: String,
-    pub mtime: Option<u64>,
     pub size: Option<u64>,
-    pub format: Option<String>,
-    pub rotation: Option<u32>,
     pub md5: Option<String>,
-    pub crc32: Option<String>,
-    pub sha1: Option<String>,
-    pub btih: Option<String>,
-    pub summation: Option<String>,
-    pub original: Option<String>,
 }
 
 /// Parses XML content into XmlFiles structure with improved error context

@@ -105,17 +105,8 @@ pub fn md5_hex(data: &[u8]) -> String {
 pub fn xml_file(name: &str, size: Option<u64>, md5: Option<&str>) -> XmlFile {
     XmlFile {
         name: name.to_string(),
-        source: "original".to_string(),
-        mtime: None,
         size,
-        format: None,
-        rotation: None,
         md5: md5.map(str::to_string),
-        crc32: None,
-        sha1: None,
-        btih: None,
-        summation: None,
-        original: None,
     }
 }
 
