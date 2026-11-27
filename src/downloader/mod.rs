@@ -22,7 +22,9 @@ use crate::constants::{CHUNK_READ_TIMEOUT_SECS, MAX_REDIRECTS};
 use crate::cookie::CookieSource;
 use crate::disk_space::PlannedDownload;
 use crate::error::IaGetError;
-use crate::ui::state::{CompletionKind, CompletionRecord, SkipReason, TransferStage, UiEvent};
+use crate::ui::state::{
+    CompletionKind, CompletionRecord, QueuedFile, SkipReason, TransferStage, UiEvent,
+};
 use crate::ui::{UiDriver, UiHandle, UiSessionConfig};
 use crate::utils::{format_duration, sanitize_url_for_log, VerboseLogger};
 use crate::Result;
@@ -52,7 +54,7 @@ use fs_safety::{
     promote_part_file, remove_part_file_safely, ContainedFileError,
 };
 use proxy::redact_proxy_value;
-use redirect::{send_following_redirects_with_hook, short_mirror_host, RedirectSendOutcome};
+use redirect::{mirror_host, send_following_redirects_with_hook, RedirectSendOutcome};
 use retry::{
     await_interruptible, compute_retry_delay_with_source, http_status_error, interrupted_error,
     is_throttle_status, parse_ascii_u64,
@@ -853,7 +855,7 @@ async fn download_file_content(
                     ui.send(UiEvent::SlotStage {
                         slot_id: id,
                         stage: TransferStage::Redirect,
-                        mirror_host: short_mirror_host(next_url),
+                        mirror_host: mirror_host(next_url),
                         cooldown: None,
                         retry: None,
                     });
@@ -916,7 +918,7 @@ async fn download_file_content(
             continue;
         }
 
-        let mirror_host = short_mirror_host(response.url());
+        let mirror_host = mirror_host(response.url());
         let content_range_header = response
             .headers()
             .get(reqwest::header::CONTENT_RANGE)
@@ -1601,6 +1603,22 @@ where
     .await
 }
 
+/// Formats an output directory path for compact display (collapsing `$HOME` prefix to `~`).
+fn format_display_dir(path: &Path) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            let home_path = Path::new(&home);
+            if path == home_path {
+                return "~".to_string();
+            }
+            if let Ok(rel) = path.strip_prefix(home_path) {
+                return format!("~/{}", rel.display());
+            }
+        }
+    }
+    path.display().to_string()
+}
+
 /// Downloads multiple files into destination `root` with explicit [`DownloadOptions`],
 /// [`BatchUiOptions`], shutdown signal, and [`VerboseLogger`].
 ///
@@ -1646,13 +1664,24 @@ where
     } else {
         ui_options.identifier.clone()
     };
+    let initial_queue: Vec<QueuedFile> = indexed_items
+        .iter()
+        .map(|(_, item)| QueuedFile {
+            name: item.file_path.clone(),
+            size_bytes: item.expected_size,
+            permits: base_permit_cost(item.expected_size),
+        })
+        .collect();
+    let output_dir = format_display_dir(&canonical_root);
     let (ui_handle, ui_driver) = UiDriver::start(
         UiSessionConfig {
             identifier,
+            output_dir,
             total_files,
             planned_total_bytes,
             limit_rate: options.limit_rate,
             skipped_private_count: ui_options.skipped_private_count,
+            initial_queue,
         },
         Some(scheduler.clone()),
         Some(signal.clone()),
@@ -1727,10 +1756,7 @@ where
         };
 
         let slot_id = original_index as u64;
-        let initial_host = Url::parse(&item.url)
-            .ok()
-            .as_ref()
-            .and_then(short_mirror_host);
+        let initial_host = Url::parse(&item.url).ok().as_ref().and_then(mirror_host);
         ui_handle.send(UiEvent::SchedulerUpdate(scheduler.snapshot()));
         ui_handle.send(UiEvent::SlotStarted {
             slot_id,

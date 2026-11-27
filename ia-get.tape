@@ -14,7 +14,7 @@ Set CursorBlink false
 Set Theme { "name": "ia-get-espresso", "background": "#241A14", "foreground": "#F5EFE6", "cursor": "#F2C96B", "selectionBackground": "#4A3728", "black": "#241A14", "brightBlack": "#8C7B6B", "red": "#E06C65", "brightRed": "#F08A84", "green": "#98C379", "brightGreen": "#B5DB96", "yellow": "#F2C96B", "brightYellow": "#F7DA90", "blue": "#6FA8DC", "brightBlue": "#8CC0EE", "magenta": "#D19FE8", "brightMagenta": "#E2BDF2", "cyan": "#6FC2B8", "brightCyan": "#8FD8CF", "white": "#E6DDD0", "brightWhite": "#FFFDF9" }
 
 Hide
-Type 'cd "${IA_GET_DEMO_DIR:-.}" && clear'
+Type 'export HOME="${IA_GET_DEMO_DIR:-$HOME}" && mkdir -p "$HOME/deftributetozzap64" && cd "$HOME/deftributetozzap64" && clear'
 Enter
 Sleep 200ms
 Show
@@ -26,9 +26,9 @@ Wait+Screen@30s /Archive has [0-9]+ files/
 Wait
 Sleep 1.5s
 
-Type "ia-get -f '*hi-res_*' -f '!*.zip' https://archive.org/details/deftributetozzap64"
+Type "ia-get -f '!*.zip' -f '!*.pdf' https://archive.org/details/deftributetozzap64"
 Enter
-Wait+Screen@45s /Completed: [0-9]+ ok/
+Wait+Screen@45s /✓ [0-9]+ ok/
 Wait
 Sleep 1.5s
 

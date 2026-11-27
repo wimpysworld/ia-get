@@ -11,10 +11,21 @@ pub const SPARKLINE_SAMPLES: usize = 12;
 /// Sampling window for each sparkline bar and EWMA aggregate throughput update.
 const SPARKLINE_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Frame interval for the animated MD5 half-circle spinner (~8 fps).
+const MD5_SPINNER_INTERVAL: Duration = Duration::from_millis(125);
+
 /// Angular frequency (rad/s) for critically damped bar easing (~250ms settle, zero overshoot).
 const SPRING_OMEGA: f64 = 14.0;
 
-/// Active transfer stage displayed as a fixed-width 3-character verb on each slot row.
+/// Pending file awaiting a scheduler permit in the live queue preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedFile {
+    pub name: String,
+    pub size_bytes: Option<u64>,
+    pub permits: usize,
+}
+
+/// Active transfer stage displayed as a high-visibility geometric glyph on each slot row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStage {
     /// Fresh HTTP GET streaming from offset 0.
@@ -27,19 +38,6 @@ pub enum TransferStage {
     Md5,
     /// Host throttle / cooldown (HTTP 429 or 503).
     RateLimited,
-}
-
-impl TransferStage {
-    /// Returns the fixed 3-character uppercase stage verb.
-    pub const fn verb(self) -> &'static str {
-        match self {
-            Self::Get => "GET",
-            Self::Resume => "RES",
-            Self::Redirect => "RED",
-            Self::Md5 => "MD5",
-            Self::RateLimited => "429",
-        }
-    }
 }
 
 /// Reason an existing file was skipped without network transfer.
@@ -180,6 +178,11 @@ impl ActiveSlot {
 /// Non-blocking telemetry events emitted by download tasks to the UI task.
 #[derive(Debug, Clone)]
 pub enum UiEvent {
+    /// Initialises the ordered pending queue and formatted destination directory for the batch.
+    BatchStarted {
+        queue: Vec<QueuedFile>,
+        output_dir: String,
+    },
     /// Updated snapshot of scheduler concurrency and backpressure state.
     SchedulerUpdate(SchedulerSnapshot),
     /// A file acquired its scheduler permit and entered an active slot.
@@ -257,11 +260,13 @@ pub fn step_critically_damped(value: &mut f64, velocity: &mut f64, target: f64, 
 #[derive(Debug, Clone)]
 pub struct UiState {
     pub identifier: String,
+    pub output_dir: String,
     pub total_files: usize,
     pub planned_total_bytes: u64,
     pub finished_bytes: u64,
     pub failed_planned_bytes: u64,
     pub session_network_bytes: u64,
+    pub downloaded_bytes_total: u64,
     pub ok_count: usize,
     pub skip_count: usize,
     pub warn_count: usize,
@@ -270,14 +275,20 @@ pub struct UiState {
     pub limit_rate: Option<u64>,
     pub scheduler: SchedulerSnapshot,
     pub active_slots: Vec<ActiveSlot>,
+    pub pending_queue: VecDeque<QueuedFile>,
     pub attention_items: Vec<AttentionItem>,
     pub interrupted: bool,
     pub started_at: Instant,
     pub last_tick_at: Instant,
+    pub finished_at: Option<Instant>,
     pub total_display_ratio: f64,
     pub total_ratio_velocity: f64,
     pub sparkline: VecDeque<u64>,
+    pub run_speed_samples: Vec<u64>,
     pub aggregate_speed_bps: f64,
+    pub peak_bytes_per_sec: f64,
+    pub md5_spinner_frame: usize,
+    md5_spinner_elapsed: Duration,
     spark_window_bytes: u64,
     spark_window_elapsed: Duration,
     pub eta_secs: Option<u64>,
@@ -297,11 +308,13 @@ impl UiState {
         sparkline.resize(SPARKLINE_SAMPLES, 0);
         Self {
             identifier: identifier.into(),
+            output_dir: ".".to_string(),
             total_files,
             planned_total_bytes,
             finished_bytes: 0,
             failed_planned_bytes: 0,
             session_network_bytes: 0,
+            downloaded_bytes_total: 0,
             ok_count: 0,
             skip_count: 0,
             warn_count: 0,
@@ -310,14 +323,20 @@ impl UiState {
             limit_rate,
             scheduler: SchedulerSnapshot::default(),
             active_slots: Vec::with_capacity(4),
+            pending_queue: VecDeque::new(),
             attention_items: Vec::new(),
             interrupted: false,
             started_at: now,
             last_tick_at: now,
+            finished_at: None,
             total_display_ratio: 0.0,
             total_ratio_velocity: 0.0,
             sparkline,
+            run_speed_samples: Vec::new(),
             aggregate_speed_bps: 0.0,
+            peak_bytes_per_sec: 0.0,
+            md5_spinner_frame: 0,
+            md5_spinner_elapsed: Duration::ZERO,
             spark_window_bytes: 0,
             spark_window_elapsed: Duration::ZERO,
             eta_secs: None,
@@ -335,7 +354,7 @@ impl UiState {
         self.dirty = false;
     }
 
-    /// Returns `true` if any bar easing or active cooldown requires further frame ticks.
+    /// Returns `true` if any bar easing, MD5 spinner, or active cooldown requires further frame ticks.
     pub fn is_animating(&self) -> bool {
         let total_diff = (self.total_display_ratio - self.total_target_ratio()).abs();
         if total_diff >= 0.0005 || self.total_ratio_velocity.abs() >= 0.001 {
@@ -348,7 +367,67 @@ impl UiState {
             (slot.display_ratio - slot.target_ratio).abs() >= 0.0005
                 || slot.ratio_velocity.abs() >= 0.001
                 || slot.cooldown_remaining.is_some()
+                || slot.stage == TransferStage::Md5
         })
+    }
+
+    /// Returns elapsed session duration (frozen at `finished_at` once finished).
+    pub fn elapsed(&self) -> Duration {
+        self.finished_at
+            .unwrap_or(self.last_tick_at)
+            .saturating_duration_since(self.started_at)
+    }
+
+    /// Returns total bytes downloaded over the network in this session (with fallback to completed byte counts).
+    pub fn total_bytes_downloaded(&self) -> u64 {
+        if self.session_network_bytes > 0 {
+            self.session_network_bytes
+        } else {
+            self.downloaded_bytes_total
+        }
+    }
+
+    /// Returns full-run average transfer speed in bytes/sec.
+    pub fn average_speed_bps(&self) -> f64 {
+        let bytes = self.total_bytes_downloaded();
+        let secs = self.elapsed().as_secs_f64();
+        if bytes == 0 || secs <= 0.0 {
+            0.0
+        } else {
+            bytes as f64 / secs
+        }
+    }
+
+    /// Returns the number of MD5 hash mismatches recorded (excluding skipped private warnings).
+    pub fn hash_mismatch_count(&self) -> usize {
+        self.warn_count.saturating_sub(self.skipped_private_count)
+    }
+
+    /// Downsamples (or stretches for short runs) the full-run throughput history to 12 buckets.
+    pub fn downsampled_run_sparkline(&self) -> [u64; SPARKLINE_SAMPLES] {
+        let n = self.run_speed_samples.len();
+        if n == 0 {
+            return [0; SPARKLINE_SAMPLES];
+        }
+        let mut out = [0u64; SPARKLINE_SAMPLES];
+        if n == SPARKLINE_SAMPLES {
+            out.copy_from_slice(&self.run_speed_samples);
+        } else if n > SPARKLINE_SAMPLES {
+            for (i, bucket) in out.iter_mut().enumerate() {
+                let start = i * n / SPARKLINE_SAMPLES;
+                let end = ((i + 1) * n / SPARKLINE_SAMPLES).max(start + 1).min(n);
+                let sum: u128 = self.run_speed_samples[start..end]
+                    .iter()
+                    .map(|&v| u128::from(v))
+                    .sum();
+                *bucket = (sum / (end - start) as u128) as u64;
+            }
+        } else {
+            for (i, bucket) in out.iter_mut().enumerate() {
+                *bucket = self.run_speed_samples[i * n / SPARKLINE_SAMPLES];
+            }
+        }
+        out
     }
 
     /// Returns total bytes currently accounted for (completed + skipped + active slots).
@@ -388,13 +467,24 @@ impl UiState {
         (self.total_display_ratio.clamp(0.0, 1.0) * 100.0).round() as u8
     }
 
-    /// Pushes one throughput sample (bytes/sec) into the 12-sample sparkline ring buffer.
+    /// Pushes one throughput sample (bytes/sec) into the 12-sample sparkline ring buffer
+    /// and the full-run throughput history, updating peak speed.
     pub fn record_spark_sample(&mut self, bytes_per_sec: u64) {
         if self.sparkline.len() >= SPARKLINE_SAMPLES {
             self.sparkline.pop_front();
         }
         self.sparkline.push_back(bytes_per_sec);
+        self.run_speed_samples.push(bytes_per_sec);
+        if (bytes_per_sec as f64) > self.peak_bytes_per_sec {
+            self.peak_bytes_per_sec = bytes_per_sec as f64;
+        }
         self.dirty = true;
+    }
+
+    fn remove_from_pending_queue(&mut self, file_path: &str) {
+        if let Some(pos) = self.pending_queue.iter().position(|q| q.name == file_path) {
+            self.pending_queue.remove(pos);
+        }
     }
 
     fn adjust_planned_total_for_slot(&mut self, slot_idx: usize, new_total: u64) {
@@ -409,6 +499,16 @@ impl UiState {
     /// Applies one telemetry event at `now`.
     pub fn on_event(&mut self, event: UiEvent, now: Instant) {
         match event {
+            UiEvent::BatchStarted { queue, output_dir } => {
+                self.pending_queue = queue
+                    .into_iter()
+                    .filter(|item| !self.active_slots.iter().any(|s| s.file_path == item.name))
+                    .collect();
+                if !output_dir.is_empty() {
+                    self.output_dir = output_dir;
+                }
+                self.dirty = true;
+            }
             UiEvent::SchedulerUpdate(snapshot) => {
                 if self.scheduler != snapshot {
                     self.scheduler = snapshot;
@@ -422,6 +522,7 @@ impl UiState {
                 total_bytes,
                 mirror_host,
             } => {
+                self.remove_from_pending_queue(&file_path);
                 if let Some(existing) = self
                     .active_slots
                     .iter_mut()
@@ -603,6 +704,9 @@ impl UiState {
                     .iter()
                     .position(|slot| slot.slot_id == record.slot_id)
                     .map(|idx| self.active_slots.remove(idx));
+                if removed.is_none() {
+                    self.remove_from_pending_queue(&record.file_path);
+                }
 
                 let counted_planned = removed
                     .as_ref()
@@ -610,6 +714,8 @@ impl UiState {
                 match record.kind {
                     CompletionKind::Downloaded { bytes, .. } => {
                         self.ok_count += 1;
+                        self.downloaded_bytes_total =
+                            self.downloaded_bytes_total.saturating_add(bytes);
                         let final_bytes = bytes.max(counted_planned);
                         if final_bytes > counted_planned {
                             self.planned_total_bytes = self
@@ -683,16 +789,52 @@ impl UiState {
                 self.dirty = true;
             }
             UiEvent::Finish => {
+                self.finished_at = Some(now);
+                let tail_elapsed = self
+                    .spark_window_elapsed
+                    .saturating_add(now.saturating_duration_since(self.last_tick_at));
+                if self.spark_window_bytes > 0 {
+                    if tail_elapsed >= SPARKLINE_SAMPLE_INTERVAL / 2 {
+                        let secs = tail_elapsed.as_secs_f64();
+                        let bps = (self.spark_window_bytes as f64 / secs).round() as u64;
+                        self.record_spark_sample(bps);
+                    }
+                    self.spark_window_bytes = 0;
+                    self.spark_window_elapsed = Duration::ZERO;
+                }
+                let avg = self.average_speed_bps();
+                if avg > self.peak_bytes_per_sec {
+                    self.peak_bytes_per_sec = avg;
+                }
+                if self.run_speed_samples.is_empty() && avg >= 1.0 {
+                    self.record_spark_sample(avg.round() as u64);
+                }
                 self.dirty = true;
             }
         }
     }
 
-    /// Advances smooth bar easing, sparkline throughput sampling, and whole-second ETA.
+    /// Advances smooth bar easing, MD5 spinner, sparkline throughput sampling, and whole-second ETA.
     pub fn tick(&mut self, now: Instant) {
         let dt = now.saturating_duration_since(self.last_tick_at);
         self.last_tick_at = now;
         let dt_secs = dt.as_secs_f64();
+
+        if self
+            .active_slots
+            .iter()
+            .any(|slot| slot.stage == TransferStage::Md5)
+        {
+            self.md5_spinner_elapsed = self.md5_spinner_elapsed.saturating_add(dt);
+            if self.md5_spinner_elapsed >= MD5_SPINNER_INTERVAL {
+                let interval_ms = MD5_SPINNER_INTERVAL.as_millis();
+                let elapsed_ms = self.md5_spinner_elapsed.as_millis();
+                let steps = (elapsed_ms / interval_ms) as usize;
+                self.md5_spinner_frame = (self.md5_spinner_frame + steps.max(1)) % 4;
+                self.md5_spinner_elapsed = Duration::from_millis((elapsed_ms % interval_ms) as u64);
+                self.dirty = true;
+            }
+        }
 
         let total_target = self.total_target_ratio();
         let prev_total = self.total_display_ratio;
@@ -931,5 +1073,216 @@ mod tests {
         assert_eq!(state.warn_count, 3); // 2 skipped private + 1 hash mismatch
         assert_eq!(state.fail_count, 1);
         assert_eq!(state.attention_items.len(), 3);
+    }
+
+    #[test]
+    fn pending_queue_removes_files_on_start_and_finish_and_md5_spinner_advances() {
+        let t0 = Instant::now();
+        let mut state = UiState::new("item", 3, 3000, None, t0);
+        state.on_event(
+            UiEvent::BatchStarted {
+                queue: vec![
+                    QueuedFile {
+                        name: "a.jpg".to_string(),
+                        size_bytes: Some(1000),
+                        permits: 1,
+                    },
+                    QueuedFile {
+                        name: "b.pdf".to_string(),
+                        size_bytes: Some(2000),
+                        permits: 2,
+                    },
+                    QueuedFile {
+                        name: "c.zip".to_string(),
+                        size_bytes: None,
+                        permits: 4,
+                    },
+                ],
+                output_dir: "~/Downloads/item".to_string(),
+            },
+            t0,
+        );
+        assert_eq!(state.output_dir, "~/Downloads/item");
+        assert_eq!(state.pending_queue.len(), 3);
+
+        state.on_event(
+            UiEvent::SlotStarted {
+                slot_id: 1,
+                file_path: "a.jpg".to_string(),
+                permit_cost: 1,
+                total_bytes: Some(1000),
+                mirror_host: None,
+            },
+            t0,
+        );
+        assert_eq!(state.pending_queue.len(), 2);
+        assert_eq!(state.pending_queue[0].name, "b.pdf");
+
+        state.on_event(
+            UiEvent::SlotStage {
+                slot_id: 1,
+                stage: TransferStage::Md5,
+                mirror_host: None,
+                cooldown: None,
+                retry: None,
+            },
+            t0,
+        );
+        assert!(state.is_animating());
+        assert_eq!(state.md5_spinner_frame, 0);
+        state.tick(t0 + Duration::from_millis(125));
+        assert_eq!(state.md5_spinner_frame, 1);
+        state.tick(t0 + Duration::from_millis(250));
+        assert_eq!(state.md5_spinner_frame, 2);
+        state.tick(t0 + Duration::from_millis(375));
+        assert_eq!(state.md5_spinner_frame, 3);
+        state.tick(t0 + Duration::from_millis(500));
+        assert_eq!(state.md5_spinner_frame, 0);
+
+        // Finishing a file directly also removes it from pending_queue if still present.
+        state.on_event(
+            UiEvent::SlotFinished(CompletionRecord {
+                slot_id: 2,
+                file_path: "b.pdf".to_string(),
+                kind: CompletionKind::Skipped {
+                    reason: SkipReason::AlreadyVerified,
+                    bytes: 2000,
+                },
+                finished_index: 1,
+                total_files: 3,
+            }),
+            t0 + Duration::from_millis(600),
+        );
+        assert_eq!(state.pending_queue.len(), 1);
+        assert_eq!(state.pending_queue[0].name, "c.zip");
+    }
+
+    #[test]
+    fn full_run_sparkline_downsamples_long_runs_and_tracks_peak_speed() {
+        let t0 = Instant::now();
+        let mut state = UiState::new("item", 2, 2_000_000, None, t0);
+        for i in 1..=24u64 {
+            state.record_spark_sample(i * 100_000);
+        }
+        assert_eq!(state.peak_bytes_per_sec, 2_400_000.0);
+        let downsampled = state.downsampled_run_sparkline();
+        assert_eq!(downsampled.len(), SPARKLINE_SAMPLES);
+        assert_eq!(downsampled[0], 150_000);
+        assert_eq!(downsampled[11], 2_350_000);
+    }
+
+    #[test]
+    fn finish_ignores_sub_quarter_second_tail_flush_to_prevent_fake_peak_spike() {
+        let t0 = Instant::now();
+        let mut state = UiState::new("item", 1, 2_000_000, None, t0);
+        state.on_event(
+            UiEvent::SlotStarted {
+                slot_id: 1,
+                file_path: "scan.pdf".to_string(),
+                permit_cost: 1,
+                total_bytes: Some(2_000_000),
+                mirror_host: None,
+            },
+            t0,
+        );
+
+        // Two normal 500ms windows at 1 MB/s each (500 KB per 500ms).
+        state.on_event(
+            UiEvent::SlotProgress {
+                slot_id: 1,
+                current_bytes: 500_000,
+                total_bytes: Some(2_000_000),
+                delta_network_bytes: 500_000,
+            },
+            t0 + Duration::from_millis(500),
+        );
+        state.tick(t0 + Duration::from_millis(500));
+
+        state.on_event(
+            UiEvent::SlotProgress {
+                slot_id: 1,
+                current_bytes: 1_000_000,
+                total_bytes: Some(2_000_000),
+                delta_network_bytes: 500_000,
+            },
+            t0 + Duration::from_millis(1000),
+        );
+        state.tick(t0 + Duration::from_millis(1000));
+
+        // 2ms later, a 100 KB final buffer flush arrives right before Finish (would be 50 MB/s!).
+        state.on_event(
+            UiEvent::SlotProgress {
+                slot_id: 1,
+                current_bytes: 1_100_000,
+                total_bytes: Some(2_000_000),
+                delta_network_bytes: 100_000,
+            },
+            t0 + Duration::from_millis(1002),
+        );
+        state.on_event(UiEvent::Finish, t0 + Duration::from_millis(1002));
+
+        assert_eq!(state.run_speed_samples.len(), 2);
+        assert!(
+            state.peak_bytes_per_sec < 1_200_000.0,
+            "2ms tail flush must not create a fake peak spike: {}",
+            state.peak_bytes_per_sec
+        );
+    }
+
+    #[test]
+    fn slot_finished_for_active_slot_does_not_evict_duplicate_pending_filename() {
+        let t0 = Instant::now();
+        let mut state = UiState::new("item", 2, 2000, None, t0);
+        state.on_event(
+            UiEvent::BatchStarted {
+                queue: vec![
+                    QueuedFile {
+                        name: "dup.bin".to_string(),
+                        size_bytes: Some(1000),
+                        permits: 1,
+                    },
+                    QueuedFile {
+                        name: "dup.bin".to_string(),
+                        size_bytes: Some(1000),
+                        permits: 1,
+                    },
+                ],
+                output_dir: ".".to_string(),
+            },
+            t0,
+        );
+        assert_eq!(state.pending_queue.len(), 2);
+
+        state.on_event(
+            UiEvent::SlotStarted {
+                slot_id: 1,
+                file_path: "dup.bin".to_string(),
+                permit_cost: 1,
+                total_bytes: Some(1000),
+                mirror_host: None,
+            },
+            t0,
+        );
+        assert_eq!(state.pending_queue.len(), 1);
+
+        state.on_event(
+            UiEvent::SlotFinished(CompletionRecord {
+                slot_id: 1,
+                file_path: "dup.bin".to_string(),
+                kind: CompletionKind::Downloaded {
+                    bytes: 1000,
+                    duration: Duration::from_millis(100),
+                    verified_md5: true,
+                },
+                finished_index: 1,
+                total_files: 2,
+            }),
+            t0 + Duration::from_millis(100),
+        );
+        assert_eq!(
+            state.pending_queue.len(),
+            1,
+            "finishing an active slot must not evict a second still-queued duplicate filename"
+        );
     }
 }

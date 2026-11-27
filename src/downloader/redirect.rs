@@ -68,19 +68,13 @@ pub(super) enum RedirectSendOutcome {
     TransportError(reqwest::Error),
 }
 
-/// Extracts a concise mirror host label from a download or redirect URL.
+/// Extracts the full mirror hostname from a download or redirect URL.
 ///
-/// Strips `.us.archive.org` / `.archive.org` suffixes so archive.org storage nodes
-/// display cleanly (e.g. `ia801504` from `ia801504.us.archive.org`).
-pub(crate) fn short_mirror_host(url: &Url) -> Option<String> {
-    let host = url.host_str()?;
-    if let Some(prefix) = host.strip_suffix(".us.archive.org") {
-        Some(prefix.to_string())
-    } else if let Some(prefix) = host.strip_suffix(".archive.org") {
-        Some(prefix.to_string())
-    } else {
-        Some(host.to_string())
-    }
+/// Preserves regional subdomains (for example `ia801909.us.archive.org`,
+/// `dn790007.ca.archive.org`, `dn760105.eu.archive.org`) so the live UI can
+/// resolve the 2-letter mirror region badge.
+pub(crate) fn mirror_host(url: &Url) -> Option<String> {
+    url.host_str().map(str::to_owned)
 }
 
 pub(super) async fn send_following_redirects<F>(
