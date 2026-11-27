@@ -47,7 +47,9 @@ src/
 │   ├── mod.rs               # Inline Ratatui TTY driver, cooked-mode status spinner, non-TTY plain output
 │   ├── palette.rs           # Archival colour tokens, Unicode/ASCII glyph sets, inline style helpers
 │   ├── state.rs             # Terminal-independent UI state, critically damped easing, sparkline ring buffer
-│   └── render.rs            # Pure frame renderer, responsive breakpoints, completion lines, post-run summary
+│   ├── render.rs            # Pure frame renderer, responsive breakpoints, Archival Receipt, adaptive ledger
+│   ├── list.rs              # Interactive --list Manifest Card, flat-grouped micro-bars, large-archive breakdown
+│   └── check.rs             # Interactive --check Verification Card, status rows, and failure ledger
 ├── archive_metadata.rs      # XML parsing for archive.org
 ├── cookie.rs                # Netscape cookies.txt and raw Cookie header scoping
 ├── disk_space.rs            # Free-space estimation and pre-download checks
