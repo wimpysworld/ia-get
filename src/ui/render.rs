@@ -36,10 +36,13 @@ pub const COMPACT_WIDTH_BREAKPOINT: u16 = 60;
 pub const MIN_BORDERED_WIDTH: u16 = 48;
 
 /// Maximum rows shown in the adaptive exception ledger before capping.
-const LEDGER_MAX_UNTRUNCATED_GROUP: usize = 20;
+pub(crate) const LEDGER_MAX_UNTRUNCATED_GROUP: usize = 20;
 
 /// Number of rows kept when a ledger group exceeds [`LEDGER_MAX_UNTRUNCATED_GROUP`].
-const LEDGER_CAPPED_ROWS: usize = 15;
+pub(crate) const LEDGER_CAPPED_ROWS: usize = 15;
+
+/// Maximum sanitization rename rows displayed on interactive TTY before capping.
+const SANITIZE_TTY_CAP: usize = 5;
 
 /// Computes the steady transfer-bay row count for a batch (`min(4, total_files)`, at least 1).
 pub const fn compute_bay_rows(total_files: usize) -> usize {
@@ -156,7 +159,7 @@ pub fn tail_truncate(s: &str, max_cells: usize) -> String {
 }
 
 /// Pads `s` with trailing spaces to reach `target_cells` display columns.
-fn pad_right(s: &str, target_cells: usize) -> String {
+pub(crate) fn pad_right(s: &str, target_cells: usize) -> String {
     let w = s.width();
     if w >= target_cells {
         tail_truncate(s, target_cells)
@@ -168,6 +171,130 @@ fn pad_right(s: &str, target_cells: usize) -> String {
         }
         out
     }
+}
+
+/// Case-insensitive natural alphanumeric comparator for sorting folders and filenames.
+pub(crate) fn alphanumeric_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    let (mut i, mut j) = (0usize, 0usize);
+
+    while i < ab.len() && j < bb.len() {
+        if ab[i].is_ascii_digit() && bb[j].is_ascii_digit() {
+            let a_start = i;
+            while i < ab.len() && ab[i].is_ascii_digit() {
+                i += 1;
+            }
+            let b_start = j;
+            while j < bb.len() && bb[j].is_ascii_digit() {
+                j += 1;
+            }
+            let a_run = &ab[a_start..i];
+            let b_run = &bb[b_start..j];
+            let a_trim = a_run
+                .iter()
+                .position(|&c| c != b'0')
+                .map_or(&b"0"[..], |pos| &a_run[pos..]);
+            let b_trim = b_run
+                .iter()
+                .position(|&c| c != b'0')
+                .map_or(&b"0"[..], |pos| &b_run[pos..]);
+            let cmp = a_trim
+                .len()
+                .cmp(&b_trim.len())
+                .then_with(|| a_trim.cmp(b_trim))
+                .then_with(|| a_run.len().cmp(&b_run.len()));
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+        } else {
+            let ca = ab[i].to_ascii_lowercase();
+            let cb = bb[j].to_ascii_lowercase();
+            let cmp = ca.cmp(&cb);
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+            i += 1;
+            j += 1;
+        }
+    }
+
+    ab.len().cmp(&bb.len()).then_with(|| a.cmp(b))
+}
+
+/// Colour mode for the 8-cell proportional micro-bar shared across `--list` and `--check`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MicroBarStyle {
+    /// Bronze-to-gold archival gradient (`--list` file and folder bars).
+    ArchivalGold,
+    /// Sage green gradient (`--check` verified passing rows).
+    SageOk,
+    /// Warm amber (`--check` warning rows).
+    AmberWarn,
+    /// Crimson (`--check` failed rows).
+    CrimsonFail,
+}
+
+/// Builds an exact `width`-cell proportional micro-bar using eighth-blocks (`▏..█`) or a calm
+/// `·` placeholder for zero, tiny, or unknown values.
+pub(crate) fn build_micro_bar_spans(
+    ratio: Option<f64>,
+    width: usize,
+    mode: MicroBarStyle,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let glyphs = theme.glyphs();
+    let Some(r) = ratio.filter(|r| r.is_finite() && *r > 0.0) else {
+        let mut spans = vec![Span::styled(glyphs.micro_dot, theme.muted_style())];
+        if width > 1 {
+            spans.push(Span::raw(" ".repeat(width - 1)));
+        }
+        return spans;
+    };
+
+    let total_eighths = (r.clamp(0.0, 1.0) * (width * 8) as f64).round() as usize;
+    if total_eighths == 0 {
+        let mut spans = vec![Span::styled(glyphs.micro_dot, theme.muted_style())];
+        if width > 1 {
+            spans.push(Span::raw(" ".repeat(width - 1)));
+        }
+        return spans;
+    }
+
+    let full_cells = (total_eighths / 8).min(width);
+    let remainder = if full_cells >= width {
+        0
+    } else {
+        total_eighths % 8
+    };
+    let filled_total = full_cells + usize::from(remainder > 0);
+
+    let cell_style = |cell: usize| match mode {
+        MicroBarStyle::ArchivalGold => theme.bar_fill_style(cell, width, false),
+        MicroBarStyle::SageOk => theme.bar_fill_style(cell, width, true),
+        MicroBarStyle::AmberWarn => theme.warn_style(),
+        MicroBarStyle::CrimsonFail => theme.err_style(),
+    };
+
+    let mut spans = Vec::with_capacity(width + 1);
+    for cell in 0..full_cells {
+        spans.push(Span::styled(glyphs.bar_blocks[7], cell_style(cell)));
+    }
+    if remainder > 0 {
+        spans.push(Span::styled(
+            glyphs.bar_blocks[remainder - 1],
+            cell_style(full_cells),
+        ));
+    }
+    if filled_total < width {
+        spans.push(Span::raw(" ".repeat(width - filled_total)));
+    }
+    spans
 }
 
 /// Formats a whole-second ETA value (`--:--`, `00:42`, `1h05m`, `12h05m`, `>99h`).
@@ -434,24 +561,8 @@ fn build_total_line(
         format!("  {}", format_compact_bytes(cur_bytes))
     };
 
-    // Right-hand ETA or rate cap label.
-    let right_label = match state.limit_rate {
-        Some(cap) => {
-            let cap_str = format!("cap {}", format_speed(cap as f64));
-            let eta_str = format!("ETA {}", format_eta(state.eta_secs));
-            if inner_width >= 96 {
-                format!("{cap_str}  {eta_str}")
-            } else {
-                cap_str
-            }
-        }
-        None => format!("ETA {}", format_eta(state.eta_secs)),
-    };
-    let right_w = right_label.width();
-
     let label = "TOTAL ";
     let left_fixed = label.width() + bar_width + pct_str.width();
-    let mut middle_budget = inner_width.saturating_sub(left_fixed + 1 + right_w);
 
     // Optional middle segments: hide 0 skip, 0 warn, and 0 fail.
     let fail_spans = (state.fail_count > 0).then(|| {
@@ -486,6 +597,42 @@ fn build_total_line(
         let w = text.width();
         (vec![Span::styled(text, theme.muted_style())], w)
     });
+
+    let counters_w = fail_spans.as_ref().map_or(0, |(_, w)| *w)
+        + warn_spans.as_ref().map_or(0, |(_, w)| *w)
+        + ok_w
+        + skip_spans.as_ref().map_or(0, |(_, w)| *w);
+
+    // Right-hand ETA and optional rate cap label (cap drops cleanly below 60 cols).
+    // Keep both `cap` and `ETA` whenever they fit alongside the active counters.
+    let show_cap = inner_width >= (COMPACT_WIDTH_BREAKPOINT as usize).saturating_sub(4);
+    let (right_spans, right_w): (Vec<Span<'static>>, usize) = match (state.limit_rate, show_cap) {
+        (Some(cap), true) => {
+            let cap_str = format!("cap {}", format_speed(cap as f64));
+            let eta_str = format!("ETA {}", format_eta(state.eta_secs));
+            let both_w = cap_str.width() + 2 + eta_str.width();
+            if left_fixed + counters_w + 2 + both_w <= inner_width {
+                (
+                    vec![
+                        Span::styled(cap_str, theme.warn_style()),
+                        Span::raw("  "),
+                        Span::styled(eta_str, theme.muted_style()),
+                    ],
+                    both_w,
+                )
+            } else {
+                let w = cap_str.width();
+                (vec![Span::styled(cap_str, theme.warn_style())], w)
+            }
+        }
+        _ => {
+            let eta_str = format!("ETA {}", format_eta(state.eta_secs));
+            let w = eta_str.width();
+            (vec![Span::styled(eta_str, theme.muted_style())], w)
+        }
+    };
+
+    let mut middle_budget = inner_width.saturating_sub(left_fixed + 1 + right_w);
 
     // Allocate space in priority order (fail > warn > ok > skip > bytes) so narrow rows
     // drop bytes before hiding warning or failure counters.
@@ -549,7 +696,7 @@ fn build_total_line(
         spans.push(Span::raw(" ".repeat(pad)));
     }
     if used + right_w <= inner_width {
-        spans.push(Span::styled(right_label, theme.muted_style()));
+        spans.extend(right_spans);
     }
 
     Line::from(spans)
@@ -1101,7 +1248,7 @@ fn clip_and_pad_spans(spans: Vec<Span<'static>>, inner_width: usize) -> Vec<Span
 }
 
 /// Wraps inner receipt spans in `│ <inner> │`, guaranteeing exact display width `inner_width + 4`.
-fn frame_receipt_row(
+pub(crate) fn frame_receipt_row(
     spans: Vec<Span<'static>>,
     inner_width: usize,
     theme: &Theme,
@@ -1118,7 +1265,7 @@ fn frame_receipt_row(
 
 /// Allocates `bar_width` cells proportionally across `[ok, skip, warn, fail, unstarted]`,
 /// ensuring every non-zero bucket gets at least 1 cell whenever width permits.
-fn allocate_outcome_bar_widths(counts: [usize; 5], bar_width: usize) -> [usize; 5] {
+pub(crate) fn allocate_outcome_bar_widths(counts: [usize; 5], bar_width: usize) -> [usize; 5] {
     let mut widths = [0usize; 5];
     if bar_width == 0 {
         return widths;
@@ -1534,6 +1681,25 @@ pub fn build_archival_receipt_lines(
         inner_width,
         theme,
     ));
+    if let Some(filter) = state.filter.as_ref().filter(|f| f.is_active()) {
+        let prefix = "filter: ";
+        let value = format!(
+            "{} ({} of {})",
+            filter.patterns.join(", "),
+            filter.matched,
+            filter.total
+        );
+        let value_budget = inner_width.saturating_sub(prefix.width());
+        let value_fit = middle_truncate(&value, value_budget, glyphs.ellipsis);
+        lines.push(frame_receipt_row(
+            vec![
+                Span::styled(prefix, theme.muted_style()),
+                Span::styled(value_fit, theme.primary_style()),
+            ],
+            inner_width,
+            theme,
+        ));
+    }
     lines.push(Line::from(Span::styled(
         format!(
             "{}{}{}",
@@ -1547,12 +1713,12 @@ pub fn build_archival_receipt_lines(
 }
 
 /// Returns up to `max_chars` leading characters of a hex digest without splitting UTF-8.
-fn short_hash(digest: &str, max_chars: usize) -> String {
+pub(crate) fn short_hash(digest: &str, max_chars: usize) -> String {
     digest.chars().take(max_chars).collect()
 }
 
 /// Clips a line's spans in place so total display width never exceeds `max_width` (without padding).
-fn clip_line_to_max_width(line: Line<'static>, max_width: usize) -> Line<'static> {
+pub(crate) fn clip_line_to_max_width(line: Line<'static>, max_width: usize) -> Line<'static> {
     let mut out = Vec::with_capacity(line.spans.len());
     let mut used = 0usize;
     for span in line.spans {
@@ -1577,7 +1743,7 @@ fn clip_line_to_max_width(line: Line<'static>, max_width: usize) -> Line<'static
 /// Appends a copy-clean `┃` ledger group header (wrapping an optional explanatory note onto a
 /// second indented `┃` line whenever `title + note` would exceed `max_width`).
 #[allow(clippy::too_many_arguments)]
-fn push_ledger_group_header(
+pub(crate) fn push_ledger_group_header(
     out: &mut Vec<Line<'static>>,
     bar: &'static str,
     bar_style: Style,
@@ -1915,25 +2081,50 @@ pub fn build_exception_ledger_lines(
             style,
             glyphs.skip,
             format!("Skipped private ({skipped_private})"),
-            Some("archive.org access restricted"),
+            Some("supply -b/--cookies to download"),
             max_width,
             theme,
         );
         let indent = if max_width >= 48 { "   " } else { " " };
-        let file_label = if skipped_private == 1 {
-            "file"
-        } else {
-            "files"
-        };
-        let detail = format!(
-            "{skipped_private} private {file_label} skipped (supply -b/--cookies to download)"
-        );
         let budget = max_width.saturating_sub(bar.width() + indent.len());
-        lines.push(Line::from(vec![
-            Span::styled(bar, style),
-            Span::raw(indent),
-            Span::styled(tail_truncate(&detail, budget), theme.muted_style()),
-        ]));
+        if !state.skipped_private_files.is_empty() {
+            let shown = if state.skipped_private_files.len() > LEDGER_MAX_UNTRUNCATED_GROUP {
+                LEDGER_CAPPED_ROWS
+            } else {
+                state.skipped_private_files.len()
+            };
+            for file_name in &state.skipped_private_files[..shown] {
+                let name_fit = middle_truncate(file_name, budget, glyphs.ellipsis);
+                lines.push(Line::from(vec![
+                    Span::styled(bar, style),
+                    Span::raw(indent),
+                    Span::styled(name_fit, theme.primary_style()),
+                ]));
+            }
+            if state.skipped_private_files.len() > LEDGER_MAX_UNTRUNCATED_GROUP {
+                let more = state.skipped_private_files.len() - LEDGER_CAPPED_ROWS;
+                let note = format!("+{more} more, re-run with -v for the full list");
+                lines.push(Line::from(vec![
+                    Span::styled(bar, style),
+                    Span::raw(indent),
+                    Span::styled(tail_truncate(&note, budget), theme.muted_style()),
+                ]));
+            }
+        } else {
+            let file_label = if skipped_private == 1 {
+                "file"
+            } else {
+                "files"
+            };
+            let detail = format!(
+                "{skipped_private} private {file_label} skipped (supply -b/--cookies to download)"
+            );
+            lines.push(Line::from(vec![
+                Span::styled(bar, style),
+                Span::raw(indent),
+                Span::styled(tail_truncate(&detail, budget), theme.muted_style()),
+            ]));
+        }
     }
 
     lines
@@ -1993,6 +2184,120 @@ pub fn render_lines_to_plain(lines: &[Line<'static>]) -> Vec<String> {
 pub fn format_tty_summary(state: &UiState, theme: &Theme, width: u16) -> String {
     let lines = build_post_run_tty_lines(state, theme, width);
     render_lines_to_ansi(&lines, theme)
+}
+
+/// Builds the copy-clean `┃` left-accented notice for sanitised filename renames on TTY.
+pub fn build_sanitization_notice_lines(
+    sanitized: &[(String, String)],
+    theme: &Theme,
+    width: u16,
+) -> Vec<Line<'static>> {
+    if sanitized.is_empty() || width == 0 {
+        return Vec::new();
+    }
+    let max_width = width as usize;
+    let glyphs = theme.glyphs();
+    let bar = glyphs.ledger_bar;
+    let style = theme.warn_style();
+    let count = sanitized.len();
+    let file_label = if count == 1 { "file" } else { "files" };
+
+    let mut lines = Vec::new();
+    push_ledger_group_header(
+        &mut lines,
+        bar,
+        style,
+        glyphs.warn,
+        format!("Sanitized {count} {file_label} for filesystem compatibility"),
+        None,
+        max_width,
+        theme,
+    );
+
+    let indent = if max_width >= 48 { "   " } else { " " };
+    let prefix_w = bar.width() + indent.len();
+    let row_budget = max_width.saturating_sub(prefix_w);
+    let arrow_part = format!(" {} ", glyphs.arrow);
+    let arrow_w = arrow_part.width();
+    let shown = sanitized.len().min(SANITIZE_TTY_CAP);
+
+    let half_budget = row_budget.saturating_sub(arrow_w) / 2;
+    let max_orig_w = sanitized[..shown]
+        .iter()
+        .map(|(orig, _)| orig.width())
+        .max()
+        .unwrap_or(0);
+    let orig_col_w = max_orig_w.min(half_budget);
+    let san_budget = row_budget.saturating_sub(orig_col_w + arrow_w);
+
+    for (orig, renamed) in &sanitized[..shown] {
+        if orig_col_w > 0 && san_budget > 0 {
+            let orig_fit = pad_right(
+                &middle_truncate(orig, orig_col_w, glyphs.ellipsis),
+                orig_col_w,
+            );
+            let san_fit = middle_truncate(renamed, san_budget, glyphs.ellipsis);
+            lines.push(Line::from(vec![
+                Span::styled(bar, style),
+                Span::raw(indent),
+                Span::styled(orig_fit, theme.muted_style()),
+                Span::styled(arrow_part.clone(), theme.muted_style()),
+                Span::styled(san_fit, theme.bold_style()),
+            ]));
+        } else {
+            let combined = format!("{orig}{arrow_part}{renamed}");
+            lines.push(Line::from(vec![
+                Span::styled(bar, style),
+                Span::raw(indent),
+                Span::styled(tail_truncate(&combined, row_budget), theme.primary_style()),
+            ]));
+        }
+    }
+
+    if sanitized.len() > SANITIZE_TTY_CAP {
+        let more = sanitized.len() - SANITIZE_TTY_CAP;
+        let note = format!("+{more} more, re-run with -v for all");
+        lines.push(Line::from(vec![
+            Span::styled(bar, style),
+            Span::raw(indent),
+            Span::styled(tail_truncate(&note, row_budget), theme.muted_style()),
+        ]));
+    }
+
+    lines
+        .into_iter()
+        .map(|line| clip_line_to_max_width(line, max_width))
+        .collect()
+}
+
+/// Formats the interactive TTY `┃` notice for sanitised filename renames.
+pub fn format_sanitization_notice_tty(
+    sanitized: &[(String, String)],
+    theme: &Theme,
+    width: u16,
+) -> String {
+    let lines = build_sanitization_notice_lines(sanitized, theme, width);
+    render_lines_to_ansi(&lines, theme)
+}
+
+/// Formats an unhandled fatal CLI error for `stderr`.
+///
+/// Emits a crisp crimson `┃ ✗ <error>` callout on interactive TTY (respecting `NO_COLOR` and
+/// ASCII `|` / `x` fallbacks), and plain `Error: <error>` on non-TTY streams.
+pub fn format_fatal_error(message: &str, interactive_stderr: bool, theme: &Theme) -> String {
+    if !interactive_stderr {
+        return format!("Error: {message}");
+    }
+    let glyphs = theme.glyphs();
+    let bar = style_ratatui_to_ansi(glyphs.ledger_bar, theme.err_style(), theme);
+    let icon = style_ratatui_to_ansi(glyphs.fail, theme.bold_if_color(theme.err_style()), theme);
+    let mut lines = message.lines();
+    let first = lines.next().unwrap_or("");
+    let mut out = format!("{bar} {icon} {first}");
+    for rest in lines {
+        out.push_str(&format!("\n{bar}   {rest}"));
+    }
+    out
 }
 
 /// Formats the calm post-run plain-text summary and uncapped `Needs attention` section (non-TTY).
@@ -2137,7 +2442,7 @@ mod tests {
 
     use super::*;
     use crate::downloader::SchedulerSnapshot;
-    use crate::ui::state::UiEvent;
+    use crate::ui::state::{FilterContext, UiEvent};
 
     fn buffer_to_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
         let buf = terminal.backend().buffer();
@@ -3177,6 +3482,22 @@ mod tests {
                     6,
                     "{w}x{h} should wrap row 3 into 2 inner rows:\n{joined}"
                 );
+            } else if w >= 80 {
+                assert_eq!(
+                    plain.len(),
+                    5,
+                    "{w}x{h} receipt without filter must be 5 tight rows:\n{joined}"
+                );
+            }
+            for row in &plain[1..plain.len() - 1] {
+                let inner = row
+                    .strip_prefix('│')
+                    .and_then(|r| r.strip_suffix('│'))
+                    .expect("inner receipt row must be bordered");
+                assert!(
+                    !inner.trim().is_empty(),
+                    "{w}x{h} receipt must have zero blank inner rows:\n{joined}"
+                );
             }
 
             // Render via Ratatui TestBackend as well to verify zero panic / clean cells.
@@ -3910,5 +4231,191 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn limit_rate_cap_shows_on_60_plus_and_drops_cleanly_below_60_cols() {
+        let t0 = Instant::now();
+        let mut state = UiState::new("zzap64", 4, 4_000_000, Some(500 * 1024), t0);
+        state.ok_count = 1;
+        state.eta_secs = Some(42);
+        let theme = Theme::archival_truecolor();
+
+        let term_80 = render_snapshot(80, 24, &state, &theme);
+        let lines_80 = buffer_to_lines(&term_80);
+        assert!(lines_80[2].contains("cap 500 KB/s"), "{lines_80:?}");
+        assert!(
+            lines_80[2].contains("ETA 00:42"),
+            "80 cols must keep ETA alongside cap when both fit:\n{}",
+            lines_80[2]
+        );
+
+        let term_60 = render_snapshot(60, 20, &state, &theme);
+        let lines_60 = buffer_to_lines(&term_60);
+        assert!(lines_60[2].contains("cap 500 KB/s"), "{lines_60:?}");
+        assert!(
+            lines_60[2].contains("ETA 00:42"),
+            "60 cols must keep ETA alongside cap when both fit:\n{}",
+            lines_60[2]
+        );
+
+        // When counters are crowded at 60 cols, drop ETA cleanly rather than hiding warn/fail.
+        let mut crowded = state.clone();
+        crowded.warn_count = 2;
+        crowded.fail_count = 1;
+        let term_crowded_60 = render_snapshot(60, 20, &crowded, &theme);
+        let lines_crowded_60 = buffer_to_lines(&term_crowded_60);
+        assert!(
+            lines_crowded_60[2].contains("cap 500 KB/s"),
+            "{lines_crowded_60:?}"
+        );
+        assert!(
+            lines_crowded_60[2].contains("! 2 warn") && lines_crowded_60[2].contains("✗ 1 fail"),
+            "crowded 60 cols must preserve warn/fail counters:\n{}",
+            lines_crowded_60[2]
+        );
+
+        let term_52 = render_snapshot(52, 20, &state, &theme);
+        let lines_52 = buffer_to_lines(&term_52);
+        assert!(
+            !lines_52[2].contains("cap "),
+            "cap must drop cleanly below 60 cols:\n{}",
+            lines_52.join("\n")
+        );
+        assert!(lines_52[2].contains("ETA 00:42"), "{lines_52:?}");
+    }
+
+    #[test]
+    fn archival_receipt_renders_active_filter_and_skipped_private_filenames_in_ledger() {
+        let t0 = Instant::now();
+        let mut state = UiState::new("zzap64", 10, 50_000_000, None, t0);
+        state.ok_count = 10;
+        state.output_dir = "~/zzap64".to_string();
+        state.filter = Some(FilterContext {
+            patterns: vec!["!*.zip".to_string(), "!*.pdf".to_string()],
+            matched: 10,
+            total: 12,
+        });
+        state.on_event(
+            UiEvent::SkippedPrivateFiles(vec![
+                "restricted_scan.pdf".to_string(),
+                "private/bonus.zip".to_string(),
+            ]),
+            t0,
+        );
+        state.finished_at = Some(t0 + Duration::from_secs(3));
+
+        let theme = Theme::archival_truecolor();
+        for width in [120u16, 80, 60] {
+            let receipt = build_archival_receipt_lines(&state, &theme, width);
+            let plain = render_lines_to_plain(&receipt);
+            for (idx, row) in plain.iter().enumerate() {
+                assert_eq!(
+                    row.width(),
+                    width as usize,
+                    "width {width} row {idx} width mismatch: {row:?}"
+                );
+            }
+            let joined = plain.join("\n");
+            let expected_rows = if width <= 60 { 7 } else { 6 };
+            assert_eq!(
+                plain.len(),
+                expected_rows,
+                "width {width} receipt with filter must have exact height {expected_rows}:\n{joined}"
+            );
+            for row in &plain[1..plain.len() - 1] {
+                let inner = row
+                    .strip_prefix('│')
+                    .and_then(|r| r.strip_suffix('│'))
+                    .expect("inner receipt row must be bordered");
+                assert!(
+                    !inner.trim().is_empty(),
+                    "width {width} receipt with filter must have zero blank inner rows:\n{joined}"
+                );
+            }
+            assert!(
+                joined.contains("filter: !*.zip, !*.pdf (10 of 12)"),
+                "{joined}"
+            );
+            assert!(joined.contains("! 2 warn"), "{joined}");
+        }
+
+        let ledger =
+            render_lines_to_plain(&build_exception_ledger_lines(&state, &theme, 80)).join("\n");
+        assert!(
+            ledger.contains("┃ ↷ Skipped private (2) · supply -b/--cookies to download"),
+            "{ledger}"
+        );
+        assert!(ledger.contains("restricted_scan.pdf"), "{ledger}");
+        assert!(ledger.contains("private/bonus.zip"), "{ledger}");
+    }
+
+    #[test]
+    fn sanitization_notice_tty_aligns_up_to_5_rows_caps_overflow_and_supports_ascii_no_color() {
+        let renames: Vec<(String, String)> = (1..=7)
+            .map(|i| {
+                (
+                    format!("Episode {i}: Why?.mp4"),
+                    format!("Episode {i}_ Why_.mp4"),
+                )
+            })
+            .collect();
+
+        let tc = Theme::archival_truecolor();
+        let lines = build_sanitization_notice_lines(&renames, &tc, 80);
+        let plain = render_lines_to_plain(&lines);
+        let joined = plain.join("\n");
+        assert!(
+            joined.contains("┃ ! Sanitized 7 files for filesystem compatibility"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("Episode 1: Why?.mp4 → Episode 1_ Why_.mp4"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("Episode 5: Why?.mp4 → Episode 5_ Why_.mp4"),
+            "{joined}"
+        );
+        assert!(
+            !joined.contains("Episode 6"),
+            "must cap at 5 rows:\n{joined}"
+        );
+        assert!(
+            joined.contains("+2 more, re-run with -v for all"),
+            "{joined}"
+        );
+        for row in &plain {
+            assert!(row.width() <= 80, "row exceeded width 80: {row:?}");
+        }
+
+        let mono_ascii = Theme::monochrome_ascii();
+        let ascii_out = format_sanitization_notice_tty(&renames[..1], &mono_ascii, 80);
+        assert!(!ascii_out.contains('\x1b'));
+        assert!(ascii_out.is_ascii());
+        assert!(ascii_out.contains("| ! Sanitized 1 file for filesystem compatibility"));
+        assert!(ascii_out.contains("->"));
+    }
+
+    #[test]
+    fn fatal_error_formats_crimson_callout_on_tty_and_plain_prefix_on_non_tty() {
+        let tc = Theme::archival_truecolor();
+        let tty_tc = format_fatal_error("Invalid archive.org URL", true, &tc);
+        assert!(tty_tc.contains('\x1b'));
+        assert!(tty_tc.contains("┃"));
+        assert!(tty_tc.contains("✗"));
+        assert!(tty_tc.contains("Invalid archive.org URL"));
+
+        let mono = Theme::monochrome_unicode();
+        let tty_mono = format_fatal_error("Invalid archive.org URL", true, &mono);
+        assert_eq!(tty_mono, "┃ ✗ Invalid archive.org URL");
+
+        let ascii = Theme::monochrome_ascii();
+        let tty_ascii = format_fatal_error("Invalid archive.org URL", true, &ascii);
+        assert_eq!(tty_ascii, "| x Invalid archive.org URL");
+
+        let non_tty = format_fatal_error("Invalid archive.org URL", false, &tc);
+        assert_eq!(non_tty, "Error: Invalid archive.org URL");
+        assert!(!non_tty.contains('\x1b'));
     }
 }

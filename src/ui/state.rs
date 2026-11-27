@@ -25,6 +25,38 @@ pub struct QueuedFile {
     pub permits: usize,
 }
 
+/// Active `-f/--filter` summary passed to `--list`, `--check`, and download receipts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FilterContext {
+    /// Raw `-f/--filter` glob patterns supplied by the user.
+    pub patterns: Vec<String>,
+    /// Number of files matched after filtering.
+    pub matched: usize,
+    /// Total number of target files before `-f/--filter` was applied.
+    pub total: usize,
+}
+
+impl FilterContext {
+    /// Returns `true` when at least one `-f/--filter` pattern was supplied.
+    pub fn is_active(&self) -> bool {
+        !self.patterns.is_empty()
+    }
+
+    /// Formats `filter: all` or `filter: <patterns> (<matched> of <total>)`.
+    pub fn label(&self) -> String {
+        if self.patterns.is_empty() {
+            "filter: all".to_string()
+        } else {
+            format!(
+                "filter: {} ({} of {})",
+                self.patterns.join(", "),
+                self.matched,
+                self.total
+            )
+        }
+    }
+}
+
 /// Active transfer stage displayed as a high-visibility geometric glyph on each slot row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStage {
@@ -226,6 +258,8 @@ pub enum UiEvent {
     SlotCancelled { slot_id: u64 },
     /// Records private files skipped before batch download due to missing cookies.
     SkippedPrivate { count: usize },
+    /// Records specific private filenames skipped before batch download due to missing cookies.
+    SkippedPrivateFiles(Vec<String>),
     /// Marks the batch as interrupted by user signal (Ctrl+C).
     Interrupted,
     /// Signals the render loop to flush remaining events, clear the inline box, and print summary.
@@ -272,6 +306,8 @@ pub struct UiState {
     pub warn_count: usize,
     pub fail_count: usize,
     pub skipped_private_count: usize,
+    pub skipped_private_files: Vec<String>,
+    pub filter: Option<FilterContext>,
     pub limit_rate: Option<u64>,
     pub scheduler: SchedulerSnapshot,
     pub active_slots: Vec<ActiveSlot>,
@@ -320,6 +356,8 @@ impl UiState {
             warn_count: 0,
             fail_count: 0,
             skipped_private_count: 0,
+            skipped_private_files: Vec::new(),
+            filter: None,
             limit_rate,
             scheduler: SchedulerSnapshot::default(),
             active_slots: Vec::with_capacity(4),
@@ -768,6 +806,25 @@ impl UiState {
             }
             UiEvent::SkippedPrivate { count } => {
                 if count > 0 {
+                    self.skipped_private_count += count;
+                    self.warn_count += count;
+                    if let Some(AttentionItem::SkippedPrivate { count: existing }) = self
+                        .attention_items
+                        .iter_mut()
+                        .find(|item| matches!(item, AttentionItem::SkippedPrivate { .. }))
+                    {
+                        *existing += count;
+                    } else {
+                        self.attention_items
+                            .push(AttentionItem::SkippedPrivate { count });
+                    }
+                    self.dirty = true;
+                }
+            }
+            UiEvent::SkippedPrivateFiles(files) => {
+                let count = files.len();
+                if count > 0 {
+                    self.skipped_private_files.extend(files);
                     self.skipped_private_count += count;
                     self.warn_count += count;
                     if let Some(AttentionItem::SkippedPrivate { count: existing }) = self

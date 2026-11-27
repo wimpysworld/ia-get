@@ -4,6 +4,7 @@ use crate::ui::palette::{stdout_theme, style_accent, style_bold, style_err, styl
 use crate::{IaGetError, Result};
 use std::fmt;
 use std::io::{self, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use url::Url;
 
@@ -338,6 +339,22 @@ impl VerboseLogger {
             }
         }
     }
+}
+
+/// Formats a directory path for compact display (collapsing `$HOME` prefix to `~`).
+pub fn format_display_dir(path: &Path) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            let home_path = Path::new(&home);
+            if path == home_path {
+                return "~".to_string();
+            }
+            if let Ok(rel) = path.strip_prefix(home_path) {
+                return format!("~/{}", rel.display());
+            }
+        }
+    }
+    path.display().to_string()
 }
 
 /// Format a duration into a human-readable string

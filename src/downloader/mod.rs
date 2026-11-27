@@ -23,10 +23,10 @@ use crate::cookie::CookieSource;
 use crate::disk_space::PlannedDownload;
 use crate::error::IaGetError;
 use crate::ui::state::{
-    CompletionKind, CompletionRecord, QueuedFile, SkipReason, TransferStage, UiEvent,
+    CompletionKind, CompletionRecord, FilterContext, QueuedFile, SkipReason, TransferStage, UiEvent,
 };
 use crate::ui::{UiDriver, UiHandle, UiSessionConfig};
-use crate::utils::{format_duration, sanitize_url_for_log, VerboseLogger};
+use crate::utils::{format_display_dir, format_duration, sanitize_url_for_log, VerboseLogger};
 use crate::Result;
 
 pub use collision::{validate_download_paths_for_dir, PathCaseSensitivity};
@@ -40,7 +40,7 @@ pub use redirect::attach_cookie_header;
 pub use retry::{
     compute_backoff_delay_with_sample, fetch_text_with_retry_with_logger, install_signal_handler,
     is_retryable_reqwest_error, is_retryable_status, parse_retry_after, sleep_interruptible,
-    RetryEvent, RetryPolicy, ShutdownSignal,
+    ActiveLiveUiGuard, RetryEvent, RetryPolicy, ShutdownSignal,
 };
 pub use scheduler::{
     base_permit_cost, download_sort_key, sort_planned_downloads, ElasticScheduler, SchedulerPermit,
@@ -77,6 +77,10 @@ pub struct BatchUiOptions {
     pub identifier: String,
     /// Number of `<private>` archive files skipped before the batch began.
     pub skipped_private_count: usize,
+    /// Specific `<private>` filenames skipped before the batch began (when no cookies supplied).
+    pub skipped_private_files: Vec<String>,
+    /// Optional active `-f/--filter` context displayed in the Archival Receipt.
+    pub filter: Option<FilterContext>,
 }
 
 /// Configuration controlling download retries, idle read timeouts, and bandwidth throttling.
@@ -1603,22 +1607,6 @@ where
     .await
 }
 
-/// Formats an output directory path for compact display (collapsing `$HOME` prefix to `~`).
-fn format_display_dir(path: &Path) -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            let home_path = Path::new(&home);
-            if path == home_path {
-                return "~".to_string();
-            }
-            if let Ok(rel) = path.strip_prefix(home_path) {
-                return format!("~/{}", rel.display());
-            }
-        }
-    }
-    path.display().to_string()
-}
-
 /// Downloads multiple files into destination `root` with explicit [`DownloadOptions`],
 /// [`BatchUiOptions`], shutdown signal, and [`VerboseLogger`].
 ///
@@ -1681,6 +1669,8 @@ where
             planned_total_bytes,
             limit_rate: options.limit_rate,
             skipped_private_count: ui_options.skipped_private_count,
+            skipped_private_files: ui_options.skipped_private_files.clone(),
+            filter: ui_options.filter.clone(),
             initial_queue,
         },
         Some(scheduler.clone()),

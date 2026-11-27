@@ -169,6 +169,10 @@ pub struct Glyphs {
     pub bar_skip: &'static str,
     pub bar_warn: &'static str,
     pub bar_fail: &'static str,
+    /// Top-extension composition ribbon fills ordered primary, secondary, remainder.
+    pub ribbon_fills: [&'static str; 3],
+    /// Subtle placeholder dot for zero/tiny/unknown micro-bars (`·` / `.`).
+    pub micro_dot: &'static str,
     /// Eight sparkline heights ordered lowest to highest.
     pub spark_blocks: [&'static str; 8],
     /// High-visibility geometric stage glyphs (all display width 1).
@@ -178,6 +182,14 @@ pub struct Glyphs {
     pub stage_md5: [&'static str; 4],
     pub stage_rate_limited: &'static str,
     pub stage_queued: &'static str,
+    /// Verified width-1 file-type and folder glyphs for `--list` and `--check`.
+    pub file_archive: &'static str,
+    pub file_doc: &'static str,
+    pub file_media: &'static str,
+    pub file_image: &'static str,
+    pub file_data: &'static str,
+    pub file_other: &'static str,
+    pub folder: &'static str,
     pub ok: &'static str,
     pub skip: &'static str,
     pub warn: &'static str,
@@ -206,6 +218,8 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     bar_skip: "░",
     bar_warn: "▓",
     bar_fail: "▒",
+    ribbon_fills: ["█", "▓", "░"],
+    micro_dot: "·",
     spark_blocks: ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"],
     stage_get: "▼",
     stage_resume: "►",
@@ -213,6 +227,13 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     stage_md5: ["◐", "◓", "◑", "◒"],
     stage_rate_limited: "▲",
     stage_queued: "○",
+    file_archive: "◆",
+    file_doc: "≡",
+    file_media: "►",
+    file_image: "◉",
+    file_data: "○",
+    file_other: "●",
+    folder: "▼",
     ok: "✓",
     skip: "↷",
     warn: "!",
@@ -241,6 +262,8 @@ pub const ASCII_GLYPHS: Glyphs = Glyphs {
     bar_skip: ":",
     bar_warn: "!",
     bar_fail: "x",
+    ribbon_fills: ["#", "=", "."],
+    micro_dot: ".",
     spark_blocks: [".", ".", "_", "_", "-", "=", "=", "#"],
     stage_get: "v",
     stage_resume: ">",
@@ -248,6 +271,13 @@ pub const ASCII_GLYPHS: Glyphs = Glyphs {
     stage_md5: ["#", "#", "#", "#"],
     stage_rate_limited: "!",
     stage_queued: ".",
+    file_archive: "A",
+    file_doc: "T",
+    file_media: "M",
+    file_image: "I",
+    file_data: "D",
+    file_other: "F",
+    folder: ">",
     ok: "+",
     skip: ">",
     warn: "!",
@@ -613,6 +643,36 @@ impl Theme {
         }
     }
 
+    /// File-type glyph style for archive files (`◆` / `A`): bold archival gold.
+    pub fn file_archive_style(&self) -> Style {
+        self.bold_if_color(self.accent_style())
+    }
+
+    /// File-type glyph style for books/docs/text (`≡` / `T`): bold primary/parchment.
+    pub fn file_doc_style(&self) -> Style {
+        self.bold_style()
+    }
+
+    /// File-type glyph style for audio/video media (`►` / `M`): bold sage green.
+    pub fn file_media_style(&self) -> Style {
+        self.bold_if_color(self.ok_style())
+    }
+
+    /// File-type glyph style for images (`◉` / `I`): bold slate blue.
+    pub fn file_image_style(&self) -> Style {
+        self.bold_if_color(self.info_style())
+    }
+
+    /// File-type glyph style for metadata/data files (`○` / `D`): muted stone.
+    pub fn file_data_style(&self) -> Style {
+        self.muted_style()
+    }
+
+    /// File-type glyph style for other/binary files (`●` / `F`): muted stone.
+    pub fn file_other_style(&self) -> Style {
+        self.muted_style()
+    }
+
     /// Computes the foreground style for a filled cell at index `cell` of a `width`-cell bar.
     pub fn bar_fill_style(&self, cell: usize, width: usize, is_hash: bool) -> Style {
         match self.color_level {
@@ -672,7 +732,7 @@ pub fn style_ok(text: &str, theme: &Theme) -> String {
         } else {
             SAGE.to_crossterm()
         }),
-        ColorLevel::Ansi16 => Some(CtColor::Green),
+        ColorLevel::Ansi16 => Some(CtColor::DarkGreen),
         ColorLevel::Monochrome => None,
     };
     theme.apply_inline(text, color, false)
@@ -686,7 +746,7 @@ pub fn style_warn(text: &str, theme: &Theme) -> String {
         } else {
             AMBER.to_crossterm()
         }),
-        ColorLevel::Ansi16 => Some(CtColor::Yellow),
+        ColorLevel::Ansi16 => Some(CtColor::DarkYellow),
         ColorLevel::Monochrome => None,
     };
     theme.apply_inline(text, color, false)
@@ -700,7 +760,7 @@ pub fn style_err(text: &str, theme: &Theme) -> String {
         } else {
             CRIMSON.to_crossterm()
         }),
-        ColorLevel::Ansi16 => Some(CtColor::Red),
+        ColorLevel::Ansi16 => Some(CtColor::DarkRed),
         ColorLevel::Monochrome => None,
     };
     theme.apply_inline(text, color, false)
@@ -714,7 +774,7 @@ pub fn style_accent(text: &str, theme: &Theme) -> String {
         } else {
             GOLD.to_crossterm()
         }),
-        ColorLevel::Ansi16 => Some(CtColor::Yellow),
+        ColorLevel::Ansi16 => Some(CtColor::DarkYellow),
         ColorLevel::Monochrome => None,
     };
     theme.apply_inline(text, color, false)
@@ -983,6 +1043,17 @@ mod tests {
                 ("bar_skip", glyphs.bar_skip),
                 ("bar_warn", glyphs.bar_warn),
                 ("bar_fail", glyphs.bar_fail),
+                ("ribbon_fills[0]", glyphs.ribbon_fills[0]),
+                ("ribbon_fills[1]", glyphs.ribbon_fills[1]),
+                ("ribbon_fills[2]", glyphs.ribbon_fills[2]),
+                ("micro_dot", glyphs.micro_dot),
+                ("file_archive", glyphs.file_archive),
+                ("file_doc", glyphs.file_doc),
+                ("file_media", glyphs.file_media),
+                ("file_image", glyphs.file_image),
+                ("file_data", glyphs.file_data),
+                ("file_other", glyphs.file_other),
+                ("folder", glyphs.folder),
             ];
             for (name, g) in stage_glyphs {
                 assert_eq!(
@@ -1101,6 +1172,24 @@ mod tests {
         assert!(
             bg_only.contains('\x1b') && bg_only != "x" && bg_only.contains("48;5;4"),
             "background-only style must emit ANSI bg SGR: {bg_only:?}"
+        );
+
+        // Inline ANSI-16 helpers must match ratatui_color_to_crossterm (Dark* SGR 31/32/33).
+        assert_eq!(
+            style_ok("ok", &ansi),
+            style_ratatui_to_ansi("ok", ansi.ok_style(), &ansi)
+        );
+        assert_eq!(
+            style_warn("warn", &ansi),
+            style_ratatui_to_ansi("warn", ansi.warn_style(), &ansi)
+        );
+        assert_eq!(
+            style_err("err", &ansi),
+            style_ratatui_to_ansi("err", ansi.err_style(), &ansi)
+        );
+        assert_eq!(
+            style_accent("accent", &ansi),
+            style_ratatui_to_ansi("accent", ansi.accent_style(), &ansi)
         );
     }
 

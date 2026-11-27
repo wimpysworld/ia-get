@@ -22,7 +22,7 @@ Show
 Sleep 400ms
 Type "ia-get --list https://archive.org/details/deftributetozzap64"
 Enter
-Wait+Screen@30s /Archive has [0-9]+ files/
+Wait+Screen@30s /[0-9]+ files/
 Wait
 Sleep 1.5s
 
@@ -34,7 +34,7 @@ Sleep 1.5s
 
 Type "ia-get --check -f '*djvu.*' https://archive.org/details/deftributetozzap64"
 Enter
-Wait+Screen@30s /Verification summary: [0-9]+ ok, 0 failed/
+Wait+Screen@30s /✓ verified/
 Wait
 Sleep 1s
 Screenshot pages/demo-still.png

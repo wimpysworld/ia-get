@@ -58,7 +58,7 @@ pub struct ShutdownSignal {
 }
 
 /// RAII guard suppressing raw Ctrl+C stdout writes while an inline TUI is actively rendering.
-pub(crate) struct ActiveLiveUiGuard {
+pub struct ActiveLiveUiGuard {
     active_live_ui: Arc<AtomicUsize>,
 }
 
@@ -107,7 +107,7 @@ impl ShutdownSignal {
     }
 
     /// Marks an inline TUI renderer as active so Ctrl+C teardown avoids raw `println!` mid-frame.
-    pub(crate) fn enter_live_ui(&self) -> ActiveLiveUiGuard {
+    pub fn enter_live_ui(&self) -> ActiveLiveUiGuard {
         self.active_live_ui.fetch_add(1, Ordering::SeqCst);
         ActiveLiveUiGuard {
             active_live_ui: Arc::clone(&self.active_live_ui),
