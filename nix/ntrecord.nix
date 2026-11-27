@@ -1,3 +1,4 @@
+# Managed by Tailor: nix/ntrecord.nix
 { pkgs, ... }:
 let
   version = "0.3.0";
@@ -20,32 +21,57 @@ let
     };
   };
   system = pkgs.stdenv.hostPlatform.system;
-  source = sources.${system} or (throw "ntrecord: unsupported system ${system}");
+  # The variable Fira Code font reports the family "Fira Code Light".
+  firaCode = pkgs.fira-code.override { useVariableFont = false; };
+  fontPath = pkgs.lib.concatStringsSep ":" [
+    "${firaCode}/share/fonts/truetype"
+    "${pkgs.nerd-fonts.symbols-only}/share/fonts/truetype/NerdFonts/Symbols"
+    "${pkgs.dejavu_fonts}/share/fonts/truetype"
+  ];
+  ntrecordRaw = pkgs.stdenvNoCC.mkDerivation {
+    pname = "ntrecord";
+    inherit version;
+
+    src = pkgs.fetchurl {
+      inherit (sources.${system}) url sha256;
+    };
+
+    sourceRoot = ".";
+    dontConfigure = true;
+    dontBuild = true;
+    dontFixup = true;
+
+    installPhase = ''
+      runHook preInstall
+      install -Dm755 ntrecord "$out/bin/ntrecord"
+      runHook postInstall
+    '';
+
+    meta = {
+      description = "Nimble Terminal recorder tool, supports Charm VHS Tapes and Kitty Graphics";
+      homepage = "https://github.com/NimbleTerminal/ntrecord";
+      license = pkgs.lib.licenses.mit;
+      mainProgram = "ntrecord";
+      platforms = builtins.attrNames sources;
+    };
+  };
+  # ntrecord resolves the primary font through XDG_DATA_HOME/fonts, so set it
+  # only inside the wrapper.
+  ntrecord = pkgs.symlinkJoin {
+    inherit (ntrecordRaw) name meta;
+    paths = [ ntrecordRaw ];
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+    postBuild = ''
+      wrapProgram "$out/bin/ntrecord" \
+        --set XDG_DATA_HOME "${firaCode}/share" \
+        --set-default NTRECORD_FONT_PATH "${fontPath}"
+    '';
+  };
 in
-pkgs.stdenvNoCC.mkDerivation {
-  pname = "ntrecord";
-  inherit version;
-
-  src = pkgs.fetchurl {
-    inherit (source) url sha256;
-  };
-
-  sourceRoot = ".";
-  dontConfigure = true;
-  dontBuild = true;
-  dontFixup = true;
-
-  installPhase = ''
-    runHook preInstall
-    install -Dm755 ntrecord "$out/bin/ntrecord"
-    runHook postInstall
-  '';
-
-  meta = {
-    description = "Nimble Terminal recorder tool, supports Charm VHS Tapes and Kitty Graphics";
-    homepage = "https://github.com/NimbleTerminal/ntrecord";
-    license = pkgs.lib.licenses.mit;
-    mainProgram = "ntrecord";
-    platforms = builtins.attrNames sources;
-  };
-}
+pkgs.lib.optionals (sources ? ${system}) [ ntrecord ]
+++ (with pkgs; [
+  ffmpeg-headless
+  gifsicle
+  gifski
+  oxipng
+])

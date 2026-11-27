@@ -2,6 +2,7 @@
 { pkgs, ... }:
 builtins.seq pkgs (
   builtins.concatLists [
+    (if builtins.pathExists ./ntrecord.nix then import ./ntrecord.nix { inherit pkgs; } else [ ])
     (if builtins.pathExists ./go.nix then import ./go.nix { inherit pkgs; } else [ ])
     (
       if builtins.pathExists ./go-ebitengine.nix then
