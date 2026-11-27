@@ -189,16 +189,10 @@ record:
 
     mkdir -p pages
 
-    font_env=()
-    if [[ -z "${NTRECORD_FONT_PATH:-}" && -d /run/current-system/sw/share/X11/fonts ]]; then
-        font_env=(NTRECORD_FONT_PATH=/run/current-system/sw/share/X11/fonts)
-    fi
-
     env -u DIRENV_DIR -u DIRENV_FILE -u DIRENV_DIFF -u DIRENV_WATCHES \
         -u PROMPT_COMMAND -u BASH_ENV \
         PATH="$repo_root/target/release:$PATH" \
         IA_GET_DEMO_DIR="$tmp_dir" \
-        "${font_env[@]}" \
         ntrecord ia-get.tape
 
     ffmpeg -y -v error -i "$repo_root/.demo.mp4" -c:v libwebp_anim -lossless 1 -loop 0 pages/demo.webp
