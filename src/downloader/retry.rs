@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
-use colored::Colorize;
 use reqwest::{RequestBuilder, Response, StatusCode, Url};
 use tokio::sync::Notify;
 
@@ -17,6 +16,7 @@ use crate::constants::{
     MAX_RETRY_AFTER_SECS, MAX_RETRY_DELAY_SECS,
 };
 use crate::error::IaGetError;
+use crate::ui::palette::{stdout_theme, style_err};
 use crate::utils::{sanitize_url_for_log, VerboseLogger};
 use crate::Result;
 
@@ -54,17 +54,17 @@ pub struct RetryEvent<'a> {
 pub struct ShutdownSignal {
     running: Arc<AtomicBool>,
     notify: Arc<Notify>,
-    active_multi_progress: Arc<AtomicUsize>,
+    active_live_ui: Arc<AtomicUsize>,
 }
 
-/// RAII guard suppressing raw Ctrl+C stdout writes while a `MultiProgress` display is active.
-pub(super) struct ActiveMultiProgressGuard {
-    active_multi_progress: Arc<AtomicUsize>,
+/// RAII guard suppressing raw Ctrl+C stdout writes while an inline TUI is actively rendering.
+pub(crate) struct ActiveLiveUiGuard {
+    active_live_ui: Arc<AtomicUsize>,
 }
 
-impl Drop for ActiveMultiProgressGuard {
+impl Drop for ActiveLiveUiGuard {
     fn drop(&mut self) {
-        self.active_multi_progress.fetch_sub(1, Ordering::SeqCst);
+        self.active_live_ui.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -74,7 +74,7 @@ impl ShutdownSignal {
         Self {
             running: Arc::new(AtomicBool::new(true)),
             notify: Arc::new(Notify::new()),
-            active_multi_progress: Arc::new(AtomicUsize::new(0)),
+            active_live_ui: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -106,17 +106,17 @@ impl ShutdownSignal {
         sleep_interruptible(duration, self).await
     }
 
-    /// Marks a `MultiProgress` renderer as active so Ctrl+C teardown avoids raw `println!` mid-bar.
-    pub(super) fn enter_multi_progress(&self) -> ActiveMultiProgressGuard {
-        self.active_multi_progress.fetch_add(1, Ordering::SeqCst);
-        ActiveMultiProgressGuard {
-            active_multi_progress: Arc::clone(&self.active_multi_progress),
+    /// Marks an inline TUI renderer as active so Ctrl+C teardown avoids raw `println!` mid-frame.
+    pub(crate) fn enter_live_ui(&self) -> ActiveLiveUiGuard {
+        self.active_live_ui.fetch_add(1, Ordering::SeqCst);
+        ActiveLiveUiGuard {
+            active_live_ui: Arc::clone(&self.active_live_ui),
         }
     }
 
-    /// Returns `true` while at least one `MultiProgress` display is actively rendering.
-    pub(super) fn has_active_multi_progress(&self) -> bool {
-        self.active_multi_progress.load(Ordering::SeqCst) > 0
+    /// Returns `true` while at least one inline TUI display is actively rendering.
+    pub(crate) fn has_active_live_ui(&self) -> bool {
+        self.active_live_ui.load(Ordering::SeqCst) > 0
     }
 }
 
@@ -136,12 +136,13 @@ pub fn install_signal_handler() -> ShutdownSignal {
             let handler_signal = signal.clone();
 
             match ctrlc::set_handler(move || {
-                let has_active_multi = handler_signal.has_active_multi_progress();
+                let has_active_ui = handler_signal.has_active_live_ui();
                 let first_trigger = handler_signal.trigger_once();
-                if first_trigger && !has_active_multi {
+                if first_trigger && !has_active_ui {
+                    let theme = stdout_theme();
                     println!(
                         "\n{} Received Ctrl+C, finishing current operation...",
-                        "✘".red().bold()
+                        style_err(theme.glyphs().fail, &theme)
                     );
                 }
             }) {

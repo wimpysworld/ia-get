@@ -44,7 +44,7 @@ ia-get https://archive.org/details/zzapp_64_issue_001_600dpi
 
 ```text
 src/
-├── main.rs                  # CLI entry point (clap), progress output, and orchestration
+├── main.rs                  # CLI entry point (clap) and run orchestration
 ├── lib.rs                   # Library module exports
 ├── downloader/
 │   ├── mod.rs               # Core download loop, range resume, rate limiting, and batch orchestration
@@ -54,6 +54,11 @@ src/
 │   ├── redirect.rs          # Manual redirect handling and per-hop cookie scoping
 │   ├── fs_safety.rs         # Path containment, symlink-safe I/O, and atomic .part promotion
 │   └── collision.rs         # Pre-write path collision detection and filesystem probing
+├── ui/
+│   ├── mod.rs               # Inline Ratatui TTY driver, cooked-mode status spinner, and non-TTY plain output
+│   ├── palette.rs           # Archival colour tokens, Unicode/ASCII glyph sets, and inline style helpers
+│   ├── state.rs             # Terminal-independent UI state, critically damped easing, and sparkline ring buffer
+│   └── render.rs            # Pure frame renderer, responsive breakpoints, completion lines, and post-run summary
 ├── archive_metadata.rs      # XML metadata parsing for archive.org
 ├── cookie.rs                # Raw Cookie header and Netscape cookies.txt parsing and scoping
 ├── disk_space.rs            # Destination volume free-space estimation and checks
