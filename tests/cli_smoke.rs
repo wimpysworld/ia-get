@@ -59,7 +59,11 @@ fn check_missing_output_dir_exits_non_zero_without_creating_dir() {
         "non-TTY stderr must emit zero ANSI escapes: {stderr:?}"
     );
     assert!(
-        !stderr.contains("Error: "),
+        stderr.contains("Error: "),
+        "non-TTY fatal errors must use plain 'Error: ' prefix: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("FileSystem("),
         "main() must not emit raw Rust Debug error dumps: {stderr:?}"
     );
 }

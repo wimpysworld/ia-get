@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::archive_metadata::XmlFile;
 use crate::downloader::{self, ShutdownSignal};
@@ -84,6 +85,85 @@ pub struct VerificationSummary {
     pub interrupted: bool,
 }
 
+/// Severity classification of a single verified file for TTY rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifiedFileStatus {
+    /// All applicable size, MD5, and staging checks passed.
+    Ok,
+    /// File exists on disk but has an MD5 mismatch, size mismatch, or leftover `.part` file.
+    Warning,
+    /// File is missing or unreadable / unsafe target.
+    Failed,
+}
+
+impl VerifiedFileStatus {
+    /// Classifies an issue slice into `Ok`, `Warning`, or `Failed`.
+    pub fn from_issues(issues: &[VerificationIssue]) -> Self {
+        if issues.is_empty() {
+            Self::Ok
+        } else if issues.iter().any(|issue| {
+            matches!(
+                issue,
+                VerificationIssue::Missing | VerificationIssue::UnreadableTarget { .. }
+            )
+        }) {
+            Self::Failed
+        } else {
+            Self::Warning
+        }
+    }
+}
+
+/// Per-file verification outcome recorded during `--check`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedFileRecord {
+    /// Sanitised local relative path checked on disk.
+    pub file_path: String,
+    /// Overall severity outcome (`Ok`, `Warning`, or `Failed`).
+    pub status: VerifiedFileStatus,
+    /// Expected byte size from archive metadata, if known.
+    pub expected_size: Option<u64>,
+    /// Actual byte size found on disk, if inspected.
+    pub actual_size: Option<u64>,
+    /// Bytes hashed during MD5 verification for this file.
+    pub hashed_bytes: u64,
+    /// Ordered list of verification issues detected for this file (empty when `Ok`).
+    pub issues: Vec<VerificationIssue>,
+}
+
+/// Detailed verification report including per-file outcomes, hashed bytes, and elapsed time.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct VerificationReport {
+    /// Backwards-compatible verification summary.
+    pub summary: VerificationSummary,
+    /// Per-file verification records in checked order.
+    pub records: Vec<VerifiedFileRecord>,
+    /// Total number of target files planned for verification.
+    pub total_files: usize,
+    /// Cumulative bytes read during local MD5 hashing.
+    pub total_hashed_bytes: u64,
+    /// Total elapsed wall time for the verification pass.
+    pub elapsed: Duration,
+}
+
+impl VerificationReport {
+    /// Returns the number of files classified as warnings (mismatch or leftover `.part`).
+    pub fn warn_count(&self) -> usize {
+        self.records
+            .iter()
+            .filter(|r| r.status == VerifiedFileStatus::Warning)
+            .count()
+    }
+
+    /// Returns the number of files classified as hard failures (missing or unreadable).
+    pub fn fail_count(&self) -> usize {
+        self.records
+            .iter()
+            .filter(|r| r.status == VerifiedFileStatus::Failed)
+            .count()
+    }
+}
+
 /// Validates that `path` is an existing, accessible directory without creating or modifying it,
 /// returning its canonical path.
 pub fn validate_check_dir(path: &Path) -> Result<PathBuf> {
@@ -114,15 +194,18 @@ fn format_issues(issues: &[VerificationIssue]) -> String {
 fn record_verify_interrupted(
     summary: &mut VerificationSummary,
     logger: &VerboseLogger,
+    emit_plain_output: bool,
     reason: fmt::Arguments<'_>,
 ) {
     summary.interrupted = true;
     logger.log("verify", reason);
-    let theme = stdout_theme();
-    println!(
-        "\n{} Verification interrupted by user.",
-        style_err(theme.glyphs().fail, &theme)
-    );
+    if emit_plain_output {
+        let theme = stdout_theme();
+        println!(
+            "\n{} Verification interrupted by user.",
+            style_err(theme.glyphs().fail, &theme)
+        );
+    }
 }
 
 /// Formats a plain-text summary of a verification run, including any failed files.
@@ -161,17 +244,57 @@ pub fn verify_files_with_logger(
     signal: &ShutdownSignal,
     logger: &VerboseLogger,
 ) -> Result<VerificationSummary> {
-    let canonical_root = validate_check_dir(root)?;
-    let mut summary = VerificationSummary::default();
+    let report = verify_files_detailed(root, files, signal, logger, true, |_, _, _, _, _| {})?;
+    Ok(report.summary)
+}
 
-    for file in files {
+/// Verifies local files inside `root` against `files` strictly read-only, returning a detailed
+/// [`VerificationReport`] and invoking `on_progress` before each file.
+///
+/// When `emit_plain_output` is `true`, prints per-file failure lines and the plain summary line
+/// to stdout (used for non-TTY pipes and legacy callers). When `false`, suppresses direct stdout
+/// writes so callers can render the interactive TTY Verification Card and listing.
+pub fn verify_files_detailed<F>(
+    root: &Path,
+    files: &[XmlFile],
+    signal: &ShutdownSignal,
+    logger: &VerboseLogger,
+    emit_plain_output: bool,
+    mut on_progress: F,
+) -> Result<VerificationReport>
+where
+    F: FnMut(usize, usize, u64, Duration, &str),
+{
+    let canonical_root = validate_check_dir(root)?;
+    let started_at = Instant::now();
+    let total_files = files.len();
+    let mut summary = VerificationSummary::default();
+    let mut records = Vec::with_capacity(total_files);
+    let mut total_hashed_bytes: u64 = 0;
+
+    for (idx, file) in files.iter().enumerate() {
         if !signal.is_running() {
-            record_verify_interrupted(&mut summary, logger, format_args!("interrupted by user"));
+            record_verify_interrupted(
+                &mut summary,
+                logger,
+                emit_plain_output,
+                format_args!("interrupted by user"),
+            );
             break;
         }
 
         let (sanitized_name, _) = utils::sanitize_filename(&file.name);
+        on_progress(
+            idx,
+            total_files,
+            total_hashed_bytes,
+            started_at.elapsed(),
+            &sanitized_name,
+        );
+
         let mut issues = Vec::new();
+        let mut actual_size: Option<u64> = None;
+        let mut file_hashed_bytes: u64 = 0;
 
         // Check for leftover `.part` file regardless of whether the final file exists.
         let part_rel = downloader::part_file_path(&sanitized_name);
@@ -200,14 +323,15 @@ pub fn verify_files_with_logger(
                 match downloader::open_regular_file_for_read(&canonical_root, rel_path) {
                     Ok(opened) => match opened.metadata() {
                         Ok(opened_meta) => {
-                            let actual_size = opened_meta.len();
+                            let len = opened_meta.len();
+                            actual_size = Some(len);
                             drop(opened);
 
                             let size_mismatch = match file.size {
-                                Some(expected) if actual_size != expected => {
+                                Some(expected) if len != expected => {
                                     issues.push(VerificationIssue::SizeMismatch {
                                         expected,
-                                        actual: actual_size,
+                                        actual: len,
                                     });
                                     true
                                 }
@@ -220,6 +344,7 @@ pub fn verify_files_with_logger(
                                         record_verify_interrupted(
                                             &mut summary,
                                             logger,
+                                            emit_plain_output,
                                             format_args!(
                                                 "interrupted while verifying '{sanitized_name}'"
                                             ),
@@ -232,6 +357,9 @@ pub fn verify_files_with_logger(
                                         signal.running_flag(),
                                     ) {
                                         Ok(actual_md5) => {
+                                            file_hashed_bytes = len;
+                                            total_hashed_bytes =
+                                                total_hashed_bytes.saturating_add(len);
                                             if !actual_md5.eq_ignore_ascii_case(expected_md5) {
                                                 issues.push(VerificationIssue::Md5Mismatch {
                                                     expected: expected_md5.to_string(),
@@ -246,9 +374,10 @@ pub fn verify_files_with_logger(
                                                 record_verify_interrupted(
                                                     &mut summary,
                                                     logger,
+                                                    emit_plain_output,
                                                     format_args!(
-                                                    "interrupted while verifying '{sanitized_name}'"
-                                                ),
+                                                        "interrupted while verifying '{sanitized_name}'"
+                                                    ),
                                                 );
                                                 break;
                                             }
@@ -295,6 +424,7 @@ pub fn verify_files_with_logger(
             }
         }
 
+        let status = VerifiedFileStatus::from_issues(&issues);
         if issues.is_empty() {
             summary.ok += 1;
             logger.log("verify", format_args!("ok '{sanitized_name}'"));
@@ -304,20 +434,32 @@ pub fn verify_files_with_logger(
                 "verify",
                 format_args!("failed '{sanitized_name}': {formatted_issues}"),
             );
-            let theme = stdout_theme();
-            println!(
-                "{} {}: {}",
-                style_err(theme.glyphs().fail, &theme),
-                style_bold(&sanitized_name, &theme),
-                formatted_issues
-            );
+            if emit_plain_output {
+                let theme = stdout_theme();
+                println!(
+                    "{} {}: {}",
+                    style_err(theme.glyphs().fail, &theme),
+                    style_bold(&sanitized_name, &theme),
+                    formatted_issues
+                );
+            }
             summary.failed.push(FailedVerification {
-                file_path: sanitized_name,
-                issues,
+                file_path: sanitized_name.clone(),
+                issues: issues.clone(),
             });
         }
+
+        records.push(VerifiedFileRecord {
+            file_path: sanitized_name,
+            status,
+            expected_size: file.size,
+            actual_size,
+            hashed_bytes: file_hashed_bytes,
+            issues,
+        });
     }
 
+    let elapsed = started_at.elapsed();
     logger.log(
         "summary",
         format_args!(
@@ -327,8 +469,17 @@ pub fn verify_files_with_logger(
             summary.interrupted
         ),
     );
-    print_verification_summary(&summary);
-    Ok(summary)
+    if emit_plain_output {
+        print_verification_summary(&summary);
+    }
+
+    Ok(VerificationReport {
+        summary,
+        records,
+        total_files,
+        total_hashed_bytes,
+        elapsed,
+    })
 }
 
 #[cfg(test)]

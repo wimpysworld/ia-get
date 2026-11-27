@@ -4,6 +4,8 @@
 //! (never enabling raw mode or entering the alternate screen) so Ctrl+C signals
 //! and shell scrollback work naturally.
 
+pub mod check;
+pub mod list;
 pub mod palette;
 pub mod render;
 pub mod state;
@@ -27,7 +29,7 @@ use crate::ui::render::{
     compute_viewport_height_for_batch, format_final_summary, format_tty_summary,
     render_completion_line, render_instrument,
 };
-use crate::ui::state::{QueuedFile, UiEvent, UiState};
+use crate::ui::state::{FilterContext, QueuedFile, UiEvent, UiState};
 
 /// Target UI refresh interval (~30 fps).
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -82,7 +84,16 @@ impl Drop for CursorGuard {
 
 /// Returns `true` when `stdout` is an interactive terminal capable of inline TUI rendering.
 pub fn is_interactive_stdout() -> bool {
-    if !io::stdout().is_terminal() {
+    is_interactive_stream(io::stdout().is_terminal())
+}
+
+/// Returns `true` when `stderr` is an interactive terminal capable of styled diagnostic callouts.
+pub fn is_interactive_stderr() -> bool {
+    is_interactive_stream(io::stderr().is_terminal())
+}
+
+fn is_interactive_stream(is_tty: bool) -> bool {
+    if !is_tty {
         return false;
     }
     if std::env::var("TERM")
@@ -92,6 +103,15 @@ pub fn is_interactive_stdout() -> bool {
         return false;
     }
     matches!(crossterm::terminal::size(), Ok((w, h)) if w > 0 && h > 0)
+}
+
+/// Returns the current terminal width in columns for `stdout` (falling back to 80).
+pub fn stdout_terminal_width() -> u16 {
+    crossterm::terminal::size()
+        .map(|(w, _)| w)
+        .ok()
+        .filter(|&w| w > 0)
+        .unwrap_or(80)
 }
 
 /// Configuration for launching a live batch UI session.
@@ -109,6 +129,10 @@ pub struct UiSessionConfig {
     pub limit_rate: Option<u64>,
     /// Number of `<private>` files skipped before the batch began (without cookies).
     pub skipped_private_count: usize,
+    /// Specific `<private>` filenames skipped before the batch began (without cookies).
+    pub skipped_private_files: Vec<String>,
+    /// Optional active `-f/--filter` context displayed in the Archival Receipt.
+    pub filter: Option<FilterContext>,
     /// Ordered initial queue of files awaiting scheduler permits.
     pub initial_queue: Vec<QueuedFile>,
 }
@@ -183,6 +207,7 @@ fn init_state(config: &UiSessionConfig, now: Instant) -> UiState {
         config.limit_rate,
         now,
     );
+    state.filter = config.filter.clone();
     state.on_event(
         UiEvent::BatchStarted {
             queue: config.initial_queue.clone(),
@@ -190,7 +215,12 @@ fn init_state(config: &UiSessionConfig, now: Instant) -> UiState {
         },
         now,
     );
-    if config.skipped_private_count > 0 {
+    if !config.skipped_private_files.is_empty() {
+        state.on_event(
+            UiEvent::SkippedPrivateFiles(config.skipped_private_files.clone()),
+            now,
+        );
+    } else if config.skipped_private_count > 0 {
         state.on_event(
             UiEvent::SkippedPrivate {
                 count: config.skipped_private_count,
@@ -434,6 +464,20 @@ pub struct StatusSpinner {
 impl StatusSpinner {
     /// Starts a cooked-mode status indicator on `stdout` with an initial `message`.
     pub fn new(message: impl Into<String>) -> Self {
+        Self::spawn_with_mode(message, false, Duration::ZERO)
+    }
+
+    /// Starts a cooked-mode sage MD5 verification spinner (`◐◓◑◒`) with a brief initial delay
+    /// so very fast local checks do not flicker before printing the Verification Card.
+    pub fn new_md5(message: impl Into<String>) -> Self {
+        Self::spawn_with_mode(message, true, Duration::from_millis(80))
+    }
+
+    fn spawn_with_mode(
+        message: impl Into<String>,
+        md5_mode: bool,
+        initial_delay: Duration,
+    ) -> Self {
         let interactive = is_interactive_stdout();
         let theme = Theme::detect_stdout();
         let msg = Arc::new(Mutex::new(message.into()));
@@ -443,16 +487,32 @@ impl StatusSpinner {
             let msg_clone = Arc::clone(&msg);
             let active_clone = Arc::clone(&active);
             Some(tokio::spawn(async move {
+                if !initial_delay.is_zero() {
+                    tokio::time::sleep(initial_delay).await;
+                    if !active_clone.load(Ordering::SeqCst) {
+                        return;
+                    }
+                }
                 let glyphs = theme.glyphs();
                 let mut tick_idx = 0usize;
-                let mut interval = tokio::time::interval(SPINNER_INTERVAL);
+                let mut interval = tokio::time::interval(if md5_mode {
+                    Duration::from_millis(120)
+                } else {
+                    SPINNER_INTERVAL
+                });
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 while active_clone.load(Ordering::SeqCst) {
                     interval.tick().await;
                     if !active_clone.load(Ordering::SeqCst) {
                         break;
                     }
-                    let frame = glyphs.spinner[tick_idx % glyphs.spinner.len()];
+                    let styled_frame = if md5_mode {
+                        let frame = glyphs.stage_md5[tick_idx % glyphs.stage_md5.len()];
+                        style_ratatui_to_ansi(frame, theme.stage_md5_style(), &theme)
+                    } else {
+                        let frame = glyphs.spinner[tick_idx % glyphs.spinner.len()];
+                        style_accent(frame, &theme)
+                    };
                     tick_idx = tick_idx.wrapping_add(1);
                     let text = msg_clone.lock().unwrap_or_else(|p| p.into_inner()).clone();
                     let cols = crossterm::terminal::size()
@@ -465,7 +525,7 @@ impl StatusSpinner {
                         break;
                     }
                     let _ = queue!(stdout, Clear(ClearType::CurrentLine));
-                    let _ = write!(stdout, "\r{} {clipped}", style_accent(frame, &theme));
+                    let _ = write!(stdout, "\r{styled_frame} {clipped}");
                     let _ = stdout.flush();
                 }
             }))
@@ -680,6 +740,8 @@ mod tests {
             planned_total_bytes: 300,
             limit_rate: None,
             skipped_private_count: 1,
+            skipped_private_files: Vec::new(),
+            filter: None,
             initial_queue: Vec::new(),
         };
         let (handle, driver) = UiDriver::start_plain_with_writer(

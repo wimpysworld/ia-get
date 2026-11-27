@@ -44,8 +44,9 @@ ia-get --output-dir /tmp/archive https://archive.org/details/<identifier>
 ## Listing files
 
 Preview the files in an item without downloading them with `-l` or `--list`.
-For a details URL, `ia-get` prints the names and sizes in original XML metadata order.
-For a direct download URL, `ia-get` prints only the matched file and its size.
+On an interactive terminal, `ia-get` renders a rounded Manifest Card with a proportional file-extension ribbon, size and private counts, active `-f` filter summary, and a flat-grouped alphanumeric file listing with proportional micro-bars and file-type glyphs.
+For archives with more than 40 files on a terminal, `ia-get` adds a top-10 folder breakdown (when subdirectories exist) and previews the first 20 rows with a filter hint.
+When `stdout` is piped or redirected, `ia-get` prints plain text in original XML metadata order (`<size> <name>`) with zero ANSI codes or borders.
 
 If archive.org does not provide a size for an entry, `ia-get` reports it as `unknown` and excludes it from the total known size.
 
@@ -83,7 +84,9 @@ This mode is read-only, makes zero writes, and fails if the target directory doe
 
 `ia-get` checks files in original XML metadata order.
 It verifies file presence, leftover `.part` files, safe regular-file targets, byte sizes, and MD5 hashes when metadata provides them.
-At the end of the run, `ia-get` prints a summary and exits with status `0` only when all checked files pass without interruption.
+On an interactive terminal, `ia-get` prints a rounded Verification Card with an outcome bar, hashed byte throughput, active `-f` filter, and directory path, followed by per-file rows (for up to 25 files) or a copy-clean `┃` issue ledger (for larger archives).
+When `stdout` is piped or redirected, `ia-get` emits plain per-file failure lines and a `Verification summary:` line with zero ANSI codes.
+`ia-get` exits with status `0` only when all checked files pass without interruption.
 
 `--check` works with `-o`/`--output-dir`, `-f`/`--filter`, `-b`/`--cookies`, and `/download/<identifier>/<path>` URLs.
 `--check` conflicts with `--list`.

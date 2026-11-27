@@ -14,12 +14,13 @@ use ia_get::constants::USER_AGENT;
 use ia_get::disk_space;
 use ia_get::downloader;
 use ia_get::ui::palette::{
-    stdout_theme, style_accent, style_bold, style_err, style_muted, style_ok, style_warn, Theme,
+    stdout_theme, style_accent, style_bold, style_muted, style_ok, style_warn, Theme,
 };
+use ia_get::ui::state::FilterContext;
 use ia_get::ui::StatusSpinner;
 use ia_get::utils::{
-    format_size, parse_archive_url, percent_decode_utf8, sanitize_filename, sanitize_url_for_log,
-    ArchiveUrl,
+    format_display_dir, format_size, parse_archive_url, percent_decode_utf8, sanitize_filename,
+    sanitize_url_for_log, ArchiveUrl,
 };
 use ia_get::verify;
 use ia_get::{CookieSource, FileFilter, IaGetError, Result, VerboseLogger};
@@ -177,6 +178,7 @@ fn select_target_files(files: XmlFiles, target: &ArchiveUrl) -> Result<XmlFiles>
 }
 
 /// Selects files matching the target URL and applies any compiled user filters.
+#[cfg(test)]
 fn select_and_filter_files(
     files: XmlFiles,
     target: &ArchiveUrl,
@@ -187,19 +189,21 @@ fn select_and_filter_files(
 }
 
 /// Partitions out `<private>` archive entries in download mode when no cookies are supplied,
-/// returning `(public_files, skipped_private_count)`.
+/// returning `(public_files, skipped_private_filenames)`.
 ///
-/// Returns `Ok((files, 0))` unchanged when `has_cookies` is `true`, fails fast with
+/// Returns `Ok((files, Vec::new()))` unchanged when `has_cookies` is `true`, fails fast with
 /// [`IaGetError::PrivateFilesOnly`] when every selected entry is private, or skips private
-/// entries with one warning line and per-file `metadata` verbose logs when public entries remain.
+/// entries with per-file `metadata` verbose logs when public entries remain. On non-TTY stdout,
+/// emits one plain warning line; on interactive TTY stdout, skips the raw line because the
+/// skipped private entries are folded into the Archival Receipt and `┃` ledger.
 fn partition_private_files_for_download(
     files: XmlFiles,
     has_cookies: bool,
     spinner: &StatusSpinner,
     logger: &VerboseLogger,
-) -> Result<(XmlFiles, usize)> {
+) -> Result<(XmlFiles, Vec<String>)> {
     if has_cookies {
-        return Ok((files, 0));
+        return Ok((files, Vec::new()));
     }
 
     let mut public_files = Vec::with_capacity(files.files.len());
@@ -217,7 +221,7 @@ fn partition_private_files_for_download(
             XmlFiles {
                 files: public_files,
             },
-            0,
+            Vec::new(),
         ));
     }
 
@@ -234,23 +238,25 @@ fn partition_private_files_for_download(
         );
     }
 
-    let skipped_count = skipped_private.len();
-    let file_label = if skipped_count == 1 { "file" } else { "files" };
-    let theme = stdout_theme();
-    spinner.suspend(|| {
-        println!(
-            "{} {} {} private {file_label} (supply -b/--cookies to download private files)",
-            style_warn(theme.glyphs().warn, &theme),
-            style_warn("Skipping", &theme),
-            style_bold(&skipped_count.to_string(), &theme),
-        );
-    });
+    if !ia_get::ui::is_interactive_stdout() {
+        let skipped_count = skipped_private.len();
+        let file_label = if skipped_count == 1 { "file" } else { "files" };
+        let theme = stdout_theme();
+        spinner.suspend(|| {
+            println!(
+                "{} {} {} private {file_label} (supply -b/--cookies to download private files)",
+                style_warn(theme.glyphs().warn, &theme),
+                style_warn("Skipping", &theme),
+                style_bold(&skipped_count.to_string(), &theme),
+            );
+        });
+    }
 
     Ok((
         XmlFiles {
             files: public_files,
         },
-        skipped_count,
+        skipped_private,
     ))
 }
 
@@ -350,15 +356,32 @@ fn finish_spinner_on_err<T>(spinner: &StatusSpinner, result: Result<T>) -> Resul
     })
 }
 
-/// Lists parsed filenames from XML metadata when --list/-l is used
-fn list_files(files: &XmlFiles, spinner: &StatusSpinner) {
+/// Lists parsed filenames from XML metadata when --list/-l is used.
+///
+/// Renders the Hybrid Archival Manifest Suite on interactive TTY stdout, and preserves the exact
+/// plain raw XML order listing on non-TTY pipes and scripts.
+fn list_files(
+    identifier: &str,
+    files: &XmlFiles,
+    filter: Option<&FilterContext>,
+    spinner: &StatusSpinner,
+) {
     let theme = stdout_theme();
-    finish_spinner_ok(
-        spinner,
-        format_args!("Archive has {}", style_bold(&list_summary(files), &theme)),
-    );
-    for row in list_file_rows(files) {
-        println!("{row}");
+    if ia_get::ui::is_interactive_stdout() {
+        spinner.finish_and_clear();
+        let width = ia_get::ui::stdout_terminal_width();
+        println!(
+            "{}",
+            ia_get::ui::list::format_list_tty(identifier, files, filter, &theme, width)
+        );
+    } else {
+        finish_spinner_ok(
+            spinner,
+            format_args!("Archive has {}", style_bold(&list_summary(files), &theme)),
+        );
+        for row in list_file_rows(files) {
+            println!("{row}");
+        }
     }
 }
 
@@ -466,13 +489,30 @@ fn plan_downloads_for_dir(
     Ok(DownloadPlan { items, sanitized })
 }
 
-/// Prints per-file warnings and a summary when filenames were sanitised.
-fn print_sanitization_warnings(sanitized: &[(String, String)]) {
+/// Prints a grouped `┃` notice on interactive TTY or uncapped plain warnings on non-TTY
+/// when filenames were sanitised for filesystem compatibility, and logs every rename under `-v`.
+fn print_sanitization_warnings(sanitized: &[(String, String)], logger: &VerboseLogger) {
     if sanitized.is_empty() {
         return;
     }
 
+    for (original_name, sanitized_name) in sanitized {
+        logger.log(
+            "sanitize",
+            format_args!("'{original_name}' -> '{sanitized_name}'"),
+        );
+    }
+
     let theme = stdout_theme();
+    if ia_get::ui::is_interactive_stdout() {
+        let width = ia_get::ui::stdout_terminal_width();
+        println!(
+            "{}",
+            ia_get::ui::render::format_sanitization_notice_tty(sanitized, &theme, width)
+        );
+        return;
+    }
+
     let glyphs = theme.glyphs();
     for (original_name, sanitized_name) in sanitized {
         println!(
@@ -515,7 +555,7 @@ where
 {
     check_space(output_dir, &plan.items, signal)?;
 
-    print_sanitization_warnings(&plan.sanitized);
+    print_sanitization_warnings(&plan.sanitized, logger);
 
     let total_files = plan.items.len();
 
@@ -578,22 +618,51 @@ fn prepare_phase_dir(cli: &Cli, spinner: &StatusSpinner) -> Result<PathBuf> {
 
 /// Finalises the metadata phase by listing files, validating a check directory,
 /// or preparing the output directory.
-fn finalize_metadata_phase(
+fn finalize_metadata_phase_with_context(
     cli: &Cli,
+    identifier: &str,
     files: &XmlFiles,
+    filter: Option<&FilterContext>,
     spinner: &StatusSpinner,
 ) -> Result<Option<PathBuf>> {
     if cli.list {
-        list_files(files, spinner);
+        list_files(identifier, files, filter, spinner);
         return Ok(None);
     }
 
     prepare_phase_dir(cli, spinner).map(Some)
 }
 
+#[cfg(test)]
+fn finalize_metadata_phase(
+    cli: &Cli,
+    files: &XmlFiles,
+    spinner: &StatusSpinner,
+) -> Result<Option<PathBuf>> {
+    let identifier = parse_archive_url(&cli.url)
+        .map(|t| t.identifier().to_string())
+        .unwrap_or_else(|_| "item".to_string());
+    finalize_metadata_phase_with_context(cli, &identifier, files, None, spinner)
+}
+
+/// Warm archival ANSI styling for `clap` `--help` output (auto-disabled on non-TTY / `NO_COLOR`).
+fn cli_styles() -> clap::builder::styling::Styles {
+    use clap::builder::styling::{AnsiColor, Effects, Styles};
+
+    Styles::styled()
+        .header(AnsiColor::Yellow.on_default() | Effects::BOLD)
+        .usage(AnsiColor::Yellow.on_default() | Effects::BOLD)
+        .literal(Effects::BOLD.into())
+        .placeholder(AnsiColor::Cyan.on_default())
+        .valid(AnsiColor::Green.on_default() | Effects::BOLD)
+        .invalid(AnsiColor::Red.on_default() | Effects::BOLD)
+        .error(AnsiColor::Red.on_default() | Effects::BOLD)
+}
+
 /// Command-line interface for ia-get
 #[derive(Parser)]
 #[command(name = "ia-get")]
+#[command(styles = cli_styles())]
 #[command(about = "A command-line tool for downloading files from the Internet Archive")]
 #[command(version = option_env!("BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))]
 #[command(author = env!("CARGO_PKG_AUTHORS"))]
@@ -705,16 +774,98 @@ async fn run() -> Result<()> {
     .await?;
 
     // Narrow metadata to the requested target and apply any user-supplied glob filters
-    let files = finish_spinner_on_err(
-        &spinner,
-        select_and_filter_files(files, &target, &file_filter),
-    )?;
+    let target_files = finish_spinner_on_err(&spinner, select_target_files(files, &target))?;
+    let pre_filter_count = target_files.files.len();
+    let files = finish_spinner_on_err(&spinner, file_filter.apply(target_files))?;
+    let filter_context = FilterContext {
+        patterns: cli.filters.clone(),
+        matched: files.files.len(),
+        total: pre_filter_count,
+    };
+    let active_filter = filter_context.is_active().then_some(filter_context.clone());
 
     // If requested, list parsed filenames and exit; or validate directory and verify local files
     if cli.list || cli.check {
-        let Some(output_dir) = finalize_metadata_phase(&cli, &files, &spinner)? else {
+        let Some(output_dir) = finalize_metadata_phase_with_context(
+            &cli,
+            target.identifier(),
+            &files,
+            active_filter.as_ref(),
+            &spinner,
+        )?
+        else {
             return Ok(());
         };
+
+        if ia_get::ui::is_interactive_stdout() {
+            use std::io::Write;
+            use std::sync::Arc;
+
+            spinner.finish_and_clear();
+            let _live_guard = shutdown.enter_live_ui();
+            let total = files.files.len();
+            let unit = if total == 1 { "file" } else { "files" };
+            let check_spinner =
+                Arc::new(StatusSpinner::new_md5(format!("Checking 0/{total} {unit}")));
+            let sep = theme.glyphs().sep;
+            let output_dir_bg = output_dir.clone();
+            let files_bg = files.files;
+            let shutdown_bg = shutdown.clone();
+            let logger_bg = logger.clone();
+            let spinner_bg = Arc::clone(&check_spinner);
+
+            let report = match tokio::task::spawn_blocking(move || {
+                verify::verify_files_detailed(
+                    &output_dir_bg,
+                    &files_bg,
+                    &shutdown_bg,
+                    &logger_bg,
+                    false,
+                    |done, total_count, hashed, elapsed, name| {
+                        let secs = elapsed.as_secs_f64();
+                        let rate = if hashed > 0 && secs > 0.0 {
+                            ia_get::ui::render::format_speed(hashed as f64 / secs)
+                        } else {
+                            "---".to_string()
+                        };
+                        spinner_bg.set_message(format!(
+                            "Checking {done}/{total_count} {unit} {sep} {} {sep} {rate} {sep} {name}",
+                            format_size(hashed)
+                        ));
+                    },
+                )
+            })
+            .await
+            {
+                Ok(result) => finish_spinner_on_err(&check_spinner, result)?,
+                Err(err) => {
+                    check_spinner.finish_and_clear();
+                    return Err(IaGetError::FileSystem(format!(
+                        "Verification task failed: {err}"
+                    )));
+                }
+            };
+
+            check_spinner.finish_and_clear();
+            let width = ia_get::ui::stdout_terminal_width();
+            let display_dir = format_display_dir(&output_dir);
+            let output = ia_get::ui::check::format_check_tty(
+                target.identifier(),
+                &display_dir,
+                &report,
+                active_filter.as_ref(),
+                &theme,
+                width,
+            );
+            {
+                let mut stdout = std::io::stdout().lock();
+                let _ = writeln!(stdout, "{output}");
+                let _ = stdout.flush();
+            }
+            drop(_live_guard);
+            verify_exit_result(&report.summary, total)?;
+            return Ok(());
+        }
 
         let file_label = if files.files.len() == 1 {
             "file"
@@ -739,10 +890,11 @@ async fn run() -> Result<()> {
 
     // In download mode without cookies, fail fast if all selected files are private, or skip
     // private entries before planning paths, creating directories, or checking disk space.
-    let (files, skipped_private_count) = finish_spinner_on_err(
+    let (files, skipped_private_files) = finish_spinner_on_err(
         &spinner,
         partition_private_files_for_download(files, cookie_source.is_some(), &spinner, &logger),
     )?;
+    let skipped_private_count = skipped_private_files.len();
 
     // Build and validate the download plan against each parent directory's filesystem lookup rules
     // before creating missing output directories, checking disk space, or starting transfers.
@@ -761,6 +913,8 @@ async fn run() -> Result<()> {
     let ui_options = downloader::BatchUiOptions {
         identifier: target.identifier().to_string(),
         skipped_private_count,
+        skipped_private_files,
+        filter: active_filter,
     };
 
     let summary = run_planned_downloads_with_ui(
@@ -779,16 +933,21 @@ async fn run() -> Result<()> {
                 disk_space::check_disk_space_with_signal(dir, items, signal),
             )?;
 
-            // Successfully finished initialization
-            finish_spinner_ok(
-                &spinner,
-                format_args!(
-                    "{} to download {} {file_label} from {}",
-                    style_bold("Ready", &theme),
-                    style_bold(&total_files.to_string(), &theme),
-                    style_accent(target.identifier(), &theme)
-                ),
-            );
+            // Successfully finished initialization: clear the transient spinner on TTY so
+            // the live instrument takes over directly without a redundant Ready line.
+            if ia_get::ui::is_interactive_stdout() {
+                spinner.finish_and_clear();
+            } else {
+                finish_spinner_ok(
+                    &spinner,
+                    format_args!(
+                        "{} to download {} {file_label} from {}",
+                        style_bold("Ready", &theme),
+                        style_bold(&total_files.to_string(), &theme),
+                        style_accent(target.identifier(), &theme)
+                    ),
+                );
+            }
             Ok(())
         },
     )
@@ -814,7 +973,15 @@ async fn main() -> ExitCode {
         ) => error_to_exit_code(&err),
         Err(err) => {
             let err_theme = Theme::detect_stderr();
-            eprintln!("{} {err}", style_err(err_theme.glyphs().fail, &err_theme));
+            let interactive_err = ia_get::ui::is_interactive_stderr();
+            eprintln!(
+                "{}",
+                ia_get::ui::render::format_fatal_error(
+                    &err.to_string(),
+                    interactive_err,
+                    &err_theme
+                )
+            );
             error_to_exit_code(&err)
         }
     }
@@ -2990,5 +3157,31 @@ mod tests {
         assert_eq!(check_summary.ok, 2);
         assert!(check_summary.failed.is_empty());
         assert_eq!(check_server.finish().await.len(), 1);
+    }
+
+    #[test]
+    fn print_sanitization_warnings_logs_every_rename_under_verbose_logger() {
+        let captured = CapturedLogs::new();
+        let logger = VerboseLogger::with_writer(captured.clone());
+        let renames: Vec<(String, String)> = (1..=7)
+            .map(|i| {
+                (
+                    format!("Episode {i}: Why?.mp4"),
+                    format!("Episode {i}_ Why_.mp4"),
+                )
+            })
+            .collect();
+
+        print_sanitization_warnings(&renames, &logger);
+
+        let logs = captured.text();
+        for (orig, renamed) in &renames {
+            let expected = format!("[verbose] sanitize: '{orig}' -> '{renamed}'");
+            assert!(
+                logs.contains(&expected),
+                "missing verbose sanitize log {expected:?}:\n{logs}"
+            );
+        }
+        assert_eq!(logs.lines().count(), 7, "must log all 7 renames:\n{logs}");
     }
 }
