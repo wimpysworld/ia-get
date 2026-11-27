@@ -32,26 +32,33 @@ bin install github.com/wimpysworld/ia-get
 
 # Features
 
-- Downloads full items from `/details/<identifier>` URLs or single files from `/download/<identifier>/<path>` URLs, and keeps the original directory structure.
-- Parallelises downloads automatically with zero options, from 4 small files down to 1 large file at a time. Reactive HTTP `429` and `503` backpressure complies with Internet Archive's wishes and [automated access guidelines](https://archive.org/developers/bots.html).
-- Filters downloads, `--list` output, and `--check` runs with repeatable `-f`/`--filter <GLOB>` patterns, including `!` exclusions.
-- Stages downloads in `.part` files, resumes partial transfers with HTTP range validation, verifies MD5 hashes, and renames finished files atomically.
-- Verifies existing local directories in read-only `--check` mode without downloading or modifying files.
-- Retries transient errors with exponential backoff and `Retry-After` handling, and caps total aggregate bandwidth across active transfers with `--limit-rate`.
-- Saves files into a chosen directory with `-o`/`--output-dir` and checks free disk space on the destination volume before transfers start.
-- Keeps writes inside the destination directory, refuses symlinks and non-regular files, sanitises unsafe Windows filenames, and rejects path collisions before downloading.
-- Supports scoped browser cookies (`-b`/`--cookies`) across redirects, skips `<private>` archive files unless you pass cookies, and honours standard proxy environment variables automatically.
-- Writes plain-text diagnostic logs to `stderr` with `-v`/`--verbose` while progress bars stay on `stdout`.
-- Available for Linux, macOS, and Windows.
+- **One URL, whole archive:** `ia-get` downloads every file with its original folders from an archive.org `/details/` link, or one file from a `/download/` link.
+- **Fast and polite automatically:** `ia-get` downloads small and medium files in parallel with zero flags and slows down for large files. It backs off on rate limits to respect the Internet Archive's wishes and [automated access guidelines](https://archive.org/developers/bots.html).
+- **Live terminal UI:** The inline display shows active parallel downloads, a throughput sparkline, mirror hosts, and overall progress. Calm warnings appear at the end, and your terminal scrollback stays intact.
+- **Preview and cherry-pick:** Run `--list` to inspect every file and size before you download. Use `-f` glob patterns to include or exclude files.
+- **Resume and verify:** Interrupted downloads pick up where they left off, and finished files pass automatic MD5 checks. Run `--check` to verify a local folder without changing a file.
+- **Private items, speed caps, and proxies:** Pass browser cookies with `-b` for login-only items, or cap total speed with `--limit-rate`. `ia-get` follows system proxies automatically and skips private files when you do not pass cookies.
+- **Native and safe everywhere:** `ia-get` is a fast standalone binary for Linux, macOS, and Windows. It checks free disk space first and keeps every write inside your target folder.
 
 # Quick start
 
 ```shell
+# Download an entire archive item with its original folders
 ia-get https://archive.org/details/<identifier>
+
+# Download a single file directly
 ia-get https://archive.org/download/<identifier>/<path>
+
+# Preview files and sizes without downloading anything
 ia-get --list https://archive.org/details/<identifier>
+
+# Save files into a chosen folder
 ia-get -o ./downloads https://archive.org/details/<identifier>
-ia-get -f '*.pdf' https://archive.org/details/<identifier>
+
+# Download only PDFs and exclude *_text.pdf files
+ia-get -f '*.pdf' -f '!*_text.pdf' https://archive.org/details/<identifier>
+
+# Verify an existing local folder without downloading or changing files
 ia-get --check -o ./downloads https://archive.org/details/<identifier>
 ```
 

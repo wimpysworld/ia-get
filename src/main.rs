@@ -6,20 +6,23 @@
 //! the associated files, with support for resumable downloads and MD5 hash verification.
 
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use clap::Parser;
-use colored::*;
 use ia_get::archive_metadata::{parse_xml_files, XmlFiles};
 use ia_get::constants::USER_AGENT;
 use ia_get::disk_space;
 use ia_get::downloader;
+use ia_get::ui::palette::{
+    stdout_theme, style_accent, style_bold, style_err, style_muted, style_ok, style_warn, Theme,
+};
+use ia_get::ui::StatusSpinner;
 use ia_get::utils::{
-    create_spinner, format_size, parse_archive_url, percent_decode_utf8, sanitize_filename,
-    sanitize_url_for_log, ArchiveUrl,
+    format_size, parse_archive_url, percent_decode_utf8, sanitize_filename, sanitize_url_for_log,
+    ArchiveUrl,
 };
 use ia_get::verify;
 use ia_get::{CookieSource, FileFilter, IaGetError, Result, VerboseLogger};
-use indicatif::ProgressStyle;
 use reqwest::{Client, Url};
 
 /// Extended timeout for large file downloads (10 minutes for connection; per-chunk idle read timeout is applied during transfers)
@@ -30,53 +33,67 @@ const CONNECTION_TIMEOUT_SECS: u64 = 600;
 async fn fetch_xml_metadata_from_url_with_logger(
     base_url: reqwest::Url,
     client: &Client,
-    spinner: &indicatif::ProgressBar,
+    spinner: &StatusSpinner,
     cookie_source: Option<&CookieSource>,
     policy: &downloader::RetryPolicy,
     signal: &downloader::ShutdownSignal,
     logger: &VerboseLogger,
 ) -> Result<(XmlFiles, reqwest::Url)> {
-    let xml_url = base_url.as_str();
+    let theme = *spinner.theme();
+    let xml_label = base_url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or_else(|| base_url.as_str());
     spinner.set_message(format!(
-        "{} Fetching XML metadata: {}",
-        "⚙".blue(),
-        xml_url.bold()
+        "Fetching metadata: {}",
+        style_bold(xml_label, &theme)
     ));
 
-    let xml_content = finish_spinner_on_err(
-        spinner,
-        downloader::fetch_text_with_retry_with_logger(
-            &base_url,
-            cookie_source.is_some(),
-            policy,
-            signal,
-            logger,
-            |target_url| {
-                downloader::attach_cookie_header(
-                    client.get(target_url.clone()),
-                    cookie_source,
-                    target_url,
-                )
-            },
-            |event| {
-                spinner.set_message(format!(
-                    "{} Retrying XML metadata ({}/{}) after {} in {:.1}s...",
-                    "⟳".yellow().bold(),
-                    event.attempt,
-                    event.max_retries,
-                    event.reason,
-                    event.delay.as_secs_f64()
-                ));
-            },
-        )
-        .await,
-    )?;
+    let xml_result = downloader::fetch_text_with_retry_with_logger(
+        &base_url,
+        cookie_source.is_some(),
+        policy,
+        signal,
+        logger,
+        |target_url| {
+            downloader::attach_cookie_header(
+                client.get(target_url.clone()),
+                cookie_source,
+                target_url,
+            )
+        },
+        |event| {
+            spinner.set_message(format!(
+                "{} Retrying XML metadata ({}/{}) after {} in {:.1}s...",
+                style_warn(theme.glyphs().warn, &theme),
+                event.attempt,
+                event.max_retries,
+                event.reason,
+                event.delay.as_secs_f64()
+            ));
+        },
+    )
+    .await
+    .map_err(|err| {
+        if !signal.is_running()
+            || matches!(err, IaGetError::Interrupted)
+            || matches!(&err, IaGetError::FileSystem(msg) if msg.contains("interrupted by user"))
+        {
+            IaGetError::Interrupted
+        } else {
+            err
+        }
+    });
 
-    spinner.set_message(format!(
-        "{} {}",
-        "⚙".blue(),
-        "Parsing archive metadata...".bold()
-    ));
+    let xml_content = finish_spinner_on_err(spinner, xml_result)?;
+
+    if !signal.is_running() {
+        spinner.finish_and_clear();
+        return Err(IaGetError::Interrupted);
+    }
+
+    spinner.set_message(style_bold("Parsing archive metadata...", &theme));
 
     // Parse XML content with improved error handling
     let files = finish_spinner_on_err(spinner, parse_xml_files(&xml_content))?;
@@ -96,7 +113,7 @@ async fn fetch_xml_metadata_from_url_with_logger(
 async fn fetch_xml_metadata_with_logger(
     target: &ArchiveUrl,
     client: &Client,
-    spinner: &indicatif::ProgressBar,
+    spinner: &StatusSpinner,
     cookie_source: Option<&CookieSource>,
     signal: &downloader::ShutdownSignal,
     logger: &VerboseLogger,
@@ -169,19 +186,20 @@ fn select_and_filter_files(
     filter.apply(selected)
 }
 
-/// Filters out `<private>` archive entries in download mode when no cookies are supplied.
+/// Partitions out `<private>` archive entries in download mode when no cookies are supplied,
+/// returning `(public_files, skipped_private_count)`.
 ///
-/// Returns `Ok(files)` unchanged when `has_cookies` is `true`, fails fast with
+/// Returns `Ok((files, 0))` unchanged when `has_cookies` is `true`, fails fast with
 /// [`IaGetError::PrivateFilesOnly`] when every selected entry is private, or skips private
 /// entries with one warning line and per-file `metadata` verbose logs when public entries remain.
-fn filter_private_files_for_download(
+fn partition_private_files_for_download(
     files: XmlFiles,
     has_cookies: bool,
-    spinner: &indicatif::ProgressBar,
+    spinner: &StatusSpinner,
     logger: &VerboseLogger,
-) -> Result<XmlFiles> {
+) -> Result<(XmlFiles, usize)> {
     if has_cookies {
-        return Ok(files);
+        return Ok((files, 0));
     }
 
     let mut public_files = Vec::with_capacity(files.files.len());
@@ -195,9 +213,12 @@ fn filter_private_files_for_download(
     }
 
     if skipped_private.is_empty() {
-        return Ok(XmlFiles {
-            files: public_files,
-        });
+        return Ok((
+            XmlFiles {
+                files: public_files,
+            },
+            0,
+        ));
     }
 
     if public_files.is_empty() {
@@ -215,18 +236,33 @@ fn filter_private_files_for_download(
 
     let skipped_count = skipped_private.len();
     let file_label = if skipped_count == 1 { "file" } else { "files" };
+    let theme = stdout_theme();
     spinner.suspend(|| {
         println!(
             "{} {} {} private {file_label} (supply -b/--cookies to download private files)",
-            "⚠".yellow().bold(),
-            "Skipping".yellow(),
-            skipped_count.to_string().bold(),
+            style_warn(theme.glyphs().warn, &theme),
+            style_warn("Skipping", &theme),
+            style_bold(&skipped_count.to_string(), &theme),
         );
     });
 
-    Ok(XmlFiles {
-        files: public_files,
-    })
+    Ok((
+        XmlFiles {
+            files: public_files,
+        },
+        skipped_count,
+    ))
+}
+
+#[cfg(test)]
+fn filter_private_files_for_download(
+    files: XmlFiles,
+    has_cookies: bool,
+    spinner: &StatusSpinner,
+    logger: &VerboseLogger,
+) -> Result<XmlFiles> {
+    partition_private_files_for_download(files, has_cookies, spinner, logger)
+        .map(|(public_files, _)| public_files)
 }
 
 /// Builds the download URL for a file relative to the item's XML metadata URL.
@@ -304,26 +340,22 @@ fn list_summary(files: &XmlFiles) -> String {
     }
 }
 
-fn finish_spinner_ok(spinner: &indicatif::ProgressBar, message: impl std::fmt::Display) {
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .template(&format!("{} {message}", "✔".green().bold()))
-            .expect("Failed to set completion style"),
-    );
-    spinner.finish();
+fn finish_spinner_ok(spinner: &StatusSpinner, message: impl std::fmt::Display) {
+    spinner.finish_ok(message);
 }
 
-fn finish_spinner_on_err<T>(spinner: &indicatif::ProgressBar, result: Result<T>) -> Result<T> {
-    result.inspect_err(|err| {
-        spinner.finish_with_message(format!("{} {err}", "✘".red().bold()));
+fn finish_spinner_on_err<T>(spinner: &StatusSpinner, result: Result<T>) -> Result<T> {
+    result.inspect_err(|_| {
+        spinner.finish_and_clear();
     })
 }
 
 /// Lists parsed filenames from XML metadata when --list/-l is used
-fn list_files(files: &XmlFiles, spinner: &indicatif::ProgressBar) {
+fn list_files(files: &XmlFiles, spinner: &StatusSpinner) {
+    let theme = stdout_theme();
     finish_spinner_ok(
         spinner,
-        format_args!("Archive has {}", list_summary(files).bold()),
+        format_args!("Archive has {}", style_bold(&list_summary(files), &theme)),
     );
     for row in list_file_rows(files) {
         println!("{row}");
@@ -440,28 +472,70 @@ fn print_sanitization_warnings(sanitized: &[(String, String)]) {
         return;
     }
 
+    let theme = stdout_theme();
+    let glyphs = theme.glyphs();
     for (original_name, sanitized_name) in sanitized {
         println!(
-            "{} {} {} → {}",
-            "⚠".yellow().bold(),
-            "Sanitized:".yellow(),
-            original_name.dimmed(),
-            sanitized_name.bold()
+            "{} {} {} {} {}",
+            style_warn(glyphs.warn, &theme),
+            style_warn("Sanitized:", &theme),
+            style_muted(original_name, &theme),
+            style_muted(glyphs.arrow, &theme),
+            style_bold(sanitized_name, &theme)
         );
     }
 
     let sanitized_count = sanitized.len();
     println!(
         "\n{} {} {} file{} for filesystem compatibility",
-        "✓".green().bold(),
-        "Sanitized".bold(),
-        sanitized_count.to_string().bold(),
+        style_ok(glyphs.ok, &theme),
+        style_bold("Sanitized", &theme),
+        style_bold(&sanitized_count.to_string(), &theme),
         if sanitized_count == 1 { "" } else { "s" }
     );
 }
 
 /// Runs the pre-download disk-space check and, when it succeeds, downloads all planned files
+/// using explicit [`downloader::DownloadOptions`], [`downloader::BatchUiOptions`], and
+/// [`VerboseLogger`].
+#[allow(clippy::too_many_arguments)]
+async fn run_planned_downloads_with_ui<F>(
+    client: &Client,
+    output_dir: &Path,
+    plan: DownloadPlan,
+    cookie_source: Option<&CookieSource>,
+    options: &downloader::DownloadOptions,
+    ui_options: &downloader::BatchUiOptions,
+    signal: &downloader::ShutdownSignal,
+    logger: &VerboseLogger,
+    check_space: F,
+) -> Result<downloader::BatchSummary>
+where
+    F: FnOnce(&Path, &[disk_space::PlannedDownload], &downloader::ShutdownSignal) -> Result<()>,
+{
+    check_space(output_dir, &plan.items, signal)?;
+
+    print_sanitization_warnings(&plan.sanitized);
+
+    let total_files = plan.items.len();
+
+    downloader::download_files_in_dir_with_ui(
+        client,
+        output_dir,
+        plan.items,
+        total_files,
+        cookie_source,
+        options,
+        ui_options,
+        signal,
+        logger,
+    )
+    .await
+}
+
+/// Runs the pre-download disk-space check and, when it succeeds, downloads all planned files
 /// using explicit [`downloader::DownloadOptions`] and [`VerboseLogger`].
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run_planned_downloads_with_logger<F>(
     client: &Client,
@@ -476,27 +550,22 @@ async fn run_planned_downloads_with_logger<F>(
 where
     F: FnOnce(&Path, &[disk_space::PlannedDownload], &downloader::ShutdownSignal) -> Result<()>,
 {
-    check_space(output_dir, &plan.items, signal)?;
-
-    print_sanitization_warnings(&plan.sanitized);
-
-    let total_files = plan.items.len();
-
-    downloader::download_files_in_dir_with_logger(
+    run_planned_downloads_with_ui(
         client,
         output_dir,
-        plan.items,
-        total_files,
+        plan,
         cookie_source,
         options,
+        &downloader::BatchUiOptions::default(),
         signal,
         logger,
+        check_space,
     )
     .await
 }
 
 /// Validates a check directory or prepares the download output directory.
-fn prepare_phase_dir(cli: &Cli, spinner: &indicatif::ProgressBar) -> Result<PathBuf> {
+fn prepare_phase_dir(cli: &Cli, spinner: &StatusSpinner) -> Result<PathBuf> {
     let target_dir = resolve_output_dir(cli.output_dir.as_deref());
     let dir_result = if cli.check {
         verify::validate_check_dir(target_dir)
@@ -512,7 +581,7 @@ fn prepare_phase_dir(cli: &Cli, spinner: &indicatif::ProgressBar) -> Result<Path
 fn finalize_metadata_phase(
     cli: &Cli,
     files: &XmlFiles,
-    spinner: &indicatif::ProgressBar,
+    spinner: &StatusSpinner,
 ) -> Result<Option<PathBuf>> {
     if cli.list {
         list_files(files, spinner);
@@ -588,12 +657,16 @@ fn build_http_client(proxy_config: &downloader::ProxyConfig) -> Result<Client> {
     Ok(client)
 }
 
-/// Main application entry point
-///
-/// Parses command line arguments, validates the archive.org URL, downloads XML metadata,
-/// and initiates file downloads with built-in signal handling.
-#[tokio::main]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+/// Maps an [`IaGetError`] to the POSIX exit code contract (`1` failure/mismatch, `130` Ctrl+C).
+fn error_to_exit_code(err: &IaGetError) -> ExitCode {
+    match err {
+        IaGetError::Interrupted => ExitCode::from(130),
+        _ => ExitCode::from(1),
+    }
+}
+
+/// Runs the CLI application and returns structured errors for clean exit-code handling.
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     let logger = VerboseLogger::from_enabled(cli.verbose);
 
@@ -614,8 +687,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let shutdown = downloader::install_signal_handler();
 
-    // Start a single spinner for the entire initialization process
-    let spinner = create_spinner(&format!("Processing archive.org URL: {}", cli.url.bold()));
+    let theme = stdout_theme();
+    let spinner = StatusSpinner::new(style_bold("Preparing archive.org request...", &theme));
 
     // Parse and validate URL format
     let target = finish_spinner_on_err(&spinner, parse_archive_url(&cli.url))?;
@@ -653,8 +726,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             &spinner,
             format_args!(
                 "{} {} {file_label} against archive.org metadata",
-                "Checking".bold(),
-                files.files.len().to_string().bold(),
+                style_bold("Checking", &theme),
+                style_bold(&files.files.len().to_string(), &theme),
             ),
         );
 
@@ -666,9 +739,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // In download mode without cookies, fail fast if all selected files are private, or skip
     // private entries before planning paths, creating directories, or checking disk space.
-    let files = finish_spinner_on_err(
+    let (files, skipped_private_count) = finish_spinner_on_err(
         &spinner,
-        filter_private_files_for_download(files, cookie_source.is_some(), &spinner, &logger),
+        partition_private_files_for_download(files, cookie_source.is_some(), &spinner, &logger),
     )?;
 
     // Build and validate the download plan against each parent directory's filesystem lookup rules
@@ -685,21 +758,22 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         limit_rate: cli.limit_rate,
         ..downloader::DownloadOptions::default()
     };
+    let ui_options = downloader::BatchUiOptions {
+        identifier: target.identifier().to_string(),
+        skipped_private_count,
+    };
 
-    let summary = run_planned_downloads_with_logger(
+    let summary = run_planned_downloads_with_ui(
         &client,
         &output_dir,
         plan,
         cookie_source.as_ref(),
         &options,
+        &ui_options,
         &shutdown,
         &logger,
         |dir, items, signal| {
-            spinner.set_message(format!(
-                "{} {}",
-                "⚙".blue(),
-                "Checking available disk space...".bold()
-            ));
+            spinner.set_message(style_bold("Checking available disk space...", &theme));
             finish_spinner_on_err(
                 &spinner,
                 disk_space::check_disk_space_with_signal(dir, items, signal),
@@ -709,10 +783,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             finish_spinner_ok(
                 &spinner,
                 format_args!(
-                    "{} to download {} {file_label} from archive.org {}",
-                    "Ready".bold(),
-                    total_files.to_string().bold(),
-                    "★".yellow()
+                    "{} to download {} {file_label} from {}",
+                    style_bold("Ready", &theme),
+                    style_bold(&total_files.to_string(), &theme),
+                    style_accent(target.identifier(), &theme)
                 ),
             );
             Ok(())
@@ -723,6 +797,27 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     batch_exit_result(&summary, total_files)?;
 
     Ok(())
+}
+
+/// Main application entry point.
+///
+/// Preserves strict exit codes (`0` ok, `1` failure/mismatch, `130` Ctrl+C) while
+/// suppressing raw Rust `Debug` dumps for already-rendered batch and verification summaries.
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(
+            err @ (IaGetError::BatchFailed { .. }
+            | IaGetError::VerificationFailed { .. }
+            | IaGetError::Interrupted),
+        ) => error_to_exit_code(&err),
+        Err(err) => {
+            let err_theme = Theme::detect_stderr();
+            eprintln!("{} {err}", style_err(err_theme.glyphs().fail, &err_theme));
+            error_to_exit_code(&err)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -772,7 +867,7 @@ mod tests {
         max_retries: u32,
         signal: &downloader::ShutdownSignal,
     ) -> (XmlFiles, Url) {
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let logger = VerboseLogger::disabled();
         fetch_xml_metadata_from_url_with_logger(
             server.parsed_url("/download/item/item_files.xml"),
@@ -1015,9 +1110,28 @@ mod tests {
             failed: vec![downloader::FailedFile {
                 file_path: "missing.bin".to_string(),
                 error: "404".to_string(),
+                kind: downloader::FailureKind::TransferError,
             }],
             interrupted: false,
         };
+        assert_eq!(
+            error_to_exit_code(&IaGetError::Interrupted),
+            ExitCode::from(130)
+        );
+        assert_eq!(
+            error_to_exit_code(&IaGetError::BatchFailed {
+                failed: 1,
+                total: 3,
+            }),
+            ExitCode::from(1)
+        );
+        assert_eq!(
+            error_to_exit_code(&IaGetError::VerificationFailed {
+                failed: 1,
+                total: 2,
+            }),
+            ExitCode::from(1)
+        );
         assert!(matches!(
             batch_exit_result(&batch_fail, 3),
             Err(IaGetError::BatchFailed {
@@ -1092,7 +1206,7 @@ mod tests {
         let files = XmlFiles {
             files: vec![xml_file("disk1.zip", Some(1024), None)],
         };
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let url = "https://archive.org/details/item";
 
         // --list never creates missing output directories
@@ -1293,7 +1407,7 @@ mod tests {
             assert_eq!(list_file_rows(&selected), case.rows, "case {}", case.label);
             assert_eq!(list_summary(&selected), case.summary, "case {}", case.label);
 
-            let spinner = indicatif::ProgressBar::hidden();
+            let spinner = StatusSpinner::hidden();
             assert_eq!(
                 finalize_metadata_phase(&cli, &selected, &spinner).unwrap(),
                 None,
@@ -1314,7 +1428,7 @@ mod tests {
         };
         let cli =
             Cli::try_parse_from(["ia-get", "--list", "https://archive.org/details/item"]).unwrap();
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         assert_eq!(
             finalize_metadata_phase(&cli, &colliding, &spinner).unwrap(),
             None
@@ -1618,7 +1732,7 @@ mod tests {
         .await;
 
         let client = test_client();
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
         let xml_url = server.parsed_url("/download/item/item_files.xml");
@@ -1651,9 +1765,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_xml_metadata_maps_interruption_to_interrupted_error_and_exit_130() {
+        let client = test_client();
+        let logger = VerboseLogger::disabled();
+
+        // Pre-triggered shutdown maps immediately to IaGetError::Interrupted (exit 130).
+        let pre_stopped = downloader::ShutdownSignal::new();
+        pre_stopped.trigger();
+        let spinner = StatusSpinner::hidden();
+        let err = fetch_xml_metadata_from_url_with_logger(
+            Url::parse("http://127.0.0.1:1/download/item/item_files.xml").unwrap(),
+            &client,
+            &spinner,
+            None,
+            &fast_retry_policy(2),
+            &pre_stopped,
+            &logger,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, IaGetError::Interrupted),
+            "expected IaGetError::Interrupted, got {err:?}"
+        );
+        assert_eq!(error_to_exit_code(&err), ExitCode::from(130));
+        assert!(spinner.is_finished());
+
+        // Mid-retry Ctrl+C wakes during retry backoff and maps cleanly to IaGetError::Interrupted.
+        let server = MockServer::start(vec![MockResponse::retry_after(
+            "503 Service Unavailable",
+            "30",
+            b"busy",
+        )])
+        .await;
+        let signal = downloader::ShutdownSignal::new();
+        let trigger_signal = signal.clone();
+        let trigger_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            trigger_signal.trigger();
+        });
+
+        let spinner = StatusSpinner::hidden();
+        let started = Instant::now();
+        let err = fetch_xml_metadata_from_url_with_logger(
+            server.parsed_url("/download/item/item_files.xml"),
+            &client,
+            &spinner,
+            None,
+            &downloader::RetryPolicy {
+                max_retries: 3,
+                initial_delay: Duration::from_secs(10),
+                max_delay: Duration::from_secs(30),
+                max_retry_after: Duration::from_secs(30),
+            },
+            &signal,
+            &logger,
+        )
+        .await
+        .unwrap_err();
+        trigger_task.await.unwrap();
+        let _ = server.finish().await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "metadata retry should wake promptly on shutdown"
+        );
+        assert!(
+            matches!(err, IaGetError::Interrupted),
+            "expected IaGetError::Interrupted, got {err:?}"
+        );
+        assert_eq!(error_to_exit_code(&err), ExitCode::from(130));
+        assert!(spinner.is_finished());
+    }
+
+    #[tokio::test]
     async fn metadata_redirect_wiring_rescopes_cookies_and_preserves_base_url() {
         let client = test_client();
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
         let policy = fast_retry_policy(1);
@@ -1860,7 +2048,7 @@ mod tests {
         let target = parse_archive_url(&cli.url).unwrap();
 
         let client = test_client();
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
         let options = fast_options(1, None);
@@ -1958,7 +2146,7 @@ mod tests {
         ]);
 
         let client = test_client();
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
 
@@ -2034,7 +2222,7 @@ mod tests {
         ]);
 
         let client = test_client();
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
 
@@ -2162,7 +2350,7 @@ mod tests {
             ),
         ])
         .await;
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let (all_files, base_url) = fetch_xml_metadata_from_url_with_logger(
             pass_server.parsed_url("/download/item/item_files.xml"),
             &client,
@@ -2219,7 +2407,7 @@ mod tests {
         ]);
 
         let client = test_client();
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
 
@@ -2384,7 +2572,7 @@ mod tests {
 
         let xml_url =
             Url::parse("http://archive.example/download/proxyitem/proxyitem_files.xml").unwrap();
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
 
@@ -2447,7 +2635,7 @@ mod tests {
         let logger = VerboseLogger::with_writer(captured.clone_writer());
 
         let client = test_client();
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let signal = downloader::ShutdownSignal::new();
         let options = fast_options(0, None);
 
@@ -2561,7 +2749,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_xml_metadata_single_get_user_agent_and_actionable_http_errors() {
         let client = build_http_client(&downloader::ProxyConfig::default()).unwrap();
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
         let cookies = CookieSource::from_netscape_str("127.0.0.1\tFALSE\t/\tFALSE\t0\tsid\t1\n");
@@ -2658,7 +2846,7 @@ mod tests {
         );
 
         let client = test_client();
-        let spinner = indicatif::ProgressBar::hidden();
+        let spinner = StatusSpinner::hidden();
         let signal = downloader::ShutdownSignal::new();
         let options = fast_options(0, None);
 

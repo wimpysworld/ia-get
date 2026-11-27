@@ -47,12 +47,7 @@ fn has_verified_final_file(
         return Err(IaGetError::Interrupted);
     }
 
-    match downloader::calculate_md5_with_progress(
-        canonical_root,
-        rel_path,
-        signal.running_flag(),
-        false,
-    ) {
+    match downloader::calculate_md5(canonical_root, rel_path, signal.running_flag()) {
         Ok(actual_md5) => {
             if !signal.is_running() {
                 return Err(IaGetError::Interrupted);

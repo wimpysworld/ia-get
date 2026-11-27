@@ -13,8 +13,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use colored::*;
-use indicatif::{MultiProgress, ProgressBar};
 use reqwest::header::HeaderValue;
 use reqwest::{Client, StatusCode, Url};
 use tokio::sync::Mutex as AsyncMutex;
@@ -24,11 +22,9 @@ use crate::constants::{CHUNK_READ_TIMEOUT_SECS, MAX_REDIRECTS};
 use crate::cookie::CookieSource;
 use crate::disk_space::PlannedDownload;
 use crate::error::IaGetError;
-use crate::utils::{
-    create_attached_progress_bar, create_progress_bar, format_duration, format_size,
-    format_transfer_rate, print_run_summary, progress_draw_target, sanitize_url_for_log,
-    VerboseLogger,
-};
+use crate::ui::state::{CompletionKind, CompletionRecord, SkipReason, TransferStage, UiEvent};
+use crate::ui::{UiDriver, UiHandle, UiSessionConfig};
+use crate::utils::{format_duration, sanitize_url_for_log, VerboseLogger};
 use crate::Result;
 
 pub use collision::{validate_download_paths_for_dir, PathCaseSensitivity};
@@ -46,8 +42,8 @@ pub use retry::{
 };
 pub use scheduler::{
     base_permit_cost, download_sort_key, sort_planned_downloads, ElasticScheduler, SchedulerPermit,
-    BACKPRESSURE_RECOVERY_SUCCESSES, MAX_CONCURRENT_PERMITS, MEDIUM_FILE_MAX_BYTES,
-    SMALL_FILE_MAX_BYTES,
+    SchedulerSnapshot, BACKPRESSURE_RECOVERY_SUCCESSES, MAX_CONCURRENT_PERMITS,
+    MEDIUM_FILE_MAX_BYTES, SMALL_FILE_MAX_BYTES,
 };
 
 use fs_safety::{
@@ -56,7 +52,7 @@ use fs_safety::{
     promote_part_file, remove_part_file_safely, ContainedFileError,
 };
 use proxy::redact_proxy_value;
-use redirect::{send_following_redirects, RedirectSendOutcome};
+use redirect::{send_following_redirects_with_hook, short_mirror_host, RedirectSendOutcome};
 use retry::{
     await_interruptible, compute_retry_delay_with_source, http_status_error, interrupted_error,
     is_throttle_status, parse_ascii_u64,
@@ -65,12 +61,21 @@ use retry::{
 /// Buffer size for file operations (8KB)
 const BUFFER_SIZE: usize = 8192;
 
-/// File size threshold for showing hash progress bar (2MB)
-const LARGE_FILE_THRESHOLD: u64 = 2 * 1024 * 1024;
+/// Minimum interval between non-blocking chunk/hash progress UI events per active slot.
+const UI_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(30);
 
 /// Idle stall threshold beyond which [`RateLimiter`] resets its pacing window
 /// so network stalls cannot accumulate multi-second unthrottled bursts.
 const RATE_LIMIT_STALL_RESET_WINDOW: Duration = Duration::from_millis(100);
+
+/// Display metadata passed to the archival inline UI for a batch download session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BatchUiOptions {
+    /// Archive item identifier shown in the instrument header.
+    pub identifier: String,
+    /// Number of `<private>` archive files skipped before the batch began.
+    pub skipped_private_count: usize,
+}
 
 /// Configuration controlling download retries, idle read timeouts, and bandwidth throttling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,35 +304,6 @@ async fn throttle_shared_rate_limiter(
     Ok(())
 }
 
-/// RAII guard that finishes, clears, and detaches a progress bar on every exit path.
-struct ProgressBarGuard {
-    pb: ProgressBar,
-    multi: Option<MultiProgress>,
-}
-
-impl ProgressBarGuard {
-    fn new(pb: ProgressBar, multi: Option<MultiProgress>) -> Self {
-        Self { pb, multi }
-    }
-
-    fn set_position(&self, pos: u64) {
-        self.pb.set_position(pos);
-    }
-
-    fn reset_eta(&self) {
-        self.pb.reset_eta();
-    }
-}
-
-impl Drop for ProgressBarGuard {
-    fn drop(&mut self) {
-        self.pb.finish_and_clear();
-        if let Some(ref multi) = self.multi {
-            multi.remove(&self.pb);
-        }
-    }
-}
-
 /// Parsed RFC 9110 Section 14.4 `Content-Range` header value for the `bytes` unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ContentRange {
@@ -469,45 +445,27 @@ fn calculate_md5_in_canonical_root_typed(
     canonical_root: &Path,
     rel_path: &Path,
     running: &Arc<AtomicBool>,
-    show_progress: bool,
-    multi_progress: Option<&MultiProgress>,
-    progress_label: Option<&str>,
+    ui_slot: Option<(&UiHandle, u64)>,
 ) -> std::result::Result<String, ContainedFileError> {
     let file = open_regular_file_for_read_in_canonical_root_typed(canonical_root, rel_path)?;
     let file_size = file
         .metadata()
         .map_err(|e| ContainedFileError::Io(e.into()))?
         .len();
-    let is_large_file = show_progress && file_size > LARGE_FILE_THRESHOLD;
 
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
     let mut context = md5::Context::new();
     let mut buffer = [0; BUFFER_SIZE];
-
-    let pb = if is_large_file {
-        let action = format!("{} {}    ", "╰╼".cyan().dimmed(), "Verifying".white());
-        let bar = match multi_progress {
-            Some(multi) => {
-                let label = progress_label
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| rel_path.display().to_string());
-                create_attached_progress_bar(
-                    multi,
-                    file_size,
-                    &action,
-                    &label,
-                    Some("blue/blue"),
-                    false,
-                )
-            }
-            None => create_progress_bar(file_size, &action, Some("blue/blue"), false),
-        };
-        Some(ProgressBarGuard::new(bar, multi_progress.cloned()))
-    } else {
-        None
-    };
-
     let mut bytes_processed: u64 = 0;
+    let mut last_emit = Instant::now();
+
+    if let Some((ui, slot_id)) = ui_slot {
+        ui.send(UiEvent::SlotHashProgress {
+            slot_id,
+            hashed_bytes: 0,
+            total_bytes: Some(file_size),
+        });
+    }
 
     loop {
         let bytes_read = reader
@@ -528,14 +486,27 @@ fn calculate_md5_in_canonical_root_typed(
         }
 
         context.consume(&buffer[..bytes_read]);
+        bytes_processed = bytes_processed.saturating_add(bytes_read as u64);
 
-        if let Some(ref progress_bar) = pb {
-            bytes_processed += bytes_read as u64;
-            progress_bar.set_position(bytes_processed);
+        if let Some((ui, slot_id)) = ui_slot {
+            if last_emit.elapsed() >= UI_PROGRESS_EMIT_INTERVAL {
+                ui.send(UiEvent::SlotHashProgress {
+                    slot_id,
+                    hashed_bytes: bytes_processed,
+                    total_bytes: Some(file_size),
+                });
+                last_emit = Instant::now();
+            }
         }
     }
 
-    drop(pb);
+    if let Some((ui, slot_id)) = ui_slot {
+        ui.send(UiEvent::SlotHashProgress {
+            slot_id,
+            hashed_bytes: bytes_processed,
+            total_bytes: Some(file_size),
+        });
+    }
 
     let hash = context.finalize();
     Ok(format!("{:x}", hash))
@@ -547,19 +518,11 @@ async fn calculate_md5_in_canonical_root_async(
     canonical_root: PathBuf,
     rel_path: PathBuf,
     running: Arc<AtomicBool>,
-    show_progress: bool,
-    multi_progress: Option<MultiProgress>,
-    progress_label: Option<String>,
+    ui_slot: Option<(UiHandle, u64)>,
 ) -> std::result::Result<String, ContainedFileError> {
     tokio::task::spawn_blocking(move || {
-        calculate_md5_in_canonical_root_typed(
-            &canonical_root,
-            &rel_path,
-            &running,
-            show_progress,
-            multi_progress.as_ref(),
-            progress_label.as_deref(),
-        )
+        let ui_ref = ui_slot.as_ref().map(|(handle, id)| (handle, *id));
+        calculate_md5_in_canonical_root_typed(&canonical_root, &rel_path, &running, ui_ref)
     })
     .await
     .map_err(|err| {
@@ -569,41 +532,23 @@ async fn calculate_md5_in_canonical_root_async(
     })?
 }
 
-/// Calculates the MD5 hash of a verified regular file inside `root`,
-/// optionally displaying a progress bar for large files.
-pub(crate) fn calculate_md5_with_progress(
-    root: &Path,
-    rel_path: &Path,
-    running: &Arc<AtomicBool>,
-    show_progress: bool,
-) -> Result<String> {
-    let canonical_root = resolve_destination_root(root)?;
-    calculate_md5_in_canonical_root_typed(
-        &canonical_root,
-        rel_path,
-        running,
-        show_progress,
-        None,
-        None,
-    )
-    .map_err(ContainedFileError::into_ia_get_error)
-}
-
 /// Calculates the MD5 hash of a verified regular file inside `root`.
 pub(crate) fn calculate_md5(
     root: &Path,
     rel_path: &Path,
     running: &Arc<AtomicBool>,
 ) -> Result<String> {
-    calculate_md5_with_progress(root, rel_path, running, true)
+    let canonical_root = resolve_destination_root(root)?;
+    calculate_md5_in_canonical_root_typed(&canonical_root, rel_path, running, None)
+        .map_err(ContainedFileError::into_ia_get_error)
 }
 
 /// Result of inspecting an existing destination file before starting a download.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExistingFileStatus {
     Missing,
-    CompleteMd5Verified,
-    CompleteNoMd5,
+    CompleteMd5Verified { size: u64 },
+    CompleteNoMd5 { size: u64 },
     NeedsRedownloadSizeMismatch { expected: u64, actual: u64 },
     NeedsRedownloadHashMismatch,
 }
@@ -617,8 +562,8 @@ async fn check_existing_file(
     expected_md5: Option<&str>,
     expected_size: Option<u64>,
     running: &Arc<AtomicBool>,
-    multi_progress: Option<&MultiProgress>,
-    detail_lines: &mut Vec<String>,
+    ui_slot: Option<(&UiHandle, u64)>,
+    logger: &VerboseLogger,
 ) -> Result<ExistingFileStatus> {
     let canonical_root = resolve_destination_root(root)?;
     let rel_path = PathBuf::from(file_path);
@@ -626,40 +571,51 @@ async fn check_existing_file(
     let Some((_, metadata)) = inspect_contained_regular_file(&canonical_root, &rel_path)? else {
         return Ok(ExistingFileStatus::Missing);
     };
+    let actual_size = metadata.len();
 
     if let Some(expected) = expected_size {
-        let actual = metadata.len();
-        if actual != expected {
-            return Ok(ExistingFileStatus::NeedsRedownloadSizeMismatch { expected, actual });
+        if actual_size != expected {
+            return Ok(ExistingFileStatus::NeedsRedownloadSizeMismatch {
+                expected,
+                actual: actual_size,
+            });
         }
     }
 
     let Some(expected) = expected_md5 else {
-        return Ok(ExistingFileStatus::CompleteNoMd5);
+        return Ok(ExistingFileStatus::CompleteNoMd5 { size: actual_size });
     };
+
+    if let Some((ui, slot_id)) = ui_slot {
+        ui.send(UiEvent::SlotStage {
+            slot_id,
+            stage: TransferStage::Md5,
+            mirror_host: None,
+            cooldown: None,
+            retry: None,
+        });
+    }
 
     match calculate_md5_in_canonical_root_async(
         canonical_root,
         rel_path,
         Arc::clone(running),
-        true,
-        multi_progress.cloned(),
-        Some(file_path.to_string()),
+        ui_slot.map(|(h, id)| (h.clone(), id)),
     )
     .await
     {
-        Ok(local_md5) if local_md5 == expected => Ok(ExistingFileStatus::CompleteMd5Verified),
+        Ok(local_md5) if local_md5 == expected => {
+            Ok(ExistingFileStatus::CompleteMd5Verified { size: actual_size })
+        }
         Ok(_) => Ok(ExistingFileStatus::NeedsRedownloadHashMismatch),
         Err(ContainedFileError::Containment(err) | ContainedFileError::Interrupted(err)) => {
             Err(err)
         }
         Err(ContainedFileError::Io(err)) => {
-            detail_lines.push(format!(
-                "{} {} to calculate MD5 hash: {}",
-                "├╼".cyan().dimmed(),
-                "Failed".red().bold(),
-                err
-            ));
+            logger.log(
+                "download",
+                format_args!("failed to calculate existing MD5 hash for '{file_path}': {err}"),
+            );
             Ok(ExistingFileStatus::NeedsRedownloadHashMismatch)
         }
     }
@@ -675,7 +631,7 @@ enum DownloadRetryKind<'a> {
     MidStream(&'a IaGetError),
 }
 
-/// Logs, buffers tree status lines, notifies shared backpressure on 429/503, and waits for a
+/// Logs, notifies shared backpressure and live UI on 429/503, and waits for a
 /// retryable download failure, returning `Ok(false)` when retries are exhausted or `Ok(true)`
 /// once ready for the next attempt.
 #[allow(clippy::too_many_arguments)]
@@ -686,8 +642,8 @@ async fn wait_for_download_retry(
     kind: DownloadRetryKind<'_>,
     signal: &ShutdownSignal,
     scheduler: Option<&ElasticScheduler>,
+    ui_slot: Option<(&UiHandle, u64)>,
     logger: &VerboseLogger,
-    detail_lines: &mut Vec<String>,
 ) -> Result<bool> {
     if *retry_count >= policy.max_retries {
         if let DownloadRetryKind::HttpStatus {
@@ -704,6 +660,9 @@ async fn wait_for_download_retry(
                         policy,
                     );
                     let (prev_ceiling, new_ceiling) = scheduler.record_throttle(delay);
+                    if let Some((ui, _)) = ui_slot {
+                        ui.send(UiEvent::SchedulerUpdate(scheduler.snapshot()));
+                    }
                     logger.log(
                         "scheduler",
                         format_args!(
@@ -727,13 +686,6 @@ async fn wait_for_download_retry(
                 *retry_count, policy.max_retries, safe_initial_url, exhausted_detail
             ),
         );
-        detail_lines.push(format!(
-            "{} {}      {} Maximum retries ({}) exceeded",
-            "├╼".cyan().dimmed(),
-            "Failed".red().bold(),
-            "✘".red().bold(),
-            policy.max_retries
-        ));
         return Ok(false);
     }
 
@@ -750,38 +702,38 @@ async fn wait_for_download_retry(
         if is_throttle_status(status) {
             if let Some(scheduler) = scheduler {
                 let (prev_ceiling, new_ceiling) = scheduler.record_throttle(delay);
+                if let Some((ui, slot_id)) = ui_slot {
+                    ui.send(UiEvent::SchedulerUpdate(scheduler.snapshot()));
+                    ui.send(UiEvent::SlotStage {
+                        slot_id,
+                        stage: TransferStage::RateLimited,
+                        mirror_host: None,
+                        cooldown: Some(delay),
+                        retry: Some((*retry_count, policy.max_retries)),
+                    });
+                }
                 logger.log(
                     "scheduler",
                     format_args!(
                         "backpressure after HTTP {status}: ceiling {prev_ceiling}->{new_ceiling}, cooldown {wait_secs:.2}s ({delay_source})"
                     ),
                 );
+            } else if let Some((ui, slot_id)) = ui_slot {
+                ui.send(UiEvent::SlotStage {
+                    slot_id,
+                    stage: TransferStage::RateLimited,
+                    mirror_host: None,
+                    cooldown: Some(delay),
+                    retry: Some((*retry_count, policy.max_retries)),
+                });
             }
         }
     }
 
-    let (log_reason, status_line) = match kind {
-        DownloadRetryKind::Transport(err) => (
-            err.to_string(),
-            format!(
-                "Connection error (attempt {}/{}): {err}",
-                *retry_count, policy.max_retries
-            ),
-        ),
-        DownloadRetryKind::HttpStatus { status, .. } => (
-            format!("HTTP {status}"),
-            format!(
-                "HTTP {status} (attempt {}/{})",
-                *retry_count, policy.max_retries
-            ),
-        ),
-        DownloadRetryKind::MidStream(err) => (
-            format!("mid-stream error ({err})"),
-            format!(
-                "Download error (attempt {}/{}): {err}",
-                *retry_count, policy.max_retries
-            ),
-        ),
+    let log_reason = match kind {
+        DownloadRetryKind::Transport(err) => err.to_string(),
+        DownloadRetryKind::HttpStatus { status, .. } => format!("HTTP {status}"),
+        DownloadRetryKind::MidStream(err) => format!("mid-stream error ({err})"),
     };
     logger.log(
         "retry",
@@ -790,17 +742,6 @@ async fn wait_for_download_retry(
             *retry_count, policy.max_retries, safe_initial_url
         ),
     );
-    detail_lines.push(format!(
-        "{} {}      {} {status_line}",
-        "├╼".cyan().dimmed(),
-        "Retry".yellow().bold(),
-        "⟳".yellow().bold()
-    ));
-    detail_lines.push(format!(
-        "{} {}      Waiting {wait_secs:.1}s before retry...",
-        "├╼".cyan().dimmed(),
-        "Wait".white()
-    ));
 
     signal.sleep_or_shutdown(delay).await?;
     Ok(true)
@@ -831,10 +772,17 @@ fn reset_partial_for_unranged_refetch(
 struct BatchTransferContext {
     rate_limiter: Option<Arc<AsyncMutex<RateLimiter>>>,
     scheduler: Option<ElasticScheduler>,
-    multi_progress: Option<MultiProgress>,
+    ui: Option<UiHandle>,
 }
 
-/// Download file content into a `.part` file with progress reporting and automatic retry on failure
+/// Metrics returned after downloading file content into `.part`.
+struct ContentDownloadResult {
+    total_bytes: u64,
+    elapsed: Duration,
+    already_verified: bool,
+}
+
+/// Download file content into a `.part` file with non-blocking UI telemetry and automatic retry.
 #[allow(clippy::too_many_arguments)]
 async fn download_file_content(
     client: &Client,
@@ -842,14 +790,14 @@ async fn download_file_content(
     url: &str,
     file_path: &str,
     part_path: &Path,
+    slot_id: u64,
     signal: &ShutdownSignal,
     cookie_source: Option<&CookieSource>,
     expected_md5: Option<&str>,
     options: &DownloadOptions,
     context: &BatchTransferContext,
     logger: &VerboseLogger,
-    detail_lines: &mut Vec<String>,
-) -> Result<(u64, bool)> {
+) -> Result<ContentDownloadResult> {
     let policy = &options.retry_policy;
     let initial_url = Url::parse(url).map_err(|e| {
         IaGetError::Network(format!(
@@ -859,6 +807,7 @@ async fn download_file_content(
         ))
     })?;
     let safe_initial_url = sanitize_url_for_log(&initial_url);
+    let ui_slot = context.ui.as_ref().map(|h| (h, slot_id));
     let mut retry_count: u32 = 0;
     let mut has_reset_range = false;
 
@@ -883,8 +832,12 @@ async fn download_file_content(
             None
         };
 
-        let send_outcome =
-            send_following_redirects(&initial_url, signal, MAX_REDIRECTS, logger, |target_url| {
+        let send_outcome = send_following_redirects_with_hook(
+            &initial_url,
+            signal,
+            MAX_REDIRECTS,
+            logger,
+            |target_url| {
                 let mut request = attach_cookie_header(
                     client.get(target_url.clone()),
                     cookie_source,
@@ -894,8 +847,20 @@ async fn download_file_content(
                     request = request.header(reqwest::header::RANGE, range_header.clone());
                 }
                 Ok(request)
-            })
-            .await?;
+            },
+            |next_url| {
+                if let Some((ui, id)) = ui_slot {
+                    ui.send(UiEvent::SlotStage {
+                        slot_id: id,
+                        stage: TransferStage::Redirect,
+                        mirror_host: short_mirror_host(next_url),
+                        cooldown: None,
+                        retry: None,
+                    });
+                }
+            },
+        )
+        .await?;
 
         let mut response = match send_outcome {
             RedirectSendOutcome::Response(resp) => resp,
@@ -911,8 +876,8 @@ async fn download_file_content(
                     DownloadRetryKind::Transport(&safe_err),
                     signal,
                     context.scheduler.as_ref(),
+                    ui_slot,
                     logger,
-                    detail_lines,
                 )
                 .await?
                 {
@@ -941,8 +906,8 @@ async fn download_file_content(
                 },
                 signal,
                 context.scheduler.as_ref(),
+                ui_slot,
                 logger,
-                detail_lines,
             )
             .await?
             {
@@ -951,6 +916,7 @@ async fn download_file_content(
             continue;
         }
 
+        let mirror_host = short_mirror_host(response.url());
         let content_range_header = response
             .headers()
             .get(reqwest::header::CONTENT_RANGE)
@@ -993,45 +959,55 @@ async fn download_file_content(
                     if !signal.is_running() {
                         return Err(interrupted_error());
                     }
-                    let is_valid = verify_downloaded_file(
+                    let outcome = verify_downloaded_file(
                         root,
                         part_path,
                         expected_md5,
                         signal.running_flag(),
-                        context.multi_progress.as_ref(),
-                        Some(file_path),
-                        detail_lines,
+                        ui_slot,
                     )
                     .await?;
                     if !signal.is_running() {
                         return Err(interrupted_error());
                     }
-                    if is_valid {
-                        logger.log(
-                            "download",
-                            format_args!(
-                                "verified complete partial file '{}' ({current_file_size} bytes)",
-                                part_path.display()
-                            ),
-                        );
-                        return Ok((current_file_size, true));
+                    match outcome {
+                        HashVerifyOutcome::Verified | HashVerifyOutcome::NoExpectedHash => {
+                            logger.log(
+                                "download",
+                                format_args!(
+                                    "verified complete partial file '{}' ({current_file_size} bytes)",
+                                    part_path.display()
+                                ),
+                            );
+                            return Ok(ContentDownloadResult {
+                                total_bytes: current_file_size,
+                                elapsed: Duration::ZERO,
+                                already_verified: true,
+                            });
+                        }
+                        HashVerifyOutcome::Mismatch { got, expected } => {
+                            reset_partial_for_unranged_refetch(
+                                &mut has_reset_range,
+                                root,
+                                part_path,
+                                logger,
+                                format_args!(
+                                    "complete partial file '{}' failed MD5 verification; discarding partial file and refetching without Range",
+                                    part_path.display()
+                                ),
+                                format_args!(
+                                    "complete partial file '{}' failed MD5 verification after range reset",
+                                    part_path.display()
+                                ),
+                                || IaGetError::IntegrityCheck {
+                                    file_path: file_path.to_string(),
+                                    got,
+                                    expected,
+                                },
+                            )?;
+                            continue;
+                        }
                     }
-                    reset_partial_for_unranged_refetch(
-                        &mut has_reset_range,
-                        root,
-                        part_path,
-                        logger,
-                        format_args!(
-                            "complete partial file '{}' failed MD5 verification; discarding partial file and refetching without Range",
-                            part_path.display()
-                        ),
-                        format_args!(
-                            "complete partial file '{}' failed MD5 verification after range reset",
-                            part_path.display()
-                        ),
-                        || IaGetError::Integrity(format!("MD5 mismatch for {}", part_path.display())),
-                    )?;
-                    continue;
                 }
                 if !signal.is_running() {
                     return Err(interrupted_error());
@@ -1043,7 +1019,11 @@ async fn download_file_content(
                         part_path.display()
                     ),
                 );
-                return Ok((current_file_size, false));
+                return Ok(ContentDownloadResult {
+                    total_bytes: current_file_size,
+                    elapsed: Duration::ZERO,
+                    already_verified: false,
+                });
             }
             ResponseAction::DiscardAndRefetchUnranged => {
                 reset_partial_for_unranged_refetch(
@@ -1070,34 +1050,24 @@ async fn download_file_content(
             }
         };
 
-        let download_action = if start_offset > 0 {
-            format!("{} {}     ", "╰╼".cyan().dimmed(), "Resuming".white())
-        } else {
-            format!("{} {}  ", "╰╼".cyan().dimmed(), "Downloading".white())
-        };
-
-        let pb_bar = match context.multi_progress.as_ref() {
-            Some(multi) => create_attached_progress_bar(
-                multi,
-                total_expected_size,
-                &download_action,
-                file_path,
-                Some("green/green"),
-                true,
-            ),
-            None => create_progress_bar(
-                total_expected_size,
-                &download_action,
-                Some("green/green"),
-                true,
-            ),
-        };
-        let pb = ProgressBarGuard::new(pb_bar, context.multi_progress.clone());
-
-        // Set initial progress to starting offset for resumed downloads
-        pb.set_position(start_offset);
-        if start_offset > 0 {
-            pb.reset_eta();
+        let expected_opt = (total_expected_size > 0).then_some(total_expected_size);
+        if let Some((ui, id)) = ui_slot {
+            ui.send(UiEvent::SlotStage {
+                slot_id: id,
+                stage: if start_offset > 0 {
+                    TransferStage::Resume
+                } else {
+                    TransferStage::Get
+                },
+                mirror_host,
+                cooldown: None,
+                retry: None,
+            });
+            ui.send(UiEvent::SlotResumeBaseline {
+                slot_id: id,
+                start_offset,
+                total_bytes: expected_opt,
+            });
         }
 
         let start_time = Instant::now();
@@ -1107,7 +1077,8 @@ async fn download_file_content(
             None
         };
         let mut total_bytes: u64 = start_offset;
-        let mut downloaded_bytes: u64 = 0;
+        let mut pending_ui_delta: u64 = 0;
+        let mut last_ui_emit = Instant::now();
 
         // Attempt the download
         let download_result: Result<()> = async {
@@ -1138,9 +1109,21 @@ async fn download_file_content(
 
                 file.write_all(&chunk)?;
                 let chunk_len = chunk.len() as u64;
-                downloaded_bytes = downloaded_bytes.saturating_add(chunk_len);
                 total_bytes = total_bytes.saturating_add(chunk_len);
-                pb.set_position(total_bytes);
+                pending_ui_delta = pending_ui_delta.saturating_add(chunk_len);
+
+                if let Some((ui, id)) = ui_slot {
+                    if last_ui_emit.elapsed() >= UI_PROGRESS_EMIT_INTERVAL {
+                        ui.send(UiEvent::SlotProgress {
+                            slot_id: id,
+                            current_bytes: total_bytes,
+                            total_bytes: expected_opt,
+                            delta_network_bytes: pending_ui_delta,
+                        });
+                        pending_ui_delta = 0;
+                        last_ui_emit = Instant::now();
+                    }
+                }
 
                 if let Some(ref shared_limiter) = context.rate_limiter {
                     throttle_shared_rate_limiter(shared_limiter, chunk_len, signal).await?;
@@ -1152,7 +1135,16 @@ async fn download_file_content(
         }
         .await;
 
-        drop(pb);
+        if pending_ui_delta > 0 {
+            if let Some((ui, id)) = ui_slot {
+                ui.send(UiEvent::SlotProgress {
+                    slot_id: id,
+                    current_bytes: total_bytes,
+                    total_bytes: expected_opt,
+                    delta_network_bytes: pending_ui_delta,
+                });
+            }
+        }
         drop(response);
 
         match download_result {
@@ -1161,28 +1153,11 @@ async fn download_file_content(
                 file.flush()?;
                 drop(file);
 
-                let elapsed = start_time.elapsed();
-                let elapsed_secs = elapsed.as_secs_f64();
-                let transfer_rate_val = if elapsed_secs > 0.0 {
-                    downloaded_bytes as f64 / elapsed_secs
-                } else {
-                    0.0
-                };
-
-                let (rate, unit) = format_transfer_rate(transfer_rate_val);
-
-                detail_lines.push(format!(
-                    "{} {}   {} {} in {} ({:.2} {}/s)",
-                    "├╼".cyan().dimmed(),
-                    "Downloaded".white(),
-                    "↓".green().bold(),
-                    format_size(downloaded_bytes).bold(),
-                    format_duration(elapsed).bold(),
-                    rate,
-                    unit
-                ));
-
-                return Ok((total_bytes, false));
+                return Ok(ContentDownloadResult {
+                    total_bytes,
+                    elapsed: start_time.elapsed(),
+                    already_verified: false,
+                });
             }
             Err(e) => {
                 // Fail immediately on user interruption or local filesystem errors
@@ -1208,8 +1183,8 @@ async fn download_file_content(
                     DownloadRetryKind::MidStream(&e),
                     signal,
                     context.scheduler.as_ref(),
+                    ui_slot,
                     logger,
-                    detail_lines,
                 )
                 .await?
                 {
@@ -1220,6 +1195,13 @@ async fn download_file_content(
     }
 }
 
+/// Outcome of verifying a downloaded `.part` file's MD5 digest.
+enum HashVerifyOutcome {
+    Verified,
+    NoExpectedHash,
+    Mismatch { got: String, expected: String },
+}
+
 /// Verify a downloaded file's hash against an expected value inside `root`,
 /// offloading blocking MD5 computation onto Tokio's blocking pool.
 async fn verify_downloaded_file(
@@ -1227,49 +1209,39 @@ async fn verify_downloaded_file(
     rel_path: &Path,
     expected_md5: Option<&str>,
     running: &Arc<AtomicBool>,
-    multi_progress: Option<&MultiProgress>,
-    progress_label: Option<&str>,
-    detail_lines: &mut Vec<String>,
-) -> Result<bool> {
+    ui_slot: Option<(&UiHandle, u64)>,
+) -> Result<HashVerifyOutcome> {
     let Some(expected_md5_str) = expected_md5 else {
-        detail_lines.push(format!(
-            "{} {}",
-            "-".dimmed(),
-            "No MD5 hash provided for verification.".dimmed()
-        ));
-        return Ok(true); // No hash to check against, consider it verified
+        return Ok(HashVerifyOutcome::NoExpectedHash);
     };
+
+    if let Some((ui, slot_id)) = ui_slot {
+        ui.send(UiEvent::SlotStage {
+            slot_id,
+            stage: TransferStage::Md5,
+            mirror_host: None,
+            cooldown: None,
+            retry: None,
+        });
+    }
+
     let canonical_root = resolve_destination_root(root)?;
     let local_md5 = calculate_md5_in_canonical_root_async(
         canonical_root,
         rel_path.to_path_buf(),
         Arc::clone(running),
-        true,
-        multi_progress.cloned(),
-        progress_label.map(str::to_owned),
+        ui_slot.map(|(h, id)| (h.clone(), id)),
     )
     .await
     .map_err(ContainedFileError::into_ia_get_error)?;
 
     if local_md5 == expected_md5_str {
-        detail_lines.push(format!(
-            "{} {}         {} {}",
-            "╰╼".cyan().dimmed(),
-            "Hash".white(),
-            "✔".green().bold(),
-            format!("({})", local_md5).dimmed()
-        ));
-        Ok(true)
+        Ok(HashVerifyOutcome::Verified)
     } else {
-        detail_lines.push(format!(
-            "{} {}         {} ({}) Expected ({})",
-            "╰╼".cyan().dimmed(),
-            "Hash".white(),
-            "✘".red().bold(),
-            local_md5.red(),
-            expected_md5_str.dimmed()
-        ));
-        Ok(false)
+        Ok(HashVerifyOutcome::Mismatch {
+            got: local_md5,
+            expected: expected_md5_str.to_string(),
+        })
     }
 }
 
@@ -1280,6 +1252,30 @@ enum FileOutcome {
     Skipped,
 }
 
+/// Detailed result returned by single-file download execution for UI completion lines.
+struct SingleFileResult {
+    outcome: FileOutcome,
+    bytes: u64,
+    duration: Duration,
+    verified_md5: bool,
+    skip_reason: Option<SkipReason>,
+}
+
+/// Distinguishes MD5 integrity mismatches from hard transfer or filesystem errors.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub enum FailureKind {
+    /// Hard network, HTTP, containment, or local filesystem error.
+    #[default]
+    TransferError,
+    /// Downloaded `.part` file's MD5 digest did not match archive.org metadata (`.part` kept unpromoted).
+    HashMismatch {
+        /// Actual MD5 digest computed from the `.part` file.
+        got: String,
+        /// Expected MD5 digest from archive.org `_files.xml`.
+        expected: String,
+    },
+}
+
 /// Details of a single file that failed during a batch download.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct FailedFile {
@@ -1287,6 +1283,8 @@ pub struct FailedFile {
     pub file_path: String,
     /// Error message explaining why the file failed.
     pub error: String,
+    /// Structured classification separating MD5 mismatches from hard transfer errors.
+    pub kind: FailureKind,
 }
 
 /// Outcome summary of a batch download session.
@@ -1296,69 +1294,32 @@ pub struct BatchSummary {
     pub ok: usize,
     /// Number of existing files skipped because they were already complete.
     pub skipped: usize,
-    /// Files that failed to download or failed verification.
+    /// Files that failed to download or failed verification, in original metadata order.
     pub failed: Vec<FailedFile>,
     /// Whether the batch stopped early due to a user interrupt signal.
     pub interrupted: bool,
 }
 
-/// Prints a coloured end-of-batch summary to stdout.
-fn print_batch_summary(summary: &BatchSummary) {
-    print_run_summary(
-        "Summary:",
-        summary.ok,
-        Some(summary.skipped),
-        summary
-            .failed
+impl BatchSummary {
+    /// Returns the number of failed files caused by MD5 metadata mismatches.
+    pub fn hash_mismatch_count(&self) -> usize {
+        self.failed
             .iter()
-            .map(|failed| (failed.file_path.as_str(), failed.error.as_str())),
-        summary.interrupted,
-    );
-}
-
-/// Formats a complete per-file tree block (`▣` / `├╼` / `╰╼`) for atomic printing.
-fn format_file_completion_block(
-    file_path: &str,
-    completed_index: usize,
-    total_files: usize,
-    detail_lines: &[String],
-) -> String {
-    let mut block = String::new();
-    block.push_str(" \n");
-    block.push_str(&format!(
-        "{}  {}     {}\n",
-        "▣".bright_cyan().bold(),
-        "Filename".white(),
-        file_path.bold()
-    ));
-    block.push_str(&format!(
-        "{} {}        {} {} of {}",
-        "├╼".cyan().dimmed(),
-        "Count".white(),
-        "#".blue().bold(),
-        completed_index.to_string().bold(),
-        total_files.to_string().bold()
-    ));
-    for line in detail_lines {
-        block.push('\n');
-        block.push_str(line);
+            .filter(|f| matches!(f.kind, FailureKind::HashMismatch { .. }))
+            .count()
     }
-    block
-}
 
-/// Prints a multi-line completion block atomically on both TTY and non-TTY stdout.
-fn emit_multi_progress_block(multi: &MultiProgress, block: &str) {
-    if multi.is_hidden() {
-        multi.suspend(|| {
-            println!("{block}");
-        });
-    } else {
-        let _ = multi.println(block);
+    /// Returns the number of failed files caused by hard transfer or filesystem errors.
+    pub fn hard_failure_count(&self) -> usize {
+        self.failed
+            .iter()
+            .filter(|f| matches!(f.kind, FailureKind::TransferError))
+            .count()
     }
 }
 
 /// Download a single file inside `root` via `.part` staging, MD5 verification, and atomic promotion
-/// with shared batch context, returning collected tree lines on both success and failure.
+/// with shared batch context and non-blocking UI telemetry.
 #[allow(clippy::too_many_arguments)]
 async fn download_single_file_with_context(
     client: &Client,
@@ -1367,60 +1328,57 @@ async fn download_single_file_with_context(
     file_path: &str,
     expected_md5: Option<&str>,
     expected_size: Option<u64>,
+    slot_id: u64,
     signal: &ShutdownSignal,
     cookie_source: Option<&CookieSource>,
     options: &DownloadOptions,
     context: &BatchTransferContext,
     batch_logger: &VerboseLogger,
     transfer_logger: &VerboseLogger,
-) -> std::result::Result<(FileOutcome, Vec<String>), (IaGetError, Vec<String>)> {
-    let mut detail_lines = Vec::new();
+) -> Result<SingleFileResult> {
     if !signal.is_running() {
-        return Err((interrupted_error(), detail_lines));
+        return Err(interrupted_error());
     }
 
-    let existing_status = match check_existing_file(
+    let ui_slot = context.ui.as_ref().map(|h| (h, slot_id));
+    let existing_status = check_existing_file(
         root,
         file_path,
         expected_md5,
         expected_size,
         signal.running_flag(),
-        context.multi_progress.as_ref(),
-        &mut detail_lines,
+        ui_slot,
+        transfer_logger,
     )
-    .await
-    {
-        Ok(status) => status,
-        Err(err) => return Err((err, detail_lines)),
-    };
+    .await?;
 
     match existing_status {
         ExistingFileStatus::Missing => {}
-        ExistingFileStatus::CompleteMd5Verified => {
+        ExistingFileStatus::CompleteMd5Verified { size } => {
             batch_logger.log(
                 "download",
                 format_args!("skipped '{file_path}': already exists; MD5 verified"),
             );
-            detail_lines.push(format!(
-                "{} {}   {}",
-                "╰╼".cyan().dimmed(),
-                "Downloaded".white(),
-                "✔".green().bold()
-            ));
-            return Ok((FileOutcome::Skipped, detail_lines));
+            return Ok(SingleFileResult {
+                outcome: FileOutcome::Skipped,
+                bytes: size,
+                duration: Duration::ZERO,
+                verified_md5: true,
+                skip_reason: Some(SkipReason::AlreadyVerified),
+            });
         }
-        ExistingFileStatus::CompleteNoMd5 => {
+        ExistingFileStatus::CompleteNoMd5 { size } => {
             batch_logger.log(
                 "download",
                 format_args!("skipped '{file_path}': already exists; no MD5 in metadata"),
             );
-            detail_lines.push(format!(
-                "{} {}   {}",
-                "╰╼".cyan().dimmed(),
-                "Downloaded".white(),
-                "✔".green().bold()
-            ));
-            return Ok((FileOutcome::Skipped, detail_lines));
+            return Ok(SingleFileResult {
+                outcome: FileOutcome::Skipped,
+                bytes: size,
+                duration: Duration::ZERO,
+                verified_md5: false,
+                skip_reason: Some(SkipReason::AlreadyExists),
+            });
         }
         ExistingFileStatus::NeedsRedownloadSizeMismatch { expected, actual } => {
             batch_logger.log(
@@ -1429,61 +1387,43 @@ async fn download_single_file_with_context(
                     "redownloading '{file_path}': existing file size mismatch (expected {expected} bytes, actual {actual} bytes)"
                 ),
             );
-            detail_lines.push(format!(
-                "{} {}      {}",
-                "├╼".cyan().dimmed(),
-                "Partial".white(),
-                "▲".yellow().bold()
-            ));
         }
         ExistingFileStatus::NeedsRedownloadHashMismatch => {
             batch_logger.log(
                 "download",
                 format_args!("redownloading '{file_path}': existing file hash mismatch"),
             );
-            detail_lines.push(format!(
-                "{} {}      {}",
-                "├╼".cyan().dimmed(),
-                "Partial".white(),
-                "▲".yellow().bold()
-            ));
         }
     }
 
     if !signal.is_running() {
-        return Err((interrupted_error(), detail_lines));
+        return Err(interrupted_error());
     }
 
-    if let Err(err) = ensure_parent_directories(root, Path::new(file_path)) {
-        return Err((err, detail_lines));
-    }
+    ensure_parent_directories(root, Path::new(file_path))?;
 
     let part_path = part_file_path(file_path);
-    let (_, already_verified) = match download_file_content(
+    let content = download_file_content(
         client,
         root,
         url,
         file_path,
         &part_path,
+        slot_id,
         signal,
         cookie_source,
         expected_md5,
         options,
         context,
         transfer_logger,
-        &mut detail_lines,
     )
-    .await
-    {
-        Ok(res) => res,
-        Err(err) => return Err((err, detail_lines)),
-    };
+    .await?;
 
     if !signal.is_running() {
-        return Err((interrupted_error(), detail_lines));
+        return Err(interrupted_error());
     }
 
-    let verified = if already_verified {
+    let verified_md5 = if content.already_verified {
         true
     } else {
         match verify_downloaded_file(
@@ -1491,31 +1431,35 @@ async fn download_single_file_with_context(
             &part_path,
             expected_md5,
             signal.running_flag(),
-            context.multi_progress.as_ref(),
-            Some(file_path),
-            &mut detail_lines,
+            ui_slot,
         )
-        .await
+        .await?
         {
-            Ok(valid) => valid,
-            Err(err) => return Err((err, detail_lines)),
+            HashVerifyOutcome::Verified => true,
+            HashVerifyOutcome::NoExpectedHash => false,
+            HashVerifyOutcome::Mismatch { got, expected } => {
+                // Never promote a hash-mismatched .part file.
+                return Err(IaGetError::IntegrityCheck {
+                    file_path: file_path.to_string(),
+                    got,
+                    expected,
+                });
+            }
         }
     };
 
-    if verified {
-        if !signal.is_running() {
-            return Err((interrupted_error(), detail_lines));
-        }
-        if let Err(err) = promote_part_file(root, &part_path, Path::new(file_path)) {
-            return Err((err, detail_lines));
-        }
-        Ok((FileOutcome::Downloaded, detail_lines))
-    } else {
-        Err((
-            IaGetError::Integrity(format!("MD5 mismatch for {}", file_path)),
-            detail_lines,
-        ))
+    if !signal.is_running() {
+        return Err(interrupted_error());
     }
+    promote_part_file(root, &part_path, Path::new(file_path))?;
+
+    Ok(SingleFileResult {
+        outcome: FileOutcome::Downloaded,
+        bytes: content.total_bytes,
+        duration: content.elapsed,
+        verified_md5,
+        skip_reason: None,
+    })
 }
 
 /// Download a single file inside `root` via `.part` staging, MD5 verification, and atomic promotion
@@ -1541,6 +1485,7 @@ async fn download_single_file_with_options(
         file_path,
         expected_md5,
         None,
+        0,
         signal,
         cookie_source,
         options,
@@ -1549,27 +1494,13 @@ async fn download_single_file_with_options(
         logger,
     )
     .await
-    .map(|(outcome, _)| outcome)
-    .map_err(|(err, _)| err)
-}
-
-fn record_batch_interrupted(
-    summary: &mut BatchSummary,
-    logger: &VerboseLogger,
-    reason: std::fmt::Arguments<'_>,
-) {
-    summary.interrupted = true;
-    logger.log("download", reason);
-    println!(
-        "\n{} Download interrupted. Run the command again to resume remaining files.",
-        "✘".red().bold()
-    );
+    .map(|res| res.outcome)
 }
 
 enum TaskOutcome {
     Downloaded,
     Skipped,
-    Failed { error: String },
+    Failed { error: String, kind: FailureKind },
     Interrupted,
 }
 
@@ -1589,12 +1520,13 @@ fn apply_task_completion(
     match completion.outcome {
         TaskOutcome::Downloaded => summary.ok += 1,
         TaskOutcome::Skipped => summary.skipped += 1,
-        TaskOutcome::Failed { error } => {
+        TaskOutcome::Failed { error, kind } => {
             failed_with_index.push((
                 completion.original_index,
                 FailedFile {
                     file_path: completion.file_path,
                     error,
+                    kind,
                 },
             ));
         }
@@ -1640,12 +1572,6 @@ where
 
 /// Downloads multiple files into destination `root` with explicit [`DownloadOptions`],
 /// shutdown signal, and [`VerboseLogger`].
-///
-/// Validates and prepares `root` before downloading, schedules transfers through the
-/// 4-permit [`ElasticScheduler`] sorted by ascending `expected_size` (`None` last),
-/// continues past per-file failures after printing an atomic tree block, preserves
-/// original metadata order in [`BatchSummary::failed`], stops promptly on shutdown
-/// signal interruption, prints an end-of-batch summary, and returns [`BatchSummary`].
 #[allow(clippy::too_many_arguments)]
 pub async fn download_files_in_dir_with_logger<I>(
     client: &Client,
@@ -1654,6 +1580,45 @@ pub async fn download_files_in_dir_with_logger<I>(
     total_files: usize,
     cookie_source: Option<&CookieSource>,
     options: &DownloadOptions,
+    signal: &ShutdownSignal,
+    logger: &VerboseLogger,
+) -> Result<BatchSummary>
+where
+    I: IntoIterator,
+    I::Item: Into<DownloadItem>,
+{
+    download_files_in_dir_with_ui(
+        client,
+        root,
+        files,
+        total_files,
+        cookie_source,
+        options,
+        &BatchUiOptions::default(),
+        signal,
+        logger,
+    )
+    .await
+}
+
+/// Downloads multiple files into destination `root` with explicit [`DownloadOptions`],
+/// [`BatchUiOptions`], shutdown signal, and [`VerboseLogger`].
+///
+/// Validates and prepares `root` before downloading, schedules transfers through the
+/// 4-permit [`ElasticScheduler`] sorted by ascending `expected_size` (`None` last),
+/// drives the archival inline instrument on TTY `stdout` (or clean plain lines on non-TTY),
+/// continues past per-file failures, preserves original metadata order in
+/// [`BatchSummary::failed`], stops promptly on shutdown signal interruption, and returns
+/// [`BatchSummary`].
+#[allow(clippy::too_many_arguments)]
+pub async fn download_files_in_dir_with_ui<I>(
+    client: &Client,
+    root: &Path,
+    files: I,
+    total_files: usize,
+    cookie_source: Option<&CookieSource>,
+    options: &DownloadOptions,
+    ui_options: &BatchUiOptions,
     signal: &ShutdownSignal,
     logger: &VerboseLogger,
 ) -> Result<BatchSummary>
@@ -1671,12 +1636,28 @@ where
 
     let canonical_root = prepare_output_dir(root)?;
     let files_count = items.len();
+    let planned_total_bytes: u64 = items.iter().filter_map(|item| item.expected_size).sum();
     let mut indexed_items: Vec<(usize, DownloadItem)> = items.into_iter().enumerate().collect();
     sort_planned_downloads(&mut indexed_items, |item| item.expected_size);
 
-    let multi_progress = MultiProgress::with_draw_target(progress_draw_target());
-    let multi_guard = signal.enter_multi_progress();
     let scheduler = ElasticScheduler::new();
+    let identifier = if ui_options.identifier.is_empty() {
+        "archive.org".to_string()
+    } else {
+        ui_options.identifier.clone()
+    };
+    let (ui_handle, ui_driver) = UiDriver::start(
+        UiSessionConfig {
+            identifier,
+            total_files,
+            planned_total_bytes,
+            limit_rate: options.limit_rate,
+            skipped_private_count: ui_options.skipped_private_count,
+        },
+        Some(scheduler.clone()),
+        Some(signal.clone()),
+    );
+
     let shared_rate_limiter = options
         .limit_rate
         .map(|bytes_per_sec| Arc::new(AsyncMutex::new(RateLimiter::new(bytes_per_sec))));
@@ -1705,8 +1686,7 @@ where
                 }
                 Err(join_err) => {
                     join_set.abort_all();
-                    let _ = multi_progress.clear();
-                    drop(multi_guard);
+                    ui_driver.finish().await;
                     return Err(IaGetError::Network(format!(
                         "Download worker task failed: {join_err}"
                     )));
@@ -1741,11 +1721,24 @@ where
             }
             Err(err) => {
                 join_set.abort_all();
-                let _ = multi_progress.clear();
-                drop(multi_guard);
+                ui_driver.finish().await;
                 return Err(err);
             }
         };
+
+        let slot_id = original_index as u64;
+        let initial_host = Url::parse(&item.url)
+            .ok()
+            .as_ref()
+            .and_then(short_mirror_host);
+        ui_handle.send(UiEvent::SchedulerUpdate(scheduler.snapshot()));
+        ui_handle.send(UiEvent::SlotStarted {
+            slot_id,
+            file_path: item.file_path.clone(),
+            permit_cost: permit.units(),
+            total_bytes: item.expected_size,
+            mirror_host: initial_host,
+        });
 
         let task_client = client.clone();
         let task_root = canonical_root.clone();
@@ -1760,15 +1753,15 @@ where
         };
         let task_completed_count = Arc::clone(&completed_count);
         let task_scheduler = scheduler.clone();
-        let task_multi = multi_progress.clone();
+        let task_ui = ui_handle.clone();
         let task_context = BatchTransferContext {
             rate_limiter: shared_rate_limiter.clone(),
             scheduler: Some(scheduler.clone()),
-            multi_progress: Some(multi_progress.clone()),
+            ui: Some(ui_handle.clone()),
         };
 
         join_set.spawn(async move {
-            let _permit = permit;
+            let permit = permit;
             let file_path = item.file_path;
 
             let outcome = match download_single_file_with_context(
@@ -1778,6 +1771,7 @@ where
                 &file_path,
                 item.expected_md5.as_deref(),
                 item.expected_size,
+                slot_id,
                 &task_signal,
                 task_cookies.as_deref(),
                 &task_options,
@@ -1787,7 +1781,13 @@ where
             )
             .await
             {
-                Ok((FileOutcome::Downloaded, detail_lines)) => {
+                Ok(SingleFileResult {
+                    outcome: FileOutcome::Downloaded,
+                    bytes,
+                    duration,
+                    verified_md5,
+                    ..
+                }) => {
                     let (prev_ceiling, new_ceiling) = task_scheduler.record_network_success();
                     if new_ceiling > prev_ceiling {
                         task_transfer_logger.log(
@@ -1798,59 +1798,98 @@ where
                         );
                     }
                     let finished_index = task_completed_count.fetch_add(1, Ordering::SeqCst) + 1;
-                    let block = format_file_completion_block(
-                        &file_path,
+                    task_ui.send(UiEvent::SlotFinished(CompletionRecord {
+                        slot_id,
+                        file_path: file_path.clone(),
+                        kind: CompletionKind::Downloaded {
+                            bytes,
+                            duration,
+                            verified_md5,
+                        },
                         finished_index,
                         total_files,
-                        &detail_lines,
-                    );
-                    emit_multi_progress_block(&task_multi, &block);
+                    }));
                     task_batch_logger.log(
                         "download",
                         format_args!("completed '{file_path}' ({finished_index}/{total_files})"),
                     );
                     TaskOutcome::Downloaded
                 }
-                Ok((FileOutcome::Skipped, detail_lines)) => {
+                Ok(SingleFileResult {
+                    outcome: FileOutcome::Skipped,
+                    bytes,
+                    skip_reason,
+                    ..
+                }) => {
                     let finished_index = task_completed_count.fetch_add(1, Ordering::SeqCst) + 1;
-                    let block = format_file_completion_block(
-                        &file_path,
+                    task_ui.send(UiEvent::SlotFinished(CompletionRecord {
+                        slot_id,
+                        file_path: file_path.clone(),
+                        kind: CompletionKind::Skipped {
+                            reason: skip_reason.unwrap_or(SkipReason::AlreadyExists),
+                            bytes,
+                        },
                         finished_index,
                         total_files,
-                        &detail_lines,
-                    );
-                    emit_multi_progress_block(&task_multi, &block);
+                    }));
                     TaskOutcome::Skipped
                 }
-                Err((err, mut detail_lines)) => {
+                Err(err) => {
                     if !task_signal.is_running() {
+                        task_ui.send(UiEvent::SlotCancelled { slot_id });
                         TaskOutcome::Interrupted
                     } else {
                         let finished_index =
                             task_completed_count.fetch_add(1, Ordering::SeqCst) + 1;
                         task_batch_logger
                             .log("download", format_args!("failed '{file_path}': {err}"));
-                        detail_lines.push(format!(
-                            "{} {}      {} {}: {}",
-                            "╰╼".cyan().dimmed(),
-                            "Warning".yellow().bold(),
-                            "⚠".yellow().bold(),
-                            file_path.bold(),
-                            err
-                        ));
-                        let block = format_file_completion_block(
-                            &file_path,
-                            finished_index,
-                            total_files,
-                            &detail_lines,
-                        );
-                        emit_multi_progress_block(&task_multi, &block);
-                        TaskOutcome::Failed {
-                            error: err.to_string(),
+                        match err {
+                            IaGetError::IntegrityCheck {
+                                ref got,
+                                ref expected,
+                                ..
+                            } => {
+                                task_ui.send(UiEvent::SlotFinished(CompletionRecord {
+                                    slot_id,
+                                    file_path: file_path.clone(),
+                                    kind: CompletionKind::HashMismatch {
+                                        got: got.clone(),
+                                        expected: expected.clone(),
+                                    },
+                                    finished_index,
+                                    total_files,
+                                }));
+                                TaskOutcome::Failed {
+                                    error: err.to_string(),
+                                    kind: FailureKind::HashMismatch {
+                                        got: got.clone(),
+                                        expected: expected.clone(),
+                                    },
+                                }
+                            }
+                            other => {
+                                let message = other.to_string();
+                                task_ui.send(UiEvent::SlotFinished(CompletionRecord {
+                                    slot_id,
+                                    file_path: file_path.clone(),
+                                    kind: CompletionKind::Failed {
+                                        message: message.clone(),
+                                    },
+                                    finished_index,
+                                    total_files,
+                                }));
+                                TaskOutcome::Failed {
+                                    error: message,
+                                    kind: FailureKind::TransferError,
+                                }
+                            }
                         }
                     }
                 }
             };
+
+            drop(permit);
+            task_ui.send(UiEvent::SchedulerUpdate(task_scheduler.snapshot()));
 
             TaskCompletion {
                 original_index,
@@ -1874,8 +1913,7 @@ where
             }
             Err(join_err) => {
                 join_set.abort_all();
-                let _ = multi_progress.clear();
-                drop(multi_guard);
+                ui_driver.finish().await;
                 return Err(IaGetError::Network(format!(
                     "Download worker task failed: {join_err}"
                 )));
@@ -1883,12 +1921,11 @@ where
         }
     }
 
-    let _ = multi_progress.clear();
-    drop(multi_guard);
-
     if interrupted {
+        summary.interrupted = true;
         let reason = interrupt_reason.unwrap_or_else(|| "interrupted by user signal".to_string());
-        record_batch_interrupted(&mut summary, logger, format_args!("{reason}"));
+        logger.log("download", format_args!("{reason}"));
+        ui_handle.send(UiEvent::Interrupted);
     }
 
     failed_with_index.sort_by_key(|(original_index, _)| *original_index);
@@ -1907,7 +1944,8 @@ where
             summary.interrupted
         ),
     );
-    print_batch_summary(&summary);
+
+    ui_driver.finish().await;
     Ok(summary)
 }
 
@@ -2868,7 +2906,14 @@ pub(super) mod tests {
 
         let requests = server.finish().await;
         assert_eq!(requests.len(), 1);
-        assert!(matches!(err, IaGetError::Integrity(_)));
+        assert!(matches!(
+            err,
+            IaGetError::IntegrityCheck {
+                ref file_path,
+                ref got,
+                ref expected,
+            } if file_path == "corrupt.bin" && got == &md5_hex(payload) && expected == wrong_md5
+        ));
         assert!(
             !fx.join("corrupt.bin").exists(),
             "MD5 mismatch must never promote .part to final path"
@@ -2999,6 +3044,17 @@ pub(super) mod tests {
         assert_eq!(summary.skipped, 2);
         assert!(!summary.interrupted);
         assert_eq!(summary.failed.len(), 3);
+        assert_eq!(summary.hard_failure_count(), 2);
+        assert_eq!(summary.hash_mismatch_count(), 1);
+        assert_eq!(summary.failed[0].kind, FailureKind::TransferError);
+        assert_eq!(summary.failed[1].kind, FailureKind::TransferError);
+        assert_eq!(
+            summary.failed[2].kind,
+            FailureKind::HashMismatch {
+                got: md5_hex(corrupt_payload),
+                expected: "00000000000000000000000000000000".to_string(),
+            }
+        );
         for (idx, (path, needle)) in [
             ("missing.bin", "404"),
             ("down.bin", "503"),
@@ -4495,7 +4551,7 @@ pub(super) mod tests {
         assert!(summary.interrupted);
         assert_eq!(summary.ok, 0);
         assert!(summary.failed.is_empty());
-        assert!(!fx.signal.has_active_multi_progress());
+        assert!(!fx.signal.has_active_live_ui());
 
         for (idx, part_path) in part_paths.iter().enumerate() {
             assert!(!fx.join(format!("file_{idx}.bin")).exists());

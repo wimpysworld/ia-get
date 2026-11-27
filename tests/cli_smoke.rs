@@ -51,6 +51,38 @@ fn check_missing_output_dir_exits_non_zero_without_creating_dir() {
         missing.to_str().unwrap(),
         "https://archive.org/details/item",
     ]);
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(1));
     assert!(!missing.exists() && !sandbox.path().join("never").exists());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains('\x1b'),
+        "non-TTY stderr must emit zero ANSI escapes: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("Error: "),
+        "main() must not emit raw Rust Debug error dumps: {stderr:?}"
+    );
+}
+
+#[test]
+fn invalid_url_non_tty_with_no_color_and_dumb_term_exits_one_without_ansi_or_debug_dump() {
+    let out = Command::new(env!("CARGO_BIN_EXE_ia-get"))
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .args(["https://example.com/not-archive"])
+        .output()
+        .expect("run ia-get");
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        !out.stdout.contains(&0x1b),
+        "stdout must emit zero ANSI bytes under NO_COLOR/non-TTY"
+    );
+    assert!(
+        !out.stderr.contains(&0x1b),
+        "stderr must emit zero ANSI bytes under NO_COLOR/non-TTY"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Invalid archive.org URL"));
+    assert!(!stderr.contains("UrlFormat("));
 }

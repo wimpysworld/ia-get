@@ -3,11 +3,10 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use colored::*;
-
 use crate::archive_metadata::XmlFile;
 use crate::downloader::{self, ShutdownSignal};
 use crate::error::IaGetError;
+use crate::ui::palette::{stdout_theme, style_bold, style_err};
 use crate::utils::{self, VerboseLogger};
 use crate::Result;
 
@@ -119,7 +118,11 @@ fn record_verify_interrupted(
 ) {
     summary.interrupted = true;
     logger.log("verify", reason);
-    println!("\n{} Verification interrupted by user.", "✘".red().bold());
+    let theme = stdout_theme();
+    println!(
+        "\n{} Verification interrupted by user.",
+        style_err(theme.glyphs().fail, &theme)
+    );
 }
 
 /// Formats a plain-text summary of a verification run, including any failed files.
@@ -301,10 +304,11 @@ pub fn verify_files_with_logger(
                 "verify",
                 format_args!("failed '{sanitized_name}': {formatted_issues}"),
             );
+            let theme = stdout_theme();
             println!(
                 "{} {}: {}",
-                "✘".red().bold(),
-                sanitized_name.bold(),
+                style_err(theme.glyphs().fail, &theme),
+                style_bold(&sanitized_name, &theme),
                 formatted_issues
             );
             summary.failed.push(FailedVerification {

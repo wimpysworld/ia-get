@@ -105,6 +105,30 @@ impl SchedulerInner {
     }
 }
 
+/// Point-in-time snapshot of [`ElasticScheduler`] concurrency and backpressure state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulerSnapshot {
+    /// Permit units currently held by in-flight transfers (`0..=4`).
+    pub in_flight_units: usize,
+    /// Current effective concurrency ceiling (`1`, `2`, or `4`).
+    pub effective_ceiling: usize,
+    /// Clean network completions accumulated toward ceiling recovery (`0..4`).
+    pub clean_successes: usize,
+    /// Remaining shared host cooldown duration, if a host cooldown is active.
+    pub cooldown_remaining: Option<Duration>,
+}
+
+impl Default for SchedulerSnapshot {
+    fn default() -> Self {
+        Self {
+            in_flight_units: 0,
+            effective_ceiling: MAX_CONCURRENT_PERMITS,
+            clean_successes: 0,
+            cooldown_remaining: None,
+        }
+    }
+}
+
 /// Shared elastic funnel scheduler managing download concurrency and reactive backpressure.
 #[derive(Clone, Debug)]
 pub struct ElasticScheduler {
@@ -154,15 +178,26 @@ impl ElasticScheduler {
 
     /// Returns the remaining shared cooldown duration, if a host cooldown is active.
     pub fn cooldown_remaining(&self) -> Option<Duration> {
+        self.snapshot().cooldown_remaining
+    }
+
+    /// Returns a consistent point-in-time snapshot of concurrency and backpressure state.
+    pub fn snapshot(&self) -> SchedulerSnapshot {
         let mut state = self.inner.lock_state();
         let now = Instant::now();
-        match state.cooldown_until {
+        let cooldown_remaining = match state.cooldown_until {
             Some(until) if until > now => Some(until.saturating_duration_since(now)),
             Some(_) => {
                 state.cooldown_until = None;
                 None
             }
             None => None,
+        };
+        SchedulerSnapshot {
+            in_flight_units: state.in_flight_units,
+            effective_ceiling: state.effective_ceiling,
+            clean_successes: state.clean_successes,
+            cooldown_remaining,
         }
     }
 
@@ -598,5 +633,30 @@ mod tests {
         drop(m2);
         drop(m3);
         assert_eq!(scheduler.in_flight_units(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_snapshot_reflects_in_flight_ceiling_recovery_and_cooldown() {
+        let scheduler = ElasticScheduler::new();
+        let signal = ShutdownSignal::new();
+
+        let initial = scheduler.snapshot();
+        assert_eq!(initial.in_flight_units, 0);
+        assert_eq!(initial.effective_ceiling, 4);
+        assert_eq!(initial.clean_successes, 0);
+        assert!(initial.cooldown_remaining.is_none());
+
+        let permit = scheduler.acquire(Some(1024), &signal).await.unwrap();
+        scheduler.record_throttle(Duration::from_secs(5));
+        scheduler.record_network_success();
+
+        let snap = scheduler.snapshot();
+        assert_eq!(snap.in_flight_units, 1);
+        assert_eq!(snap.effective_ceiling, 2);
+        assert_eq!(snap.clean_successes, 1);
+        assert!(snap.cooldown_remaining.is_some());
+
+        drop(permit);
+        assert_eq!(scheduler.snapshot().in_flight_units, 0);
     }
 }

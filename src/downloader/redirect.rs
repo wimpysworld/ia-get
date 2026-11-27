@@ -68,15 +68,53 @@ pub(super) enum RedirectSendOutcome {
     TransportError(reqwest::Error),
 }
 
+/// Extracts a concise mirror host label from a download or redirect URL.
+///
+/// Strips `.us.archive.org` / `.archive.org` suffixes so archive.org storage nodes
+/// display cleanly (e.g. `ia801504` from `ia801504.us.archive.org`).
+pub(crate) fn short_mirror_host(url: &Url) -> Option<String> {
+    let host = url.host_str()?;
+    if let Some(prefix) = host.strip_suffix(".us.archive.org") {
+        Some(prefix.to_string())
+    } else if let Some(prefix) = host.strip_suffix(".archive.org") {
+        Some(prefix.to_string())
+    } else {
+        Some(host.to_string())
+    }
+}
+
 pub(super) async fn send_following_redirects<F>(
     initial_url: &Url,
     signal: &ShutdownSignal,
     max_redirects: usize,
     logger: &VerboseLogger,
-    mut build_request: F,
+    build_request: F,
 ) -> Result<RedirectSendOutcome>
 where
     F: FnMut(&Url) -> Result<RequestBuilder>,
+{
+    send_following_redirects_with_hook(
+        initial_url,
+        signal,
+        max_redirects,
+        logger,
+        build_request,
+        |_| {},
+    )
+    .await
+}
+
+pub(super) async fn send_following_redirects_with_hook<F, H>(
+    initial_url: &Url,
+    signal: &ShutdownSignal,
+    max_redirects: usize,
+    logger: &VerboseLogger,
+    mut build_request: F,
+    mut on_redirect: H,
+) -> Result<RedirectSendOutcome>
+where
+    F: FnMut(&Url) -> Result<RequestBuilder>,
+    H: FnMut(&Url),
 {
     let mut current_url = initial_url.clone();
     let mut redirects_followed: usize = 0;
@@ -207,6 +245,7 @@ where
             "redirect",
             format_args!("{status} {safe_url} -> {next_safe} (hop {hop}/{max_redirects})"),
         );
+        on_redirect(&next_url);
 
         drop(response);
         redirects_followed = hop;

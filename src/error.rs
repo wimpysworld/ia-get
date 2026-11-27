@@ -39,6 +39,19 @@ pub enum IaGetError {
     #[error("Integrity check failed: {0}")]
     Integrity(String),
 
+    /// Structured MD5 integrity verification mismatch between downloaded `.part` file and metadata
+    #[error(
+        "Integrity check failed: MD5 mismatch for {file_path} (got {got}, expected {expected})"
+    )]
+    IntegrityCheck {
+        /// Sanitised relative path of the file whose `.part` staging file mismatched
+        file_path: String,
+        /// Actual MD5 digest computed from the `.part` file
+        got: String,
+        /// Expected MD5 digest from archive.org `_files.xml`
+        expected: String,
+    },
+
     /// One or more files in a batch download failed
     #[error("{failed} of {total} file(s) failed to download")]
     BatchFailed {

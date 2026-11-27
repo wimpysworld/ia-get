@@ -43,6 +43,11 @@ src/
 │   ├── redirect.rs          # Manual redirect handling and per-hop cookie scoping
 │   ├── fs_safety.rs         # Path containment, symlink-safe I/O, atomic .part promotion
 │   └── collision.rs         # Pre-write path collision detection and filesystem probing
+├── ui/
+│   ├── mod.rs               # Inline Ratatui TTY driver, cooked-mode status spinner, non-TTY plain output
+│   ├── palette.rs           # Archival colour tokens, Unicode/ASCII glyph sets, inline style helpers
+│   ├── state.rs             # Terminal-independent UI state, critically damped easing, sparkline ring buffer
+│   └── render.rs            # Pure frame renderer, responsive breakpoints, completion lines, post-run summary
 ├── archive_metadata.rs      # XML parsing for archive.org
 ├── cookie.rs                # Netscape cookies.txt and raw Cookie header scoping
 ├── disk_space.rs            # Free-space estimation and pre-download checks

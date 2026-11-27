@@ -112,10 +112,28 @@ ia-get --limit-rate 2M https://archive.org/details/<identifier>
 ia-get --limit-rate 1024 https://archive.org/download/<identifier>/<path>
 ```
 
+## Terminal UI and output
+
+When `stdout` is an interactive terminal, `ia-get` draws an inline progress frame without entering the alternate screen.
+The frame shows the item identifier, a permit gauge, a throughput sparkline, active transfer slots, and counts of warnings and failures when non-zero.
+As each file finishes, `ia-get` writes one permanent completion line above the frame in your native terminal scrollback.
+`ia-get` stays in cooked terminal mode, so `Ctrl+C` and `Ctrl+Z` work natively.
+
+When `stdout` is not a terminal or `TERM=dumb`, `ia-get` skips the inline frame and writes plain text with zero ANSI escape codes.
+When `NO_COLOR` is non-empty, `ia-get` disables all ANSI colour codes.
+Narrow or short terminals hide optional columns (mirror host and sparkline) or collapse the frame to two lines.
+
+At the end of a batch, `ia-get` clears the inline frame and prints a `Completed:` summary line (or `Interrupted:` after `Ctrl+C`).
+If any item requires follow-up, `ia-get` prints a `Needs attention:` section grouped by category:
+
+- **MD5 mismatches**: shows the actual and expected hashes and keeps the `.part` file unpromoted on disk, because archive.org metadata can be stale.
+- **Skipped private files**: counts `<private>` entries skipped when you do not pass `-b` or `--cookies`.
+- **Transfer errors**: lists files that failed to download with each error message.
+
 ## Verbose logging
 
 Write diagnostic logs to `stderr` with `-v` or `--verbose`.
-Progress bars and spinners draw to `stdout`, so `stderr` stays clean when you redirect it to a file.
+The inline UI and status lines write to `stdout`, so `stderr` stays clean when you redirect it to a file.
 Without `-v`, `ia-get` writes no verbose diagnostic lines to `stderr`.
 
 With `-v`, `ia-get` writes plain-text lines without ANSI escape codes for:
@@ -131,6 +149,14 @@ With `-v`, `ia-get` writes plain-text lines without ANSI escape codes for:
 ia-get -v https://archive.org/details/<identifier> 2> ia-get.log
 ia-get --verbose --check https://archive.org/details/<identifier> 2> check.log
 ```
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | All selected files succeeded (or passed `--check`) without interruption. |
+| `1` | One or more files failed, an MD5 check mismatched, or another runtime error occurred. |
+| `130` | `Ctrl+C` interrupted the run (`SIGINT`). |
 
 ## Related guides
 

@@ -1,15 +1,11 @@
 //! Utility functions for ia-get.
 
+use crate::ui::palette::{stdout_theme, style_accent, style_bold, style_err, style_ok, style_warn};
 use crate::{IaGetError, Result};
-use colored::*;
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::fmt;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use url::Url;
-
-/// Spinner tick interval in milliseconds
-const SPINNER_TICK_INTERVAL: u64 = 100;
 
 /// Size constants for formatting
 const KB: u64 = 1024;
@@ -195,15 +191,6 @@ pub fn parse_archive_url(url: &str) -> Result<ArchiveUrl> {
     Err(invalid())
 }
 
-/// Returns the shared draw target used by all `indicatif` progress indicators.
-///
-/// Routing progress bars and spinners to `stdout` keeps `stderr` clean for
-/// `--verbose` diagnostic logs so `2> ia-get.log` captures diagnostics without
-/// terminal control codes or progress noise.
-pub(crate) fn progress_draw_target() -> ProgressDrawTarget {
-    ProgressDrawTarget::stdout()
-}
-
 /// Sanitises a URL for diagnostic logging by redacting any embedded userinfo
 /// (`username:password@`) while keeping scheme, host, port, path, query, and
 /// fragment intact.
@@ -353,104 +340,6 @@ impl VerboseLogger {
     }
 }
 
-/// Create a progress bar with consistent styling
-///
-/// # Arguments
-/// * `total` - Total value for the progress bar
-/// * `action` - Action text to show at the beginning (e.g., "╰╼ Downloading  ")
-/// * `color` - Optional color style (defaults to "green/green")
-/// * `with_eta` - Whether to include ETA in the template
-///
-/// # Returns
-/// A configured progress bar
-pub fn create_progress_bar(
-    total: u64,
-    action: &str,
-    color: Option<&str>,
-    with_eta: bool,
-) -> ProgressBar {
-    let pb = ProgressBar::with_draw_target(Some(total), progress_draw_target());
-    let color_str = color.unwrap_or("green/green");
-
-    let styled_action = if action.contains("├╼") || action.contains("╰╼") {
-        action
-            .replace("├╼", &"├╼".cyan().dimmed().to_string())
-            .replace("╰╼", &"╰╼".cyan().dimmed().to_string())
-    } else {
-        action.to_string()
-    };
-
-    let eta_suffix = if with_eta { " (ETA: {eta})" } else { "" };
-    let template = format!(
-        "{styled_action}{{elapsed_precise}} {{bar:40.{color_str}}} {{bytes}}/{{total_bytes}}{eta_suffix}"
-    );
-
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(&template)
-            .expect("Failed to set progress bar style")
-            .progress_chars("▓▒░"),
-    );
-
-    pb
-}
-
-/// Creates a progress bar attached to `multi` with the file `label` rendered via `{msg}`
-/// so concurrent active downloads remain distinguishable on TTYs and safe for brace characters.
-pub(crate) fn create_attached_progress_bar(
-    multi: &MultiProgress,
-    total: u64,
-    action: &str,
-    label: &str,
-    color: Option<&str>,
-    with_eta: bool,
-) -> ProgressBar {
-    let pb = multi.add(ProgressBar::new(total));
-    let color_str = color.unwrap_or("green/green");
-
-    let styled_action = if action.contains("├╼") || action.contains("╰╼") {
-        action
-            .replace("├╼", &"├╼".cyan().dimmed().to_string())
-            .replace("╰╼", &"╰╼".cyan().dimmed().to_string())
-    } else {
-        action.to_string()
-    };
-
-    let eta_suffix = if with_eta { " (ETA: {eta})" } else { "" };
-    let template = format!(
-        "{styled_action}{{elapsed_precise}} {{bar:32.{color_str}}} {{bytes}}/{{total_bytes}}{eta_suffix} {{msg}}"
-    );
-
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(&template)
-            .expect("Failed to set attached progress bar style")
-            .progress_chars("▓▒░"),
-    );
-    pb.set_message(label.to_string());
-
-    pb
-}
-
-/// Create a spinner with braille animation
-///
-/// # Arguments
-/// * `message` - Message to display next to the spinner
-///
-/// # Returns
-/// A configured spinner
-pub fn create_spinner(message: &str) -> ProgressBar {
-    let spinner = ProgressBar::with_draw_target(None, progress_draw_target());
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-            .template(&format!("{} {}", "{spinner}".yellow().bold(), message))
-            .expect("Failed to set spinner style"),
-    );
-    spinner.enable_steady_tick(std::time::Duration::from_millis(SPINNER_TICK_INTERVAL));
-    spinner
-}
-
 /// Format a duration into a human-readable string
 pub fn format_duration(duration: std::time::Duration) -> String {
     let total_secs = duration.as_secs();
@@ -529,7 +418,7 @@ where
     text
 }
 
-/// Prints a coloured end-of-run summary to stdout.
+/// Prints a semantically styled end-of-run summary to stdout (plain when non-TTY or `NO_COLOR`).
 pub(crate) fn print_run_summary<'a, D>(
     heading: &str,
     ok: usize,
@@ -539,44 +428,52 @@ pub(crate) fn print_run_summary<'a, D>(
 ) where
     D: fmt::Display,
 {
+    let theme = stdout_theme();
+    let glyphs = theme.glyphs();
     let failed: Vec<(&str, D)> = failed.into_iter().collect();
     let status_icon = if interrupted || !failed.is_empty() {
-        "✘".red().bold()
+        style_err(glyphs.fail, &theme)
     } else {
-        "✔".green().bold()
+        style_ok(glyphs.ok, &theme)
     };
 
+    let failed_str = failed.len().to_string();
     let failed_count = if failed.is_empty() {
-        failed.len().to_string().bold()
+        style_bold(&failed_str, &theme)
     } else {
-        failed.len().to_string().red().bold()
+        style_err(&failed_str, &theme)
     };
 
     let interrupted_suffix = if interrupted {
-        format!(", {}", "interrupted".yellow().bold())
+        format!(", {}", style_warn("interrupted", &theme))
     } else {
         String::new()
     };
 
     let skipped_segment = match skipped {
-        Some(skipped) => format!(" {} skipped,", skipped.to_string().cyan().bold()),
+        Some(skipped) => format!(" {} skipped,", style_accent(&skipped.to_string(), &theme)),
         None => String::new(),
     };
 
     println!(
         "\n{} {} {} ok,{} {} failed{}",
         status_icon,
-        heading.bold(),
-        ok.to_string().green().bold(),
+        style_bold(heading, &theme),
+        style_ok(&ok.to_string(), &theme),
         skipped_segment,
         failed_count,
         interrupted_suffix
     );
 
     if !failed.is_empty() {
-        println!("{}", "Failed files:".red().bold());
+        println!("{}", style_err("Failed files:", &theme));
         for (file_path, detail) in failed {
-            println!("  {} {}: {}", "✘".red().bold(), file_path.bold(), detail);
+            println!(
+                "  {} {}: {}",
+                style_err(glyphs.fail, &theme),
+                style_bold(file_path, &theme),
+                detail
+            );
         }
     }
 }
@@ -1093,66 +990,6 @@ mod tests {
     }
 
     #[test]
-    fn test_progress_bar_and_spinner_target_stdout() {
-        let target = progress_draw_target();
-        let expected_stdout = ProgressDrawTarget::stdout();
-        let stderr_target = ProgressDrawTarget::stderr();
-
-        fn strip_rate_limiter(debug: &str) -> &str {
-            debug
-                .split_once("rate_limiter:")
-                .map_or(debug, |(prefix, _)| prefix)
-        }
-
-        let actual_debug = format!("{target:?}");
-        let stdout_debug = format!("{expected_stdout:?}");
-        let stderr_debug = format!("{stderr_target:?}");
-
-        assert_eq!(
-            strip_rate_limiter(&actual_debug),
-            strip_rate_limiter(&stdout_debug)
-        );
-        assert_eq!(target.is_hidden(), expected_stdout.is_hidden());
-        assert!(
-            !actual_debug.contains("Stderr"),
-            "progress draw target must never target stderr: {actual_debug}"
-        );
-        if !expected_stdout.is_hidden() {
-            assert!(
-                actual_debug.contains("Stdout"),
-                "when stdout is a terminal, progress draw target must target stdout: {actual_debug}"
-            );
-        }
-        if !expected_stdout.is_hidden() || !stderr_target.is_hidden() {
-            assert_ne!(
-                strip_rate_limiter(&actual_debug),
-                strip_rate_limiter(&stderr_debug),
-                "when stdout or stderr is a terminal, progress_draw_target() must differ from stderr"
-            );
-        } else {
-            assert!(
-                target.is_hidden(),
-                "when neither stdout nor stderr is a terminal, progress target must be hidden"
-            );
-        }
-
-        let pb_with_eta = create_progress_bar(100, "╰╼ Downloading  ", None, true);
-        assert_eq!(pb_with_eta.is_hidden(), expected_stdout.is_hidden());
-        pb_with_eta.inc(50);
-        pb_with_eta.finish_and_clear();
-
-        let pb_no_eta = create_progress_bar(100, "├╼ Verifying    ", Some("cyan/blue"), false);
-        assert_eq!(pb_no_eta.is_hidden(), expected_stdout.is_hidden());
-        pb_no_eta.inc(100);
-        pb_no_eta.finish_and_clear();
-
-        let spinner = create_spinner("Testing spinner lifecycle");
-        assert_eq!(spinner.is_hidden(), expected_stdout.is_hidden());
-        spinner.set_message("Updated spinner message");
-        spinner.finish_and_clear();
-    }
-
-    #[test]
     fn test_sanitize_url_for_log_redacts_userinfo_and_preserves_plain_urls() {
         let cases: &[(&str, &str, &[&str])] = &[
             (
@@ -1243,22 +1080,5 @@ mod tests {
                 "[verbose] http: [nested/file{1}.bin ] -> GET https://archive.org/download/item/file.bin"
             )
         );
-    }
-
-    #[test]
-    fn test_attached_progress_bar_handles_braces_in_label() {
-        let multi = MultiProgress::with_draw_target(progress_draw_target());
-        let pb = create_attached_progress_bar(
-            &multi,
-            256,
-            "╰╼ Downloading  ",
-            "book_{1984}_scan.pdf",
-            Some("green/green"),
-            true,
-        );
-        pb.set_position(128);
-        pb.finish_and_clear();
-        multi.remove(&pb);
-        let _ = multi.clear();
     }
 }

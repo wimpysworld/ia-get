@@ -26,13 +26,13 @@ Wait+Screen@30s /Archive has [0-9]+ files/
 Wait
 Sleep 1.5s
 
-Type "ia-get -o demo -f '*djvu.*' https://archive.org/details/deftributetozzap64"
+Type "ia-get -f '*hi-res_*' -f '!*.zip' https://archive.org/details/deftributetozzap64"
 Enter
-Wait+Screen@45s /Summary: [0-9]+ ok, 0 skipped, 0 failed/
+Wait+Screen@45s /Completed: [0-9]+ ok/
 Wait
 Sleep 1.5s
 
-Type "ia-get --check -o demo -f '*djvu.*' https://archive.org/details/deftributetozzap64"
+Type "ia-get --check -f '*djvu.*' https://archive.org/details/deftributetozzap64"
 Enter
 Wait+Screen@30s /Verification summary: [0-9]+ ok, 0 failed/
 Wait
