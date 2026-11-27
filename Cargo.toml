@@ -7,7 +7,7 @@ authors = ["Martin Wimpress <code@wimpress.io>"]
 license = "MIT"
 repository = "https://github.com/wimpysworld/ia-get"
 readme = "README.md"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
