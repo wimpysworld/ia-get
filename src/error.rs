@@ -124,6 +124,15 @@ pub enum IaGetError {
         reason: String,
     },
 
+    /// All selected files are marked private in archive.org metadata and no cookies were supplied
+    #[error(
+        "All {count} selected file(s) are marked private in archive.org metadata and require authentication with -b/--cookies"
+    )]
+    PrivateFilesOnly {
+        /// Number of selected files marked private in archive.org metadata
+        count: usize,
+    },
+
     /// Download was interrupted by the user
     #[error("Download interrupted by user")]
     Interrupted,

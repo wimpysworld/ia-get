@@ -102,6 +102,7 @@ pub fn xml_file(name: &str, size: Option<u64>, md5: Option<&str>) -> XmlFile {
         name: name.to_string(),
         size,
         md5: md5.map(str::to_string),
+        private: None,
     }
 }
 
@@ -217,6 +218,12 @@ pub enum MockResponse {
         watch_path: PathBuf,
         expected_part_len: u64,
         signal: ShutdownSignal,
+    },
+    StalledStream {
+        status_line: &'static str,
+        headers: Vec<(String, String)>,
+        first_chunk: Vec<u8>,
+        stall: Duration,
     },
 }
 
@@ -625,6 +632,25 @@ async fn write_mock_response(socket: &mut TcpStream, response: MockResponse, is_
             if let Some(chunk) = second_chunk {
                 let _ = socket.write_all(&chunk).await;
                 let _ = socket.flush().await;
+            }
+            let _ = socket.shutdown().await;
+        }
+        MockResponse::StalledStream {
+            status_line,
+            headers,
+            first_chunk,
+            stall,
+        } => {
+            let mut wire = format_response_head(status_line, &headers);
+            wire.extend_from_slice(&first_chunk);
+            let _ = socket.write_all(&wire).await;
+            let _ = socket.flush().await;
+
+            // Wait until the stall expires or the client closes the connection on timeout.
+            let mut buf = [0u8; 1];
+            tokio::select! {
+                () = tokio::time::sleep(stall) => {}
+                _ = socket.read(&mut buf) => {}
             }
             let _ = socket.shutdown().await;
         }

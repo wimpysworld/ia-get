@@ -22,35 +22,8 @@ use ia_get::{CookieSource, FileFilter, IaGetError, Result, VerboseLogger};
 use indicatif::ProgressStyle;
 use reqwest::{Client, Url};
 
-/// Extended timeout for large file downloads (10 minutes for connection, no read timeout)
+/// Extended timeout for large file downloads (10 minutes for connection; per-chunk idle read timeout is applied during transfers)
 const CONNECTION_TIMEOUT_SECS: u64 = 600;
-
-/// Checks if a URL is accessible by sending a HEAD request with an explicit retry policy and logger.
-async fn is_url_accessible_with_logger(
-    url: &Url,
-    client: &Client,
-    cookie_source: Option<&CookieSource>,
-    policy: &downloader::RetryPolicy,
-    signal: &downloader::ShutdownSignal,
-    logger: &VerboseLogger,
-) -> Result<()> {
-    let _response = downloader::send_with_retry_with_logger(
-        url,
-        policy,
-        signal,
-        logger,
-        |target_url| {
-            let request = client
-                .head(target_url.clone())
-                .timeout(std::time::Duration::from_secs(60));
-            downloader::attach_cookie_header(request, cookie_source, target_url)
-        },
-        |_| {},
-    )
-    .await?;
-
-    Ok(())
-}
 
 /// Fetches and parses XML metadata from an already-resolved XML URL with an explicit retry policy
 /// and diagnostic logger.
@@ -65,23 +38,39 @@ async fn fetch_xml_metadata_from_url_with_logger(
 ) -> Result<(XmlFiles, reqwest::Url)> {
     let xml_url = base_url.as_str();
     spinner.set_message(format!(
-        "{} Accessing XML metadata: {}",
+        "{} Fetching XML metadata: {}",
         "⚙".blue(),
         xml_url.bold()
     ));
 
-    // Check XML URL accessibility
-    if let Err(e) =
-        is_url_accessible_with_logger(&base_url, client, cookie_source, policy, signal, logger)
-            .await
-    {
-        spinner.finish_with_message(format!(
-            "{} XML metadata not accessible: {}",
-            "✘".red().bold(),
-            xml_url.bold()
-        ));
-        return Err(e); // Propagate the error
-    }
+    let xml_content = finish_spinner_on_err(
+        spinner,
+        downloader::fetch_text_with_retry_with_logger(
+            &base_url,
+            cookie_source.is_some(),
+            policy,
+            signal,
+            logger,
+            |target_url| {
+                downloader::attach_cookie_header(
+                    client.get(target_url.clone()),
+                    cookie_source,
+                    target_url,
+                )
+            },
+            |event| {
+                spinner.set_message(format!(
+                    "{} Retrying XML metadata ({}/{}) after {} in {:.1}s...",
+                    "⟳".yellow().bold(),
+                    event.attempt,
+                    event.max_retries,
+                    event.reason,
+                    event.delay.as_secs_f64()
+                ));
+            },
+        )
+        .await,
+    )?;
 
     spinner.set_message(format!(
         "{} {}",
@@ -89,33 +78,8 @@ async fn fetch_xml_metadata_from_url_with_logger(
         "Parsing archive metadata...".bold()
     ));
 
-    let xml_content = downloader::fetch_text_with_retry_with_logger(
-        &base_url,
-        policy,
-        signal,
-        logger,
-        |target_url| {
-            downloader::attach_cookie_header(
-                client.get(target_url.clone()),
-                cookie_source,
-                target_url,
-            )
-        },
-        |event| {
-            spinner.set_message(format!(
-                "{} Retrying XML metadata ({}/{}) after {} in {:.1}s...",
-                "⟳".yellow().bold(),
-                event.attempt,
-                event.max_retries,
-                event.reason,
-                event.delay.as_secs_f64()
-            ));
-        },
-    )
-    .await?;
-
     // Parse XML content with improved error handling
-    let files = parse_xml_files(&xml_content)?;
+    let files = finish_spinner_on_err(spinner, parse_xml_files(&xml_content))?;
     logger.log(
         "metadata",
         format_args!(
@@ -205,6 +169,66 @@ fn select_and_filter_files(
     filter.apply(selected)
 }
 
+/// Filters out `<private>` archive entries in download mode when no cookies are supplied.
+///
+/// Returns `Ok(files)` unchanged when `has_cookies` is `true`, fails fast with
+/// [`IaGetError::PrivateFilesOnly`] when every selected entry is private, or skips private
+/// entries with one warning line and per-file `metadata` verbose logs when public entries remain.
+fn filter_private_files_for_download(
+    files: XmlFiles,
+    has_cookies: bool,
+    spinner: &indicatif::ProgressBar,
+    logger: &VerboseLogger,
+) -> Result<XmlFiles> {
+    if has_cookies {
+        return Ok(files);
+    }
+
+    let mut public_files = Vec::with_capacity(files.files.len());
+    let mut skipped_private = Vec::new();
+    for file in files.files {
+        if file.is_private() {
+            skipped_private.push(file.name);
+        } else {
+            public_files.push(file);
+        }
+    }
+
+    if skipped_private.is_empty() {
+        return Ok(XmlFiles {
+            files: public_files,
+        });
+    }
+
+    if public_files.is_empty() {
+        return Err(IaGetError::PrivateFilesOnly {
+            count: skipped_private.len(),
+        });
+    }
+
+    for name in &skipped_private {
+        logger.log(
+            "metadata",
+            format_args!("skipped private file '{name}' (no cookies supplied)"),
+        );
+    }
+
+    let skipped_count = skipped_private.len();
+    let file_label = if skipped_count == 1 { "file" } else { "files" };
+    spinner.suspend(|| {
+        println!(
+            "{} {} {} private {file_label} (supply -b/--cookies to download private files)",
+            "⚠".yellow().bold(),
+            "Skipping".yellow(),
+            skipped_count.to_string().bold(),
+        );
+    });
+
+    Ok(XmlFiles {
+        files: public_files,
+    })
+}
+
 /// Builds the download URL for a file relative to the item's XML metadata URL.
 fn build_file_download_url(base_url: &Url, file_name: &str) -> Url {
     let mut file_url = base_url.clone();
@@ -218,6 +242,14 @@ fn build_file_download_url(base_url: &Url, file_name: &str) -> Url {
                 .split('/')
                 .filter(|segment| !segment.is_empty()),
         );
+    }
+    if file_url.path().contains(['[', ']', '|']) {
+        let encoded_path = file_url
+            .path()
+            .replace('[', "%5B")
+            .replace(']', "%5D")
+            .replace('|', "%7C");
+        file_url.set_path(&encoded_path);
     }
     file_url
 }
@@ -558,8 +590,8 @@ fn build_http_client(proxy_config: &downloader::ProxyConfig) -> Result<Client> {
 
 /// Main application entry point
 ///
-/// Parses command line arguments, validates the archive.org URL, checks URL accessibility,
-/// downloads XML metadata, and initiates file downloads with built-in signal handling.
+/// Parses command line arguments, validates the archive.org URL, downloads XML metadata,
+/// and initiates file downloads with built-in signal handling.
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -587,27 +619,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Parse and validate URL format
     let target = finish_spinner_on_err(&spinner, parse_archive_url(&cli.url))?;
-
-    let details_url = Url::parse(&target.details_url())?;
-
-    // Check URL accessibility
-    if let Err(e) = is_url_accessible_with_logger(
-        &details_url,
-        &client,
-        cookie_source.as_ref(),
-        &downloader::RetryPolicy::default(),
-        &shutdown,
-        &logger,
-    )
-    .await
-    {
-        spinner.finish_with_message(format!(
-            "{} Archive.org URL not accessible: {}",
-            "✘".red().bold(),
-            cli.url.bold()
-        ));
-        return Err(e.into()); // Propagate error
-    }
 
     // Fetch and parse XML metadata in one operation
     let (files, base_url) = fetch_xml_metadata_with_logger(
@@ -653,6 +664,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // In download mode without cookies, fail fast if all selected files are private, or skip
+    // private entries before planning paths, creating directories, or checking disk space.
+    let files = finish_spinner_on_err(
+        &spinner,
+        filter_private_files_for_download(files, cookie_source.is_some(), &spinner, &logger),
+    )?;
+
     // Build and validate the download plan against each parent directory's filesystem lookup rules
     // before creating missing output directories, checking disk space, or starting transfers.
     let target_dir = resolve_output_dir(cli.output_dir.as_deref());
@@ -664,8 +682,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let total_files = plan.items.len();
     let file_label = if total_files == 1 { "file" } else { "files" };
     let options = downloader::DownloadOptions {
-        retry_policy: downloader::RetryPolicy::default(),
         limit_rate: cli.limit_rate,
+        ..downloader::DownloadOptions::default()
     };
 
     let summary = run_planned_downloads_with_logger(
@@ -732,6 +750,7 @@ mod tests {
         downloader::DownloadOptions {
             retry_policy: fast_retry_policy(max_retries),
             limit_rate,
+            ..downloader::DownloadOptions::default()
         }
     }
 
@@ -1474,6 +1493,18 @@ mod tests {
                 "/sub/dir/file.pdf",
                 "https://archive.org/download/item/sub/dir/file.pdf",
             ),
+            (
+                "Game (USA) [!] | Rev 100%.zip",
+                "https://archive.org/download/item/Game%20(USA)%20%5B!%5D%20%7C%20Rev%20100%25.zip",
+            ),
+            (
+                "sub/[dir]/file|name[1].zip",
+                "https://archive.org/download/item/sub/%5Bdir%5D/file%7Cname%5B1%5D.zip",
+            ),
+            (
+                "sub/50% [a|b].pdf",
+                "https://archive.org/download/item/sub/50%25%20%5Ba%7Cb%5D.pdf",
+            ),
         ] {
             let built = build_file_download_url(&base_url, file_name);
             assert_eq!(built.as_str(), expected, "file_name: {file_name:?}");
@@ -1581,7 +1612,6 @@ mod tests {
         let xml_body =
             build_xml_metadata(&[("issue01.pdf", 4096, "0123456789abcdef0123456789abcdef")]);
         let server = MockServer::start(vec![
-            MockResponse::ok(b""),
             MockResponse::retry_after("503 Service Unavailable", "0", b"busy"),
             MockResponse::ok(xml_body.as_bytes()),
         ])
@@ -1606,16 +1636,10 @@ mod tests {
         .expect("XML GET 503 should retry and parse valid XML");
 
         let requests = server.finish().await;
-        assert_eq!(requests.len(), 3);
-        assert!(requests[0]
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|req| req
             .request_line
-            .starts_with("HEAD /download/item/item_files.xml "));
-        assert!(requests[1]
-            .request_line
-            .starts_with("GET /download/item/item_files.xml "));
-        assert!(requests[2]
-            .request_line
-            .starts_with("GET /download/item/item_files.xml "));
+            .starts_with("GET /download/item/item_files.xml ")));
         assert_eq!(returned_url, xml_url);
         assert_eq!(files.files.len(), 1);
         assert_eq!(files.files[0].name, "issue01.pdf");
@@ -1629,48 +1653,52 @@ mod tests {
     #[tokio::test]
     async fn metadata_redirect_wiring_rescopes_cookies_and_preserves_base_url() {
         let client = test_client();
+        let spinner = indicatif::ProgressBar::hidden();
         let signal = downloader::ShutdownSignal::new();
         let logger = VerboseLogger::disabled();
         let policy = fast_retry_policy(1);
+        let xml_body =
+            build_xml_metadata(&[("issue01.pdf", 2048, "abcdef0123456789abcdef0123456789")]);
 
-        // Cross-host 302 on HEAD preserves method and strips non-matching cookies
-        let target_server = MockServer::start_on_localhost(vec![MockResponse::ok(b"")]).await;
-        let redirect_url = target_server.url("/details/redirected-item");
+        // Cross-host 302 on metadata GET strips non-matching cookies and preserves base_url
+        let target_server =
+            MockServer::start_on_localhost(vec![MockResponse::ok(xml_body.as_bytes())]).await;
+        let redirect_url = target_server.url("/download/redirected-item/item_files.xml");
         let origin_server =
             MockServer::start(vec![MockResponse::redirect("302 Found", redirect_url)]).await;
         let host_cookies =
             CookieSource::from_netscape_str("127.0.0.1\tFALSE\t/\tFALSE\t0\tauth\tsecret\n");
+        let origin_xml_url = origin_server.parsed_url("/download/item/item_files.xml");
 
-        is_url_accessible_with_logger(
-            &origin_server.parsed_url("/details/item"),
+        let (files, returned_url) = fetch_xml_metadata_from_url_with_logger(
+            origin_xml_url.clone(),
             &client,
+            &spinner,
             Some(&host_cookies),
             &policy,
             &signal,
             &logger,
         )
         .await
-        .expect("HEAD across cross-host 302 redirect should succeed");
+        .expect("GET across cross-host 302 redirect should succeed");
 
         let origin_reqs = origin_server.finish().await;
         let target_reqs = target_server.finish().await;
         assert_eq!(origin_reqs.len(), 1);
         assert!(origin_reqs[0]
             .request_line
-            .starts_with("HEAD /details/item "));
+            .starts_with("GET /download/item/item_files.xml "));
         assert_eq!(origin_reqs[0].header("cookie"), Some("auth=secret"));
         assert_eq!(target_reqs.len(), 1);
         assert!(target_reqs[0]
             .request_line
-            .starts_with("HEAD /details/redirected-item "));
+            .starts_with("GET /download/redirected-item/item_files.xml "));
         assert_eq!(target_reqs[0].header("cookie"), None);
+        assert_eq!(returned_url, origin_xml_url);
+        assert_eq!(files.files.len(), 1);
 
-        // Path-scoped cookies are re-evaluated across HEAD+GET redirects while preserving base_url
-        let xml_body =
-            build_xml_metadata(&[("issue01.pdf", 2048, "abcdef0123456789abcdef0123456789")]);
+        // Path-scoped cookies are re-evaluated across GET redirects while preserving base_url
         let server = MockServer::start(vec![
-            MockResponse::redirect("302 Found", "/download/public/item_files.xml"),
-            MockResponse::ok(b""),
             MockResponse::redirect("302 Found", "/download/public/item_files.xml"),
             MockResponse::ok(xml_body.as_bytes()),
         ])
@@ -1686,7 +1714,6 @@ mod tests {
             ),
         );
         let path_cookies = CookieSource::from_input(cookie_path.to_str().unwrap()).unwrap();
-        let spinner = indicatif::ProgressBar::hidden();
         let xml_url = server.parsed_url("/download/private/item_files.xml");
 
         let (files, returned_url) = fetch_xml_metadata_from_url_with_logger(
@@ -1702,23 +1729,15 @@ mod tests {
         .expect("XML metadata across redirects should succeed");
 
         let reqs = server.finish().await;
-        assert_eq!(reqs.len(), 4);
+        assert_eq!(reqs.len(), 2);
         assert!(reqs[0]
             .request_line
-            .starts_with("HEAD /download/private/item_files.xml "));
+            .starts_with("GET /download/private/item_files.xml "));
         assert_eq!(reqs[0].header("cookie"), Some("private=1; root=1"));
         assert!(reqs[1]
             .request_line
-            .starts_with("HEAD /download/public/item_files.xml "));
-        assert_eq!(reqs[1].header("cookie"), Some("root=1"));
-        assert!(reqs[2]
-            .request_line
-            .starts_with("GET /download/private/item_files.xml "));
-        assert_eq!(reqs[2].header("cookie"), Some("private=1; root=1"));
-        assert!(reqs[3]
-            .request_line
             .starts_with("GET /download/public/item_files.xml "));
-        assert_eq!(reqs[3].header("cookie"), Some("root=1"));
+        assert_eq!(reqs[1].header("cookie"), Some("root=1"));
         assert_eq!(returned_url, xml_url);
         assert_eq!(files.files.len(), 1);
         assert_eq!(files.files[0].name, "issue01.pdf");
@@ -1745,7 +1764,6 @@ mod tests {
             ("other/extra.zip", b"extra"),
         ]);
         let server = MockServer::start(vec![
-            MockResponse::ok(b""),
             MockResponse::ok(xml_body.as_bytes()),
             MockResponse::ok(payload),
         ])
@@ -1781,12 +1799,12 @@ mod tests {
         assert!(batch_exit_result(&summary, 1).is_ok());
 
         let requests = server.finish().await;
-        assert_eq!(requests.len(), 3);
-        assert!(requests[2]
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1]
             .request_line
             .starts_with("GET /download/item/sub/file%20name.pdf "));
-        assert!(!requests[2].request_line.contains('?'));
-        assert!(!requests[2].request_line.contains('#'));
+        assert!(!requests[1].request_line.contains('?'));
+        assert!(!requests[1].request_line.contains('#'));
 
         assert_eq!(
             std::fs::read(output_dir.join("sub/file name.pdf")).unwrap(),
@@ -1813,7 +1831,7 @@ mod tests {
         let server = ConcurrentMockServer::from_routes(vec![
             (
                 "/download/item/item_files.xml",
-                vec![MockResponse::ok(b""), MockResponse::ok(xml_body.as_bytes())],
+                vec![MockResponse::ok(xml_body.as_bytes())],
             ),
             (
                 "/download/item/comics/issue01.cbz",
@@ -1883,8 +1901,8 @@ mod tests {
         assert!(batch_exit_result(&summary, 2).is_ok());
 
         let requests = server.stop().await;
-        assert_eq!(requests.len(), 4);
-        let mut download_lines: Vec<&str> = requests[2..]
+        assert_eq!(requests.len(), 3);
+        let mut download_lines: Vec<&str> = requests[1..]
             .iter()
             .map(|r| r.request_line.as_str())
             .collect();
@@ -1965,11 +1983,7 @@ mod tests {
                 dir.write(rel, data);
             }
             let before = snapshot_dir(dir.path());
-            let server = MockServer::start(vec![
-                MockResponse::ok(b""),
-                MockResponse::ok(xml_body.as_bytes()),
-            ])
-            .await;
+            let server = MockServer::start(vec![MockResponse::ok(xml_body.as_bytes())]).await;
 
             let cli = Cli::try_parse_from([
                 "ia-get",
@@ -2006,7 +2020,7 @@ mod tests {
                 ));
                 assert!(!dir.join("docs").exists());
             }
-            assert_eq!(server.finish().await.len(), 2, "case {label}");
+            assert_eq!(server.finish().await.len(), 1, "case {label}");
             assert_eq!(before, snapshot_dir(dir.path()), "case {label}");
         }
     }
@@ -2028,11 +2042,7 @@ mod tests {
             ("pass", target_bytes.as_slice(), true),
             ("fail", b"corrupt-target-pdf-byte".as_slice(), false),
         ] {
-            let server = MockServer::start(vec![
-                MockResponse::ok(b""),
-                MockResponse::ok(xml_body.as_bytes()),
-            ])
-            .await;
+            let server = MockServer::start(vec![MockResponse::ok(xml_body.as_bytes())]).await;
             let output_dir = TempTestDir::new(&format!("check-direct-{label}"));
             output_dir.write("docs/target.pdf", on_disk);
             let before = snapshot_dir(output_dir.path());
@@ -2072,7 +2082,7 @@ mod tests {
                     })
                 ));
             }
-            assert_eq!(server.finish().await.len(), 2);
+            assert_eq!(server.finish().await.len(), 1);
             assert_eq!(before, snapshot_dir(output_dir.path()));
         }
     }
@@ -2100,7 +2110,6 @@ mod tests {
         let fail_dir = TempTestDir::new("space-gate-fail");
         let before = snapshot_dir(fail_dir.path());
         let fail_server = MockServer::start(vec![
-            MockResponse::ok(b""),
             MockResponse::ok(xml_body.as_bytes()),
             MockResponse::ok(&alpha),
         ])
@@ -2136,7 +2145,7 @@ mod tests {
                 ref path,
             } if required == required_bytes && available == required_bytes - 1 && path == fail_dir.path()
         ));
-        assert_eq!(fail_server.abort().await.len(), 2);
+        assert_eq!(fail_server.abort().await.len(), 1);
         assert_eq!(before, snapshot_dir(fail_dir.path()));
 
         // Sufficient space proceeds to download and verify all planned files
@@ -2144,7 +2153,7 @@ mod tests {
         let pass_server = ConcurrentMockServer::from_routes(vec![
             (
                 "/download/item/item_files.xml",
-                vec![MockResponse::ok(b""), MockResponse::ok(xml_body.as_bytes())],
+                vec![MockResponse::ok(xml_body.as_bytes())],
             ),
             ("/download/item/alpha.bin", vec![MockResponse::ok(&alpha)]),
             (
@@ -2194,7 +2203,7 @@ mod tests {
             std::fs::read(pass_dir.join("nested/beta_.bin")).unwrap(),
             beta
         );
-        assert_eq!(pass_server.stop().await.len(), 4);
+        assert_eq!(pass_server.stop().await.len(), 3);
     }
 
     #[tokio::test]
@@ -2220,11 +2229,7 @@ mod tests {
             u64::MAX,
             "0123456789abcdef0123456789abcdef",
         )]);
-        let list_server = MockServer::start(vec![
-            MockResponse::ok(b""),
-            MockResponse::ok(list_xml.as_bytes()),
-        ])
-        .await;
+        let list_server = MockServer::start(vec![MockResponse::ok(list_xml.as_bytes())]).await;
         let list_parent = TempTestDir::new("list-u64-max");
         let missing_output = list_parent.join("never-created");
         let list_cli = Cli::try_parse_from([
@@ -2240,14 +2245,10 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(!missing_output.exists());
-        assert_eq!(list_server.finish().await.len(), 2);
+        assert_eq!(list_server.finish().await.len(), 1);
 
         // --check bypasses disk-space check while download mode rejects the same metadata
-        let check_server = MockServer::start(vec![
-            MockResponse::ok(b""),
-            MockResponse::ok(xml_body.as_bytes()),
-        ])
-        .await;
+        let check_server = MockServer::start(vec![MockResponse::ok(xml_body.as_bytes())]).await;
         let check_dir = TempTestDir::new("check-u64-max");
         check_dir.write("small.txt", small);
         let before = snapshot_dir(check_dir.path());
@@ -2278,7 +2279,7 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(check_server.finish().await.len(), 2);
+        assert_eq!(check_server.finish().await.len(), 1);
         assert_eq!(before, snapshot_dir(check_dir.path()));
     }
 
@@ -2288,7 +2289,6 @@ mod tests {
         let xml_body = xml_from_payloads(&[("throttled.bin", &payload)]);
 
         let server = MockServer::start(vec![
-            MockResponse::ok(b""),
             MockResponse::ok(xml_body.as_bytes()),
             MockResponse::ok(&payload),
         ])
@@ -2345,7 +2345,7 @@ mod tests {
             payload
         );
         assert!(!output_dir.part_path("throttled.bin").exists());
-        assert_eq!(server.finish().await.len(), 3);
+        assert_eq!(server.finish().await.len(), 2);
     }
 
     #[test]
@@ -2373,11 +2373,7 @@ mod tests {
         let expected_md5 = "0123456789abcdef0123456789abcdef";
         let xml_body = build_xml_metadata(&[("proxied.bin", 1234, expected_md5)]);
 
-        let proxy_server = MockServer::start(vec![
-            MockResponse::ok(b""),
-            MockResponse::ok(xml_body.as_bytes()),
-        ])
-        .await;
+        let proxy_server = MockServer::start(vec![MockResponse::ok(xml_body.as_bytes())]).await;
         let proxy_url = format!("http://127.0.0.1:{}", proxy_server.port());
         let proxy_config = downloader::ProxyConfig::from_os_lookup(|name| match name {
             "HTTP_PROXY" => Some(std::ffi::OsString::from(&proxy_url)),
@@ -2410,17 +2406,17 @@ mod tests {
         assert_eq!(files.files[0].md5.as_deref(), Some(expected_md5));
 
         let requests = proxy_server.finish().await;
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 1);
         assert_eq!(
             requests[0].request_line,
-            "HEAD http://archive.example/download/proxyitem/proxyitem_files.xml HTTP/1.1"
-        );
-        assert_eq!(
-            requests[1].request_line,
             "GET http://archive.example/download/proxyitem/proxyitem_files.xml HTTP/1.1"
         );
-        assert_eq!(requests[0].header("User-Agent"), Some(USER_AGENT));
-        assert_eq!(requests[1].header("User-Agent"), Some(USER_AGENT));
+        let ua = requests[0]
+            .header("User-Agent")
+            .expect("User-Agent header should be present");
+        assert_eq!(ua, USER_AGENT);
+        assert!(ua.starts_with("ia-get/"));
+        assert!(ua.contains("https://github.com/wimpysworld/ia-get"));
     }
 
     #[tokio::test]
@@ -2439,14 +2435,11 @@ mod tests {
         let expected_cookie_header = format!("{SENTINEL_NAME}={SENTINEL_VALUE}");
 
         let server = MockServer::start(vec![
-            MockResponse::ok(b""),
-            MockResponse::ok(b""),
             MockResponse::ok(xml_body.as_bytes()),
             MockResponse::ok(payload),
         ])
         .await;
 
-        let details_url = server.parsed_url("/details/item");
         let xml_url = server.parsed_url("/download/item/item_files.xml");
         let asset_url = server.parsed_url("/download/item/asset.bin");
         let output_dir = TempTestDir::new("verbose-e2e");
@@ -2458,16 +2451,6 @@ mod tests {
         let signal = downloader::ShutdownSignal::new();
         let options = fast_options(0, None);
 
-        is_url_accessible_with_logger(
-            &details_url,
-            &client,
-            Some(&cookie_source),
-            &options.retry_policy,
-            &signal,
-            &logger,
-        )
-        .await
-        .unwrap();
         let (files, base_url) = fetch_xml_metadata_from_url_with_logger(
             xml_url.clone(),
             &client,
@@ -2495,7 +2478,7 @@ mod tests {
         assert_eq!(summary.ok, 1);
 
         let requests = server.finish().await;
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 2);
         for req in &requests {
             assert_eq!(req.header("Cookie"), Some(expected_cookie_header.as_str()));
         }
@@ -2512,9 +2495,6 @@ mod tests {
         );
 
         for expected in [
-            format!("[verbose] http: -> HEAD {details_url} (cookies=yes)"),
-            format!("[verbose] http: <- 200 OK HEAD {details_url} (cookies=yes)"),
-            format!("[verbose] http: -> HEAD {xml_url} (cookies=yes)"),
             format!("[verbose] http: -> GET {xml_url} (cookies=yes)"),
             format!("[verbose] http: <- 200 OK GET {xml_url} (cookies=yes)"),
             format!("[verbose] metadata: parsed 1 file(s) from {xml_url}"),
@@ -2549,7 +2529,6 @@ mod tests {
         ] {
             let xml_body = xml_from_payloads(&[(first, b"entry-a"), (second, b"entry-b")]);
             let server = MockServer::start(vec![
-                MockResponse::ok(b""),
                 MockResponse::ok(xml_body.as_bytes()),
                 MockResponse::ok(b"must never be requested"),
             ])
@@ -2574,8 +2553,254 @@ mod tests {
                 ),
                 "case {label}: unexpected error {err:?}"
             );
-            assert_eq!(server.abort().await.len(), 2, "case {label}");
+            assert_eq!(server.abort().await.len(), 1, "case {label}");
             assert_eq!(before, snapshot_dir(output_dir.path()), "case {label}");
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_xml_metadata_single_get_user_agent_and_actionable_http_errors() {
+        let client = build_http_client(&downloader::ProxyConfig::default()).unwrap();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let logger = VerboseLogger::disabled();
+        let cookies = CookieSource::from_netscape_str("127.0.0.1\tFALSE\t/\tFALSE\t0\tsid\t1\n");
+
+        // Happy path: single GET (zero HEAD) carrying versioned User-Agent with repo URL
+        let xml_body = xml_from_payloads(&[("doc.pdf", b"pdf")]);
+        let ok_server = MockServer::start(vec![MockResponse::ok(xml_body.as_bytes())]).await;
+        let (files, _) = fetch_xml_metadata_from_url_with_logger(
+            ok_server.parsed_url("/download/item/item_files.xml"),
+            &client,
+            &spinner,
+            None,
+            &fast_retry_policy(0),
+            &signal,
+            &logger,
+        )
+        .await
+        .expect("single GET metadata fetch should succeed");
+        assert_eq!(files.files.len(), 1);
+        let ok_reqs = ok_server.finish().await;
+        assert_eq!(ok_reqs.len(), 1);
+        assert!(ok_reqs[0]
+            .request_line
+            .starts_with("GET /download/item/item_files.xml "));
+        let ua = ok_reqs[0].header("User-Agent").unwrap();
+        assert!(ua.starts_with(&format!("ia-get/{}", env!("CARGO_PKG_VERSION"))));
+        assert!(ua.contains("https://github.com/wimpysworld/ia-get"));
+
+        // Failure statuses: zero HEAD requests and actionable diagnostics
+        let cases: [(&str, Option<&CookieSource>, usize, &[&str]); 6] = [
+            ("401 Unauthorized", None, 1, &["401", "-b/--cookies"]),
+            ("401 Unauthorized", Some(&cookies), 1, &["401", "expired"]),
+            ("403 Forbidden", None, 1, &["403", "-b/--cookies"]),
+            ("403 Forbidden", Some(&cookies), 1, &["403", "lending-only"]),
+            (
+                "404 Not Found",
+                None,
+                1,
+                &["404", "not found on archive.org"],
+            ),
+            (
+                "503 Service Unavailable",
+                None,
+                2,
+                &["503", "unavailable after retries", "retry later"],
+            ),
+        ];
+
+        for (status_line, cookie_src, expected_gets, needles) in cases {
+            let responses = (0..expected_gets)
+                .map(|_| MockResponse::status(status_line, b"err"))
+                .collect();
+            let server = MockServer::start(responses).await;
+            let err = fetch_xml_metadata_from_url_with_logger(
+                server.parsed_url("/download/item/item_files.xml"),
+                &client,
+                &spinner,
+                cookie_src,
+                &fast_retry_policy(1),
+                &signal,
+                &logger,
+            )
+            .await
+            .unwrap_err();
+            let reqs = server.finish().await;
+            assert_eq!(reqs.len(), expected_gets);
+            assert!(reqs.iter().all(|r| r.request_line.starts_with("GET ")));
+            let msg = err.to_string();
+            for needle in needles {
+                assert!(
+                    msg.contains(needle),
+                    "status={status_line} cookies={} missing {needle:?} in {msg:?}",
+                    cookie_src.is_some()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn private_files_policy_e2e_skip_fail_fast_cookies_and_check() {
+        let public_bytes = b"public-payload";
+        let private_bytes = b"private-payload";
+        let mixed_xml = format!(
+            "<files>\n  <file name=\"public.bin\"><size>{}</size><md5>{}</md5></file>\n  <file name=\"secret.bin\"><size>{}</size><md5>{}</md5><private>true</private></file>\n</files>",
+            public_bytes.len(),
+            md5_hex(public_bytes),
+            private_bytes.len(),
+            md5_hex(private_bytes),
+        );
+        let all_private_xml = format!(
+            "<files>\n  <file name=\"secret.bin\"><size>{}</size><md5>{}</md5><private>1</private></file>\n</files>",
+            private_bytes.len(),
+            md5_hex(private_bytes),
+        );
+
+        let client = test_client();
+        let spinner = indicatif::ProgressBar::hidden();
+        let signal = downloader::ShutdownSignal::new();
+        let options = fast_options(0, None);
+
+        // 1. Partial private without cookies: skips private, logs to metadata, downloads public only
+        let partial_server = MockServer::start(vec![
+            MockResponse::ok(mixed_xml.as_bytes()),
+            MockResponse::ok(public_bytes),
+        ])
+        .await;
+        let partial_dir = TempTestDir::new("private-partial");
+        let captured = CapturedLogs::new();
+        let logger = VerboseLogger::with_writer(captured.clone_writer());
+
+        let (files, base_url) = fetch_xml_metadata_from_url_with_logger(
+            partial_server.parsed_url("/download/item/item_files.xml"),
+            &client,
+            &spinner,
+            None,
+            &options.retry_policy,
+            &signal,
+            &logger,
+        )
+        .await
+        .unwrap();
+        let public_only = filter_private_files_for_download(files, false, &spinner, &logger)
+            .expect("partial private should keep public files");
+        assert_eq!(public_only.files.len(), 1);
+        assert_eq!(public_only.files[0].name, "public.bin");
+        let plan = plan_downloads_for_dir(public_only, &base_url, partial_dir.path()).unwrap();
+        let summary = run_planned_downloads_with_logger(
+            &client,
+            partial_dir.path(),
+            plan,
+            None,
+            &options,
+            &signal,
+            &logger,
+            |_, _, _| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.ok, 1);
+        assert_eq!(partial_server.finish().await.len(), 2);
+        assert_eq!(
+            std::fs::read(partial_dir.join("public.bin")).unwrap(),
+            public_bytes
+        );
+        assert!(!partial_dir.join("secret.bin").exists());
+        assert!(captured
+            .text()
+            .contains("[verbose] metadata: skipped private file 'secret.bin'"));
+
+        // 2. All private without cookies: fails fast before any file download request
+        let all_priv_server = MockServer::start(vec![
+            MockResponse::ok(all_private_xml.as_bytes()),
+            MockResponse::ok(b"must not be requested"),
+        ])
+        .await;
+        let (all_priv_files, _) = fetch_test_xml(&all_priv_server, &client, 0, &signal).await;
+        let err = filter_private_files_for_download(
+            all_priv_files,
+            false,
+            &spinner,
+            &VerboseLogger::disabled(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, IaGetError::PrivateFilesOnly { count: 1 }));
+        assert!(err.to_string().contains("-b/--cookies"));
+        assert_eq!(all_priv_server.abort().await.len(), 1);
+
+        // 3. With cookies: includes and downloads private files normally
+        let cookies = CookieSource::from_netscape_str("127.0.0.1\tFALSE\t/\tFALSE\t0\tsid\t1\n");
+        let auth_server = ConcurrentMockServer::from_routes(vec![
+            (
+                "/download/item/item_files.xml",
+                vec![MockResponse::ok(mixed_xml.as_bytes())],
+            ),
+            (
+                "/download/item/public.bin",
+                vec![MockResponse::ok(public_bytes)],
+            ),
+            (
+                "/download/item/secret.bin",
+                vec![MockResponse::ok(private_bytes)],
+            ),
+        ])
+        .await;
+        let auth_dir = TempTestDir::new("private-with-cookies");
+        let (auth_files, base_url) = fetch_xml_metadata_from_url_with_logger(
+            auth_server.parsed_url("/download/item/item_files.xml"),
+            &client,
+            &spinner,
+            Some(&cookies),
+            &options.retry_policy,
+            &signal,
+            &VerboseLogger::disabled(),
+        )
+        .await
+        .unwrap();
+        let kept = filter_private_files_for_download(
+            auth_files,
+            true,
+            &spinner,
+            &VerboseLogger::disabled(),
+        )
+        .unwrap();
+        assert_eq!(kept.files.len(), 2);
+        let plan = plan_downloads_for_dir(kept, &base_url, auth_dir.path()).unwrap();
+        let summary = run_planned_downloads_with_logger(
+            &client,
+            auth_dir.path(),
+            plan,
+            Some(&cookies),
+            &options,
+            &signal,
+            &VerboseLogger::disabled(),
+            |_, _, _| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.ok, 2);
+        assert_eq!(auth_server.stop().await.len(), 3);
+        assert_eq!(
+            std::fs::read(auth_dir.join("secret.bin")).unwrap(),
+            private_bytes
+        );
+
+        // 4. --check keeps and verifies private files even without cookies
+        let check_server = MockServer::start(vec![MockResponse::ok(mixed_xml.as_bytes())]).await;
+        let check_dir = TempTestDir::new("private-check");
+        check_dir.write("public.bin", public_bytes);
+        check_dir.write("secret.bin", private_bytes);
+        let (check_files, _) = fetch_test_xml(&check_server, &client, 0, &signal).await;
+        let check_summary = verify::verify_files_with_logger(
+            check_dir.path(),
+            &check_files.files,
+            &signal,
+            &VerboseLogger::disabled(),
+        )
+        .unwrap();
+        assert_eq!(check_summary.ok, 2);
+        assert!(check_summary.failed.is_empty());
+        assert_eq!(check_server.finish().await.len(), 1);
     }
 }

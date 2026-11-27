@@ -4,6 +4,7 @@ categories = ["command-line-utilities"]
 description = "File downloader for archive.org"
 keywords = ["cli", "archive", "internet-archive", "download"]
 authors = ["Martin Wimpress <code@wimpress.io>"]
+license = "MIT"
 repository = "https://github.com/wimpysworld/ia-get"
 readme = "README.md"
 version = "0.2.0"

@@ -1,7 +1,14 @@
 //! Application constants for ia-get
 
 /// User agent string for HTTP requests
-pub const USER_AGENT: &str = "ia-get";
+pub const USER_AGENT: &str = concat!(
+    "ia-get/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/wimpysworld/ia-get)"
+);
+
+/// Per-chunk idle read timeout in seconds while streaming file downloads
+pub const CHUNK_READ_TIMEOUT_SECS: u64 = 60;
 
 /// Maximum length for XML content in debug output (bytes, truncated on a UTF-8 char boundary)
 pub const XML_DEBUG_TRUNCATE_LEN: usize = 1000;

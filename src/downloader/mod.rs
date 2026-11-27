@@ -20,7 +20,7 @@ use reqwest::{Client, StatusCode, Url};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinSet;
 
-use crate::constants::MAX_REDIRECTS;
+use crate::constants::{CHUNK_READ_TIMEOUT_SECS, MAX_REDIRECTS};
 use crate::cookie::CookieSource;
 use crate::disk_space::PlannedDownload;
 use crate::error::IaGetError;
@@ -41,8 +41,8 @@ pub use proxy::{http_client_builder, http_client_builder_with_proxy, ProxyConfig
 pub use redirect::attach_cookie_header;
 pub use retry::{
     compute_backoff_delay_with_sample, fetch_text_with_retry_with_logger, install_signal_handler,
-    is_retryable_reqwest_error, is_retryable_status, parse_retry_after,
-    send_with_retry_with_logger, sleep_interruptible, RetryEvent, RetryPolicy, ShutdownSignal,
+    is_retryable_reqwest_error, is_retryable_status, parse_retry_after, sleep_interruptible,
+    RetryEvent, RetryPolicy, ShutdownSignal,
 };
 pub use scheduler::{
     base_permit_cost, download_sort_key, sort_planned_downloads, ElasticScheduler, SchedulerPermit,
@@ -58,8 +58,8 @@ use fs_safety::{
 use proxy::redact_proxy_value;
 use redirect::{send_following_redirects, RedirectSendOutcome};
 use retry::{
-    await_interruptible, compute_retry_delay_with_source, interrupted_error, is_throttle_status,
-    parse_ascii_u64,
+    await_interruptible, compute_retry_delay_with_source, http_status_error, interrupted_error,
+    is_throttle_status, parse_ascii_u64,
 };
 
 /// Buffer size for file operations (8KB)
@@ -72,11 +72,22 @@ const LARGE_FILE_THRESHOLD: u64 = 2 * 1024 * 1024;
 /// so network stalls cannot accumulate multi-second unthrottled bursts.
 const RATE_LIMIT_STALL_RESET_WINDOW: Duration = Duration::from_millis(100);
 
-/// Configuration controlling download retries and bandwidth throttling.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Configuration controlling download retries, idle read timeouts, and bandwidth throttling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DownloadOptions {
     pub retry_policy: RetryPolicy,
     pub limit_rate: Option<u64>,
+    pub chunk_read_timeout: Duration,
+}
+
+impl Default for DownloadOptions {
+    fn default() -> Self {
+        Self {
+            retry_policy: RetryPolicy::default(),
+            limit_rate: None,
+            chunk_read_timeout: Duration::from_secs(CHUNK_READ_TIMEOUT_SECS),
+        }
+    }
 }
 
 /// A single file scheduled for download within a batch.
@@ -302,6 +313,10 @@ impl ProgressBarGuard {
     fn set_position(&self, pos: u64) {
         self.pb.set_position(pos);
     }
+
+    fn reset_eta(&self) {
+        self.pb.reset_eta();
+    }
 }
 
 impl Drop for ProgressBarGuard {
@@ -391,6 +406,7 @@ fn classify_download_response(
     content_length: Option<u64>,
     current_offset: u64,
     has_expected_md5: bool,
+    has_cookies: bool,
 ) -> Result<ResponseAction> {
     match status {
         StatusCode::OK => Ok(ResponseAction::WriteFromStart {
@@ -445,7 +461,7 @@ fn classify_download_response(
                 }
             }
         }
-        _ => Err(IaGetError::Network(format!("HTTP error {}", status))),
+        _ => Err(http_status_error(status, has_cookies, false)),
     }
 }
 
@@ -588,15 +604,18 @@ enum ExistingFileStatus {
     Missing,
     CompleteMd5Verified,
     CompleteNoMd5,
-    NeedsRedownload,
+    NeedsRedownloadSizeMismatch { expected: u64, actual: u64 },
+    NeedsRedownloadHashMismatch,
 }
 
-/// Check if an existing file inside `root` has the correct hash, offloading MD5 I/O to a
-/// blocking worker thread.
+/// Check if an existing file inside `root` has the expected size and hash, fast-failing on
+/// size mismatch before offloading MD5 I/O to a blocking worker thread.
+#[allow(clippy::too_many_arguments)]
 async fn check_existing_file(
     root: &Path,
     file_path: &str,
     expected_md5: Option<&str>,
+    expected_size: Option<u64>,
     running: &Arc<AtomicBool>,
     multi_progress: Option<&MultiProgress>,
     detail_lines: &mut Vec<String>,
@@ -604,8 +623,15 @@ async fn check_existing_file(
     let canonical_root = resolve_destination_root(root)?;
     let rel_path = PathBuf::from(file_path);
 
-    if inspect_contained_regular_file(&canonical_root, &rel_path)?.is_none() {
+    let Some((_, metadata)) = inspect_contained_regular_file(&canonical_root, &rel_path)? else {
         return Ok(ExistingFileStatus::Missing);
+    };
+
+    if let Some(expected) = expected_size {
+        let actual = metadata.len();
+        if actual != expected {
+            return Ok(ExistingFileStatus::NeedsRedownloadSizeMismatch { expected, actual });
+        }
     }
 
     let Some(expected) = expected_md5 else {
@@ -623,7 +649,7 @@ async fn check_existing_file(
     .await
     {
         Ok(local_md5) if local_md5 == expected => Ok(ExistingFileStatus::CompleteMd5Verified),
-        Ok(_) => Ok(ExistingFileStatus::NeedsRedownload),
+        Ok(_) => Ok(ExistingFileStatus::NeedsRedownloadHashMismatch),
         Err(ContainedFileError::Containment(err) | ContainedFileError::Interrupted(err)) => {
             Err(err)
         }
@@ -634,7 +660,7 @@ async fn check_existing_file(
                 "Failed".red().bold(),
                 err
             ));
-            Ok(ExistingFileStatus::NeedsRedownload)
+            Ok(ExistingFileStatus::NeedsRedownloadHashMismatch)
         }
     }
 }
@@ -920,7 +946,7 @@ async fn download_file_content(
             )
             .await?
             {
-                return Err(IaGetError::Network(format!("HTTP error {}", status)));
+                return Err(http_status_error(status, cookie_source.is_some(), true));
             }
             continue;
         }
@@ -937,6 +963,7 @@ async fn download_file_content(
             content_length,
             current_file_size,
             expected_md5.is_some(),
+            cookie_source.is_some(),
         )?;
 
         let (mut file, start_offset, total_expected_size) = match action {
@@ -1069,6 +1096,9 @@ async fn download_file_content(
 
         // Set initial progress to starting offset for resumed downloads
         pb.set_position(start_offset);
+        if start_offset > 0 {
+            pb.reset_eta();
+        }
 
         let start_time = Instant::now();
         let mut local_rate_limiter = if context.rate_limiter.is_none() {
@@ -1081,10 +1111,23 @@ async fn download_file_content(
 
         // Attempt the download
         let download_result: Result<()> = async {
-            while let Some(chunk_result) = await_interruptible(response.chunk(), signal)
+            loop {
+                let chunk_result = await_interruptible(
+                    tokio::time::timeout(options.chunk_read_timeout, response.chunk()),
+                    signal,
+                )
                 .await?
-                .transpose()
-            {
+                .map_err(|_| {
+                    IaGetError::Network(format!(
+                        "Timed out after {} waiting for data chunk",
+                        format_duration(options.chunk_read_timeout)
+                    ))
+                })?;
+
+                let Some(chunk) = chunk_result.map_err(reqwest::Error::without_url)? else {
+                    break;
+                };
+
                 if !signal.is_running() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
@@ -1093,7 +1136,6 @@ async fn download_file_content(
                     .into());
                 }
 
-                let chunk = chunk_result.map_err(reqwest::Error::without_url)?;
                 file.write_all(&chunk)?;
                 let chunk_len = chunk.len() as u64;
                 downloaded_bytes = downloaded_bytes.saturating_add(chunk_len);
@@ -1111,6 +1153,7 @@ async fn download_file_content(
         .await;
 
         drop(pb);
+        drop(response);
 
         match download_result {
             Ok(_) => {
@@ -1323,6 +1366,7 @@ async fn download_single_file_with_context(
     url: &str,
     file_path: &str,
     expected_md5: Option<&str>,
+    expected_size: Option<u64>,
     signal: &ShutdownSignal,
     cookie_source: Option<&CookieSource>,
     options: &DownloadOptions,
@@ -1339,6 +1383,7 @@ async fn download_single_file_with_context(
         root,
         file_path,
         expected_md5,
+        expected_size,
         signal.running_flag(),
         context.multi_progress.as_ref(),
         &mut detail_lines,
@@ -1377,7 +1422,21 @@ async fn download_single_file_with_context(
             ));
             return Ok((FileOutcome::Skipped, detail_lines));
         }
-        ExistingFileStatus::NeedsRedownload => {
+        ExistingFileStatus::NeedsRedownloadSizeMismatch { expected, actual } => {
+            batch_logger.log(
+                "download",
+                format_args!(
+                    "redownloading '{file_path}': existing file size mismatch (expected {expected} bytes, actual {actual} bytes)"
+                ),
+            );
+            detail_lines.push(format!(
+                "{} {}      {}",
+                "├╼".cyan().dimmed(),
+                "Partial".white(),
+                "▲".yellow().bold()
+            ));
+        }
+        ExistingFileStatus::NeedsRedownloadHashMismatch => {
             batch_logger.log(
                 "download",
                 format_args!("redownloading '{file_path}': existing file hash mismatch"),
@@ -1481,6 +1540,7 @@ async fn download_single_file_with_options(
         url,
         file_path,
         expected_md5,
+        None,
         signal,
         cookie_source,
         options,
@@ -1717,6 +1777,7 @@ where
                 &item.url,
                 &file_path,
                 item.expected_md5.as_deref(),
+                item.expected_size,
                 &task_signal,
                 task_cookies.as_deref(),
                 &task_options,
@@ -1874,7 +1935,7 @@ pub(super) mod tests {
     ) -> Result<FileOutcome> {
         let options = DownloadOptions {
             retry_policy: *policy,
-            limit_rate: None,
+            ..DownloadOptions::default()
         };
         download_single_file_with_options(
             client,
@@ -1904,7 +1965,7 @@ pub(super) mod tests {
     {
         let options = DownloadOptions {
             retry_policy: *policy,
-            limit_rate: None,
+            ..DownloadOptions::default()
         };
         download_files_in_dir_with_logger(
             client,
@@ -2375,8 +2436,15 @@ pub(super) mod tests {
 
         for (status, content_range, content_length, offset, has_md5, expected) in ok_cases {
             assert_eq!(
-                classify_download_response(status, content_range, content_length, offset, has_md5)
-                    .unwrap(),
+                classify_download_response(
+                    status,
+                    content_range,
+                    content_length,
+                    offset,
+                    has_md5,
+                    false
+                )
+                .unwrap(),
                 expected,
                 "{status} range={content_range:?} offset={offset} md5={has_md5}"
             );
@@ -2395,20 +2463,31 @@ pub(super) mod tests {
                 Some(0),
             ),
         ] {
-            let err = classify_download_response(status, range, cl, 0, true).unwrap_err();
+            let err = classify_download_response(status, range, cl, 0, true, false).unwrap_err();
             assert!(matches!(err, IaGetError::Network(_)));
         }
 
-        // Other statuses always return Network("HTTP error <status>")
-        for status in [
-            StatusCode::NOT_FOUND,
-            StatusCode::FORBIDDEN,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            StatusCode::FOUND,
+        // Actionable HTTP errors for 401/403/404 (with and without cookies)
+        for (status, has_cookies, expected_needle) in [
+            (StatusCode::UNAUTHORIZED, false, "-b/--cookies"),
+            (StatusCode::UNAUTHORIZED, true, "expired"),
+            (StatusCode::FORBIDDEN, false, "-b/--cookies"),
+            (StatusCode::FORBIDDEN, true, "lending-only"),
+            (StatusCode::NOT_FOUND, false, "not found on archive.org"),
         ] {
+            let err = classify_download_response(status, None, Some(128), 0, true, has_cookies)
+                .unwrap_err();
+            assert!(
+                matches!(err, IaGetError::Network(ref m) if m.contains(expected_needle)),
+                "status={status} cookies={has_cookies}: {err}"
+            );
+        }
+
+        // Other statuses fall back to Network("HTTP error <status>")
+        for status in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::FOUND] {
             for offset in [0, 256] {
-                let err =
-                    classify_download_response(status, None, Some(128), offset, true).unwrap_err();
+                let err = classify_download_response(status, None, Some(128), offset, true, false)
+                    .unwrap_err();
                 assert!(matches!(
                     err,
                     IaGetError::Network(ref message) if message == &format!("HTTP error {}", status)
@@ -3295,8 +3374,8 @@ pub(super) mod tests {
         let server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
         let fx = DownloadFixture::new("rate-limit-throttled");
         let options = DownloadOptions {
-            retry_policy: RetryPolicy::default(),
             limit_rate: Some(parse_rate_limit("100K").unwrap()),
+            ..DownloadOptions::default()
         };
 
         let started = Instant::now();
@@ -3336,8 +3415,8 @@ pub(super) mod tests {
         let server = MockServer::start(vec![MockResponse::ok(&payload)]).await;
         let fx = DownloadFixture::new("rate-limit-interrupt");
         let options = DownloadOptions {
-            retry_policy: RetryPolicy::default(),
             limit_rate: Some(parse_rate_limit("1K").unwrap()),
+            ..DownloadOptions::default()
         };
 
         let part_path = fx.part_path("interrupted.bin");
@@ -3413,8 +3492,8 @@ pub(super) mod tests {
         let fx = DownloadFixture::new("rate-limit-resume");
         fx.write_part("resumed.bin", &payload[..prefix_len]);
         let options = DownloadOptions {
-            retry_policy: RetryPolicy::default(),
             limit_rate: Some(parse_rate_limit("100K").unwrap()),
+            ..DownloadOptions::default()
         };
 
         let started = Instant::now();
@@ -3476,7 +3555,7 @@ pub(super) mod tests {
         let fx = DownloadFixture::new("verbose-redirect-cookie");
         let options = DownloadOptions {
             retry_policy: fast_retry_policy(0),
-            limit_rate: None,
+            ..DownloadOptions::default()
         };
         let captured = CapturedLogs::new();
         let logger = VerboseLogger::with_writer(captured.clone_writer());
@@ -3559,7 +3638,7 @@ pub(super) mod tests {
         let fx = DownloadFixture::new("verbose-retries");
         let options = DownloadOptions {
             retry_policy: fast_retry_policy(3),
-            limit_rate: None,
+            ..DownloadOptions::default()
         };
         let captured = CapturedLogs::new();
         let logger = VerboseLogger::with_writer(captured.clone_writer());
@@ -3628,7 +3707,7 @@ pub(super) mod tests {
 
         let options = DownloadOptions {
             retry_policy: fast_retry_policy(0),
-            limit_rate: None,
+            ..DownloadOptions::default()
         };
         let captured = CapturedLogs::new();
         let logger = VerboseLogger::with_writer(captured.clone_writer());
@@ -3937,6 +4016,7 @@ pub(super) mod tests {
         let options = DownloadOptions {
             retry_policy: fast_retry_policy(0),
             limit_rate: Some(parse_rate_limit("100K").unwrap()),
+            ..DownloadOptions::default()
         };
         let items: Vec<DownloadItem> = payloads
             .iter()
@@ -4043,7 +4123,7 @@ pub(super) mod tests {
                 max_delay: Duration::from_millis(40),
                 max_retry_after: Duration::from_millis(180),
             },
-            limit_rate: None,
+            ..DownloadOptions::default()
         };
         let captured = CapturedLogs::new();
         let logger = VerboseLogger::with_writer(captured.clone_writer());
@@ -4177,7 +4257,10 @@ pub(super) mod tests {
 
         let fx = DownloadFixture::new("elastic-skips-no-recovery");
         for idx in 1..=4 {
-            fx.write(format!("skip_{idx}.bin"), b"already-complete");
+            let skip_file = fs::File::create(fx.join(format!("skip_{idx}.bin"))).unwrap();
+            skip_file
+                .set_len(2 * SMALL_FILE_MAX_BYTES + idx as u64)
+                .unwrap();
         }
 
         // s0 and s1 (8 MiB, cost 2 each) fill all 4 permits and both hit 429 -> ceiling 4 -> 2 -> 1.
@@ -4202,7 +4285,7 @@ pub(super) mod tests {
             items.push(DownloadItem {
                 url: server.url(&format!("/skip_{idx}.bin")),
                 file_path: format!("skip_{idx}.bin"),
-                expected_md5: Some(md5_hex(b"already-complete")),
+                expected_md5: None,
                 expected_size: Some(2 * SMALL_FILE_MAX_BYTES + idx as u64),
             });
         }
@@ -4421,6 +4504,214 @@ pub(super) mod tests {
         for idx in 4..6 {
             assert!(!fx.join(format!("file_{idx}.bin")).exists());
             assert!(!fx.part_path(&format!("file_{idx}.bin")).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_stalled_stream_times_out_retries_and_resumes_via_range() {
+        let first_chunk = b"first-part-";
+        let second_chunk = b"resumed-after-stall!";
+        let full: Vec<u8> = [first_chunk.as_slice(), second_chunk.as_slice()].concat();
+        let expected_md5 = md5_hex(&full);
+
+        let server = MockServer::start(vec![
+            MockResponse::StalledStream {
+                status_line: "200 OK",
+                headers: vec![("Content-Length".to_string(), full.len().to_string())],
+                first_chunk: first_chunk.to_vec(),
+                stall: Duration::from_secs(5),
+            },
+            MockResponse::partial_content(
+                first_chunk.len() as u64,
+                full.len() as u64,
+                second_chunk,
+            ),
+        ])
+        .await;
+
+        let fx = DownloadFixture::new("chunk-read-timeout");
+        let options = DownloadOptions {
+            retry_policy: fast_retry_policy(2),
+            limit_rate: None,
+            chunk_read_timeout: Duration::from_millis(120),
+        };
+
+        let started = Instant::now();
+        let outcome = download_single_file_with_options(
+            &fx.client,
+            fx.path(),
+            &server.url("/stalled.bin"),
+            "stalled.bin",
+            Some(&expected_md5),
+            &fx.signal,
+            None,
+            &options,
+            &VerboseLogger::disabled(),
+        )
+        .await
+        .expect("stalled stream should time out, retry with Range, and complete");
+        let elapsed = started.elapsed();
+
+        assert_eq!(outcome, FileOutcome::Downloaded);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "stalled stream retry took too long: {elapsed:?}"
+        );
+        let requests = server.finish().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].header("range"), None);
+        assert_eq!(
+            requests[1].header("range"),
+            Some(format!("bytes={}-", first_chunk.len()).as_str())
+        );
+        fx.assert_downloaded("stalled.bin", &full);
+    }
+
+    #[tokio::test]
+    async fn test_download_fast_fails_wrong_sized_existing_files_and_preserves_md5_check() {
+        let payload_no_md5 = b"complete payload without md5";
+        let payload_with_md5 = b"complete payload with md5!!";
+        let payload_corrupt_same_len = b"good payload same byte len!";
+        let payload_valid = b"already valid existing file";
+        assert_eq!(
+            payload_corrupt_same_len.len(),
+            b"bad! payload same byte len!".len()
+        );
+
+        let server = ConcurrentMockServer::from_routes(vec![
+            ("/wrong_no_md5.bin", vec![MockResponse::ok(payload_no_md5)]),
+            (
+                "/wrong_with_md5.bin",
+                vec![MockResponse::ok(payload_with_md5)],
+            ),
+            (
+                "/same_size_bad_md5.bin",
+                vec![MockResponse::ok(payload_corrupt_same_len)],
+            ),
+        ])
+        .await;
+
+        let fx = DownloadFixture::new("size-fast-fail");
+        fx.write("wrong_no_md5.bin", b"short");
+        fx.write("wrong_with_md5.bin", b"truncated");
+        fx.write("same_size_bad_md5.bin", b"bad! payload same byte len!");
+        fx.write("same_size_good_md5.bin", payload_valid);
+
+        let captured = CapturedLogs::new();
+        let logger = VerboseLogger::with_writer(captured.clone_writer());
+        let options = DownloadOptions {
+            retry_policy: fast_retry_policy(0),
+            ..DownloadOptions::default()
+        };
+
+        let items = vec![
+            DownloadItem {
+                url: server.url("/wrong_no_md5.bin"),
+                file_path: "wrong_no_md5.bin".to_string(),
+                expected_md5: None,
+                expected_size: Some(payload_no_md5.len() as u64),
+            },
+            DownloadItem {
+                url: server.url("/wrong_with_md5.bin"),
+                file_path: "wrong_with_md5.bin".to_string(),
+                expected_md5: Some(md5_hex(payload_with_md5)),
+                expected_size: Some(payload_with_md5.len() as u64),
+            },
+            DownloadItem {
+                url: server.url("/same_size_bad_md5.bin"),
+                file_path: "same_size_bad_md5.bin".to_string(),
+                expected_md5: Some(md5_hex(payload_corrupt_same_len)),
+                expected_size: Some(payload_corrupt_same_len.len() as u64),
+            },
+            DownloadItem {
+                url: server.url("/same_size_good_md5.bin"),
+                file_path: "same_size_good_md5.bin".to_string(),
+                expected_md5: Some(md5_hex(payload_valid)),
+                expected_size: Some(payload_valid.len() as u64),
+            },
+        ];
+
+        let summary = download_files_in_dir_with_logger(
+            &fx.client,
+            fx.path(),
+            items,
+            4,
+            None,
+            &options,
+            &fx.signal,
+            &logger,
+        )
+        .await
+        .expect("batch should complete cleanly");
+
+        let requests = server.stop().await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(summary.ok, 3);
+        assert_eq!(summary.skipped, 1);
+        assert!(summary.failed.is_empty());
+
+        fx.assert_downloaded("wrong_no_md5.bin", payload_no_md5);
+        fx.assert_downloaded("wrong_with_md5.bin", payload_with_md5);
+        fx.assert_downloaded("same_size_bad_md5.bin", payload_corrupt_same_len);
+        fx.assert_downloaded("same_size_good_md5.bin", payload_valid);
+
+        let logs = captured.text();
+        assert!(logs.contains("redownloading 'wrong_no_md5.bin': existing file size mismatch"));
+        assert!(logs.contains("redownloading 'wrong_with_md5.bin': existing file size mismatch"));
+        assert!(!logs.contains("redownloading 'wrong_with_md5.bin': existing file hash mismatch"));
+        assert!(logs.contains("redownloading 'same_size_bad_md5.bin': existing file hash mismatch"));
+        assert!(logs.contains("skipped 'same_size_good_md5.bin': already exists; MD5 verified"));
+    }
+
+    #[tokio::test]
+    async fn test_download_actionable_http_status_diagnostics() {
+        let cookies = CookieSource::from_netscape_str("127.0.0.1\tFALSE\t/\tFALSE\t0\tsid\t1\n");
+        let policy = fast_retry_policy(1);
+
+        let cases: [(&str, Option<&CookieSource>, usize, &[&str]); 7] = [
+            ("401 Unauthorized", None, 1, &["401", "-b/--cookies"]),
+            ("401 Unauthorized", Some(&cookies), 1, &["401", "expired"]),
+            ("403 Forbidden", None, 1, &["403", "-b/--cookies"]),
+            ("403 Forbidden", Some(&cookies), 1, &["403", "lending-only"]),
+            (
+                "404 Not Found",
+                None,
+                1,
+                &["404", "not found on archive.org"],
+            ),
+            (
+                "429 Too Many Requests",
+                None,
+                2,
+                &["429", "rate-limited after retries", "retry later"],
+            ),
+            (
+                "503 Service Unavailable",
+                None,
+                2,
+                &["503", "unavailable after retries", "retry later"],
+            ),
+        ];
+
+        for (status_line, cookie_src, response_count, needles) in cases {
+            let responses = (0..response_count)
+                .map(|_| MockResponse::status(status_line, b"err"))
+                .collect();
+            let server = MockServer::start(responses).await;
+            let fx = DownloadFixture::new("http-diag");
+            let err = fx
+                .download_with_policy(&server.url("/f.bin"), "f.bin", None, cookie_src, &policy)
+                .await
+                .unwrap_err();
+            assert_eq!(server.finish().await.len(), response_count);
+            let msg = err.to_string();
+            for needle in needles {
+                assert!(
+                    msg.contains(needle),
+                    "status={status_line} cookies={} missing {needle:?} in {msg:?}",
+                    cookie_src.is_some()
+                );
+            }
         }
     }
 }
