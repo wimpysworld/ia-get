@@ -22,12 +22,12 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::downloader::{ElasticScheduler, ShutdownSignal};
-use crate::ui::palette::{style_accent, style_err, style_ok, Theme};
+use crate::ui::palette::{style_accent, style_ratatui_to_ansi, Theme};
 use crate::ui::render::{
-    compute_viewport_height, format_final_summary, render_completion_line,
-    render_completion_line_to_buf, render_instrument,
+    compute_viewport_height_for_batch, format_final_summary, format_tty_summary,
+    render_completion_line, render_instrument,
 };
-use crate::ui::state::{CompletionRecord, UiEvent, UiState};
+use crate::ui::state::{QueuedFile, UiEvent, UiState};
 
 /// Target UI refresh interval (~30 fps).
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -99,6 +99,8 @@ pub fn is_interactive_stdout() -> bool {
 pub struct UiSessionConfig {
     /// Archive item identifier displayed in the instrument header.
     pub identifier: String,
+    /// Formatted destination directory displayed in the post-run Archival Receipt.
+    pub output_dir: String,
     /// Total number of files scheduled in this batch.
     pub total_files: usize,
     /// Sum of known expected sizes across scheduled files.
@@ -107,6 +109,8 @@ pub struct UiSessionConfig {
     pub limit_rate: Option<u64>,
     /// Number of `<private>` files skipped before the batch began (without cookies).
     pub skipped_private_count: usize,
+    /// Ordered initial queue of files awaiting scheduler permits.
+    pub initial_queue: Vec<QueuedFile>,
 }
 
 /// Cheaply cloneable, non-blocking handle for emitting [`UiEvent`] updates from transfer tasks.
@@ -179,6 +183,13 @@ fn init_state(config: &UiSessionConfig, now: Instant) -> UiState {
         config.limit_rate,
         now,
     );
+    state.on_event(
+        UiEvent::BatchStarted {
+            queue: config.initial_queue.clone(),
+            output_dir: config.output_dir.clone(),
+        },
+        now,
+    );
     if config.skipped_private_count > 0 {
         state.on_event(
             UiEvent::SkippedPrivate {
@@ -205,7 +216,7 @@ async fn run_inline_tty_loop(
         }
     };
 
-    let viewport_height = compute_viewport_height(term_w, term_h);
+    let viewport_height = compute_viewport_height_for_batch(term_w, term_h, config.total_files);
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = match Terminal::with_options(
         backend,
@@ -229,7 +240,6 @@ async fn run_inline_tty_loop(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut finished = false;
-    let mut pending_completions: Vec<CompletionRecord> = Vec::new();
     let mut viewport_top: Option<u16> = None;
 
     // Initial draw so the user sees the instrument immediately.
@@ -246,20 +256,20 @@ async fn run_inline_tty_loop(
                 let now = Instant::now();
                 match maybe_event {
                     Some(ev) => {
-                        if handle_event_for_tty(ev, &mut state, &mut pending_completions, now) {
+                        if handle_event_for_tty(ev, &mut state, now) {
                             finished = true;
                         }
                         while let Ok(next_ev) = rx.try_recv() {
-                            if handle_event_for_tty(next_ev, &mut state, &mut pending_completions, now) {
+                            if handle_event_for_tty(next_ev, &mut state, now) {
                                 finished = true;
                             }
                         }
                     }
                     None => {
+                        state.on_event(UiEvent::Finish, now);
                         finished = true;
                     }
                 }
-                flush_tty_completions(&mut terminal, &mut pending_completions, &theme);
                 if !finished && state.is_dirty() {
                     let _ = terminal.draw(|frame| {
                         viewport_top = Some(frame.area().y);
@@ -288,66 +298,55 @@ async fn run_inline_tty_loop(
     // Drain any events queued just before Finish.
     let now = Instant::now();
     while let Ok(ev) = rx.try_recv() {
-        handle_event_for_tty(ev, &mut state, &mut pending_completions, now);
+        handle_event_for_tty(ev, &mut state, now);
     }
-    flush_tty_completions(&mut terminal, &mut pending_completions, &theme);
+    if state.finished_at.is_none() {
+        state.on_event(UiEvent::Finish, now);
+    }
 
-    // Capture the final viewport origin after any `insert_before` shifts, clear the
-    // transient instrument, and park the cursor at column 0 of `viewport_top` so the
-    // summary prints directly beneath the last completed file with zero blank gap.
+    // Capture the final viewport origin, clear the transient live instrument, and
+    // park the cursor at column 0 of `viewport_top` so the permanent Archival Receipt
+    // replaces the inline box cleanly with zero blank gap or scrollback spam.
+    let mut final_width = term_w;
     let _ = terminal.draw(|frame| {
         viewport_top = Some(frame.area().y);
+        final_width = frame.area().width;
     });
     let _ = terminal.clear();
     drop(terminal);
     drop(cursor_guard);
-    drop(_live_guard);
 
-    let summary = format_final_summary(&state, &theme);
-    let mut stdout = io::stdout().lock();
-    if let Some(top_y) = viewport_top {
-        let _ = queue!(
-            stdout,
-            crossterm::cursor::MoveTo(0, top_y),
-            Clear(ClearType::FromCursorDown)
-        );
+    let receipt_width = crossterm::terminal::size()
+        .map(|(w, _)| w)
+        .ok()
+        .filter(|&w| w > 0)
+        .unwrap_or(final_width);
+    let summary = format_tty_summary(&state, &theme, receipt_width);
+    {
+        let mut stdout = io::stdout().lock();
+        if let Some(top_y) = viewport_top {
+            let _ = queue!(
+                stdout,
+                crossterm::cursor::MoveTo(0, top_y),
+                Clear(ClearType::FromCursorDown)
+            );
+        }
+        let _ = writeln!(stdout, "{summary}");
+        let _ = stdout.flush();
     }
-    let _ = writeln!(stdout, "{summary}");
-    let _ = stdout.flush();
+    drop(_live_guard);
 }
 
-fn handle_event_for_tty(
-    event: UiEvent,
-    state: &mut UiState,
-    pending_completions: &mut Vec<CompletionRecord>,
-    now: Instant,
-) -> bool {
+fn handle_event_for_tty(event: UiEvent, state: &mut UiState, now: Instant) -> bool {
     match event {
         UiEvent::Finish => {
             state.on_event(UiEvent::Finish, now);
             true
         }
-        UiEvent::SlotFinished(record) => {
-            pending_completions.push(record.clone());
-            state.on_event(UiEvent::SlotFinished(record), now);
-            false
-        }
         other => {
             state.on_event(other, now);
             false
         }
-    }
-}
-
-fn flush_tty_completions(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    pending: &mut Vec<CompletionRecord>,
-    theme: &Theme,
-) {
-    for record in pending.drain(..) {
-        let _ = terminal.insert_before(1, |buf| {
-            render_completion_line_to_buf(&record, buf, theme);
-        });
     }
 }
 
@@ -548,7 +547,12 @@ impl StatusSpinner {
         }
         self.stop_animation();
         let glyphs = self.theme.glyphs();
-        println!("{} {message}", style_ok(glyphs.ok, &self.theme));
+        let ok_glyph = style_ratatui_to_ansi(
+            glyphs.ok,
+            self.theme.bold_if_color(self.theme.ok_style()),
+            &self.theme,
+        );
+        println!("{ok_glyph} {message}");
     }
 
     /// Stops the spinner and clears the line without printing a final message.
@@ -568,7 +572,12 @@ impl StatusSpinner {
         }
         self.stop_animation();
         let glyphs = self.theme.glyphs();
-        println!("{} {message}", style_err(glyphs.fail, &self.theme));
+        let fail_glyph = style_ratatui_to_ansi(
+            glyphs.fail,
+            self.theme.bold_if_color(self.theme.err_style()),
+            &self.theme,
+        );
+        println!("{fail_glyph} {message}");
     }
 }
 
@@ -647,7 +656,7 @@ fn clip_ansi_line(input: &str, max_cells: usize, ellipsis: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_support::CapturedLogs;
-    use crate::ui::state::{CompletionKind, SkipReason};
+    use crate::ui::state::{CompletionKind, CompletionRecord, SkipReason};
 
     #[test]
     fn clip_ansi_line_prevents_spinner_wrapping_and_resets_sgr() {
@@ -666,10 +675,12 @@ mod tests {
         let captured = CapturedLogs::new();
         let config = UiSessionConfig {
             identifier: "test-item".to_string(),
+            output_dir: "./downloads".to_string(),
             total_files: 3,
             planned_total_bytes: 300,
             limit_rate: None,
             skipped_private_count: 1,
+            initial_queue: Vec::new(),
         };
         let (handle, driver) = UiDriver::start_plain_with_writer(
             config,

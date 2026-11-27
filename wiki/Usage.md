@@ -115,13 +115,13 @@ ia-get --limit-rate 1024 https://archive.org/download/<identifier>/<path>
 ## Terminal UI and output
 
 When `stdout` is an interactive terminal, `ia-get` draws an inline progress frame without entering the alternate screen.
-The frame shows the item identifier, a permit gauge, a throughput sparkline, active transfer slots, and counts of warnings and failures when non-zero.
+The frame shows the item identifier, completed file progress, a throughput sparkline, active transfer slots with mirror region badges, and counts of warnings and failures when non-zero.
 As each file finishes, `ia-get` writes one permanent completion line above the frame in your native terminal scrollback.
 `ia-get` stays in cooked terminal mode, so `Ctrl+C` and `Ctrl+Z` work natively.
 
 When `stdout` is not a terminal or `TERM=dumb`, `ia-get` skips the inline frame and writes plain text with zero ANSI escape codes.
 When `NO_COLOR` is non-empty, `ia-get` disables all ANSI colour codes.
-Narrow or short terminals hide optional columns (mirror host and sparkline) or collapse the frame to two lines.
+Narrow or short terminals hide optional columns (mirror region and sparkline) or collapse the frame to two lines.
 
 At the end of a batch, `ia-get` clears the inline frame and prints a `Completed:` summary line (or `Interrupted:` after `Ctrl+C`).
 If any item requires follow-up, `ia-get` prints a `Needs attention:` section grouped by category:
