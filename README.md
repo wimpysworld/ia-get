@@ -34,7 +34,7 @@ bin install github.com/wimpysworld/ia-get
 
 - **One URL, whole archive:** `ia-get` downloads every file with its original folders from an archive.org `/details/` link, or one file from a `/download/` link.
 - **Fast and polite automatically:** `ia-get` downloads small and medium files in parallel with zero flags and slows down for large files. It backs off on rate limits to respect the Internet Archive's wishes and [automated access guidelines](https://archive.org/developers/bots.html).
-- **Live terminal UI:** The inline display shows active parallel downloads, a throughput sparkline, mirror hosts, and overall progress. Calm warnings appear at the end, and your terminal scrollback stays intact.
+- **Live terminal UI:** The inline display shows active parallel downloads, a throughput sparkline, regional mirror flags, and overall progress. Calm warnings appear at the end, and your terminal scrollback stays intact.
 - **Preview and cherry-pick:** Run `--list` to inspect every file and size before you download. Use `-f` glob patterns to include or exclude files.
 - **Resume and verify:** Interrupted downloads pick up where they left off, and finished files pass automatic MD5 checks. Run `--check` to verify a local folder without changing a file.
 - **Private items, speed caps, and proxies:** Pass browser cookies with `-b` for login-only items, or cap total speed with `--limit-rate`. `ia-get` follows system proxies automatically and skips private files when you do not pass cookies.
@@ -106,7 +106,7 @@ All commits from October 27, 2023, until the end of December 2023 that were AI c
 Linux Matters listener [Daniel Dewberry](https://github.com/DanielDewberry) submitted a [*"peer review"* of ia-get](https://github.com/wimpysworld/ia-get/issues/7) in January 2024.
 The project had little development activity until May 2025, when I incorporated the improvements Daniel had suggested.
 
-I've picked up some Rust along the way, and some of the refactoring and redesign comes directly from my brain 🧠 and some assistance from GitHub CoPilot using Claude Sonnet 3.7 and Gemini Pro 2.5.
+I picked up some Rust along the way. In May 2025, I broke the crate into dedicated modules with structured error handling, streaming MD5 checks, and graceful interrupts, combining my own edits with GitHub Copilot, Gemini 2.5 Pro, and the Claude 3.7 and 4 model families. In 2026, I added `--list`, `--check`, glob filters, scoped cookies, polite parallel downloads, and multi-platform packaging, then used Gemini 4 Neon to harden transfers and rebuild the terminal interface with Ratatui.
 
 # Documentation and development
 
