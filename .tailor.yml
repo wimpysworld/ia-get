@@ -184,6 +184,49 @@ pages:
   generator: static
   path: pages
   cname: ia-get.wimpys.world
+  links:
+    website: https://wimpys.world/
+    bluesky: https://bsky.app/profile/wimpys.world
+    mastodon: "https://wimpysworld.social/@martin"
+    linkedin: https://linkedin.com/in/martinwimpress
+    discord: https://discord.com/invite/vUsydfP
+    podcast: https://linuxmatters.sh
+    github_sponsors: https://github.com/sponsors/flexiondotorg
+
+social:
+  enabled: true
+  theme: dark
+  og:
+    output: pages/og.png
+    include_preview: true
+    image: pages/demo-still.png
+  readme:
+    header: true
+    preferred_links:
+      - bluesky
+      - mastodon
+      - linkedin
+    community: auto
+    packages:
+      - apt
+      - rpm
+      - pkg
+      - apk
+      - brew
+      - scoop
+      - nix
+    stats: true
+    star_history:
+      enabled: true
+      min_stars: 25
+      min_days: 30
+    sponsors: auto
+    contributors: true
+    demo: true
+    footer: true
+  live:
+    branch: social-assets
+    schedule: "0 4 * * *"
 
 swatches:
   - path: .github/dependabot.yml

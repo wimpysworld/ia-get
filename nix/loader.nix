@@ -21,6 +21,7 @@ builtins.seq pkgs (
         [ ]
     )
     (if builtins.pathExists ./pages.nix then import ./pages.nix { inherit pkgs; } else [ ])
+    (if builtins.pathExists ./og.nix then import ./og.nix { inherit pkgs; } else [ ])
     (if builtins.pathExists ./playwright.nix then import ./playwright.nix { inherit pkgs; } else [ ])
     (if builtins.pathExists ./blender.nix then import ./blender.nix { inherit pkgs; } else [ ])
   ]
