@@ -94,7 +94,7 @@ ia-get --check -o ./downloads https://archive.org/details/<identifier>
 
 <!-- tailor:social-demo:start -->
 <p align="center">
-  <img src="pages/demo.webp" alt="ia-get demo">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/wimpysworld/ia-get/social-assets/demo-dark.svg"><img src="https://raw.githubusercontent.com/wimpysworld/ia-get/social-assets/demo-light.svg" alt="ia-get demo"></picture>
 </p>
 <!-- tailor:social-demo:end -->
 
